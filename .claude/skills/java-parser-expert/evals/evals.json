@@ -1,0 +1,45 @@
+{
+  "skill_name": "java-parser-expert",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm building a JSONata expression evaluator in Java. The grammar has expressions like `$.order.price * (1 + $.tax)`, path expressions like `Account.Order.Product.Price`, and function calls like `$sum(Account.Order.Product.Price)`. I'm trying to decide between ANTLR4 and writing a recursive-descent parser by hand. What are the key trade-offs and which would you recommend for this use case?",
+      "expected_output": "A detailed comparison of ANTLR4 vs hand-written recursive descent for this specific use case, covering: maintainability, error recovery, tooling, performance, and a concrete recommendation with reasoning. Should mention operator precedence handling, JSONata-specific grammar challenges (path expressions, array indexing), and how each approach handles the AST.",
+      "files": [],
+      "assertions": [
+        "Gives a concrete recommendation (not just 'it depends') with reasoning specific to JSONata-like expression languages",
+        "Discusses operator precedence encoding in both approaches",
+        "Mentions ANTLR4 Visitor pattern as natural fit for expression evaluation returning a value",
+        "Addresses path expression parsing as a grammar-design concern",
+        "Covers error recovery trade-offs between the two approaches"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I have this ANTLR4 grammar for arithmetic expressions but I'm getting ambiguity warnings and the operator precedence is wrong — multiplication binds tighter than addition but the grammar doesn't enforce it:\n\n```antlr\ngrammar Expr;\nexpr : expr '+' expr\n     | expr '-' expr\n     | expr '*' expr\n     | expr '/' expr\n     | '(' expr ')'\n     | NUMBER\n     ;\nNUMBER : [0-9]+ ('.' [0-9]*)? ;\nWS : [ \\t\\r\\n]+ -> skip ;\n```\n\nHow do I fix this grammar to get correct precedence and associativity without writing a precedence climbing algorithm?",
+      "expected_output": "A corrected ANTLR4 grammar that uses ANTLR4's rule-ordering mechanism to encode operator precedence (lower alternatives = higher precedence, or alternative labeling with #labels). Should explain WHY ANTLR4's approach works and how to read precedence from grammar structure. May also show the alternative with labeled alternatives and mention associativity annotations.",
+      "files": [],
+      "assertions": [
+        "Provides a corrected working ANTLR4 grammar",
+        "Explains that ANTLR4 resolves ambiguity by rule alternative ordering (first match wins)",
+        "Handles both precedence (multiply before add) and associativity (left-associative)",
+        "Does not suggest rewriting to eliminate left-recursion manually (ANTLR4 handles this)",
+        "Optionally shows labeled alternatives (#addExpr, #mulExpr) for cleaner Visitor dispatch"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm designing the AST node hierarchy for a language that has expressions (literals, binary ops, unary ops, function calls, variable references), statements (assignments, if/else, loops, return), and declarations (function defs, variable declarations with optional type annotations). I'm on Java 17. What node design gives me the cleanest Visitor implementation and the most maintainable code? Show me a skeleton.",
+      "expected_output": "AST node hierarchy using Java 17 sealed interfaces and records. Should show the sealed interface hierarchy (Expr, Stmt, Decl), concrete record types for each node kind, and how pattern matching (switch expressions) enables clean Visitor-style dispatch. Should discuss why records + sealed interfaces beats the classic abstract class hierarchy for this use case.",
+      "files": [],
+      "assertions": [
+        "Uses sealed interfaces and records (Java 17 features)",
+        "Shows at least one complete sealed interface hierarchy (e.g., Expr with several implementors)",
+        "Includes source position (line/column) in nodes for error reporting",
+        "Demonstrates pattern-matching switch or instanceof patterns for visitor dispatch",
+        "Nodes are immutable (records or final fields)",
+        "Discusses separation of CST and AST — not using ANTLR4 ParseTree directly as AST"
+      ]
+    }
+  ]
+}
