@@ -9,10 +9,10 @@ Project structure:
 - Parser which consumes input string containing JSONata expression and generates AST. Implemented in package `org.json_kula.jsonata_jvm.parser`:
   - `Parser` — recursive-descent parser; entry point is `Parser.parse(String expression)`.
   - `ParseException` — checked exception carrying the source position of the error.
-  - `lexer.parser.org.json_kula.jsonata_jvm.Lexer` — hand-written tokenizer; entry point is `Lexer.tokenize(String source)`.
-  - `lexer.parser.org.json_kula.jsonata_jvm.Token` — record(type, value, position).
-  - `lexer.parser.org.json_kula.jsonata_jvm.TokenType` — enum of all JSONata token kinds.
-  - `ast.parser.org.json_kula.jsonata_jvm.AstNode` — sealed interface with all AST node types as nested records plus a two-parameter `Visitor<R,C>` interface and a default `accept(Visitor, C)` dispatch method.
+  - `org.json_kula.jsonata_jvm.parser.lexer.Lexer` — hand-written tokenizer; entry point is `Lexer.tokenize(String source)`.
+  - `org.json_kula.jsonata_jvm.parser.lexer.Token` — record(type, value, position).
+  - `org.json_kula.jsonata_jvm.parser.lexer.TokenType` — enum of all JSONata token kinds.
+  - `org.json_kula.jsonata_jvm.parser.ast.AstNode` — sealed interface with all AST node types as nested records plus a two-parameter `Visitor<R,C>` interface and a default `accept(Visitor, C)` dispatch method.
 - Optimizer to optimize AST. Implemented in package `org.json_kula.jsonata_jvm.optimizer`:
   - `Optimizer` — single-pass, bottom-up tree rewriter; entry point is `Optimizer.optimize(AstNode)`.
   - Rewrites applied: constant folding (arithmetic, string concatenation, comparisons, boolean logic), arithmetic identity/absorption rules (`x+0`, `x*1`, `x*0`, etc.), string identity (`x & ""`), boolean short-circuit identities, conditional folding on literal conditions, unary-minus elimination (including double negation), block unwrapping (single-expression blocks), and `PathExpr` flattening.

@@ -92,10 +92,10 @@ System.out.println(expr.getSourceJsonata());  // → "$sum(items.price)"
 Use the lower-level API to obtain the generated source before compilation:
 
 ```java
-import parser.org.json_kula.jsonata_jvm.Parser;
-import optimizer.org.json_kula.jsonata_jvm.Optimizer;
-import translator.org.json_kula.jsonata_jvm.Translator;
-import ast.parser.org.json_kula.jsonata_jvm.AstNode;
+import org.json_kula.jsonata_jvm.parser.Parser;
+import org.json_kula.jsonata_jvm.optimizer.Optimizer;
+import org.json_kula.jsonata_jvm.translator.Translator;
+import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 
 AstNode ast = Optimizer.optimize(Parser.parse("price * qty"));
 String javaSource = Translator.translate(ast, "com.example.gen", "PriceExpression", "price * qty");
@@ -107,7 +107,7 @@ System.out.println(javaSource);
 If you have previously generated and saved a Java source string, compile it directly without re-parsing:
 
 ```java
-import loader.org.json_kula.jsonata_jvm.JsonataExpressionLoader;
+import org.json_kula.jsonata_jvm.loader.JsonataExpressionLoader;
 
 JsonataExpressionLoader loader = new JsonataExpressionLoader();
 JsonataExpression expr = loader.load(javaSource);
