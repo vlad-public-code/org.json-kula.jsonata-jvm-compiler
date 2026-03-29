@@ -629,13 +629,103 @@ public final class JsonataRuntime {
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws JsonataEvaluationException {
         if (missing(arr)) return init;
-        // fn takes accumulated value via a pair array [acc, elem]
-        JsonNode acc = init;
-        Iterable<JsonNode> items = arr.isArray() ? arr : List.of(arr);
-        for (JsonNode elem : items) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(elem));
+        // fn receives a pair array [acc, elem]; the translator unpacks this for
+        // multi-param lambdas via genUnpackLambda.
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        // When no initial value is given (MISSING), use the first element as the
+        // accumulator and start folding from the second element — matching JSONata
+        // semantics for $reduce without initialValue.
+        int start;
+        JsonNode acc;
+        if (missing(init)) {
+            if (items.isEmpty()) return MISSING;
+            acc   = items.get(0);
+            start = 1;
+        } else {
+            acc   = init;
+            start = 0;
+        }
+        for (int i = start; i < items.size(); i++) {
+            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)));
         }
         return acc;
+    }
+
+    /**
+     * Variant of {@link #fn_map} for multi-param lambdas.
+     * Passes {@code [value, index, array]} to the lambda so that the
+     * {@code $i} and {@code $a} parameters are available.
+     */
+    public static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (missing(arr)) return MISSING;
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < items.size(); i++) {
+            result.add(fn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr)));
+        }
+        return result;
+    }
+
+    /**
+     * Variant of {@link #fn_filter} for multi-param lambdas.
+     * Passes {@code [value, index, array]} to the predicate.
+     */
+    public static JsonNode fn_filter_indexed(JsonNode arr, JsonataLambda predicate)
+            throws JsonataEvaluationException {
+        if (missing(arr)) return MISSING;
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < items.size(); i++) {
+            if (isTruthy(predicate.apply(
+                    NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr))))
+                result.add(items.get(i));
+        }
+        return unwrap(result);
+    }
+
+    /**
+     * Returns the single element of {@code arr} for which {@code predicate}
+     * returns truthy. Throws if zero or more than one element matches.
+     */
+    public static JsonNode fn_single(JsonNode arr, JsonataLambda predicate)
+            throws JsonataEvaluationException {
+        if (missing(arr))
+            throw new JsonataEvaluationException("$single: no match found");
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        JsonNode found = null;
+        for (JsonNode item : items) {
+            if (isTruthy(predicate.apply(item))) {
+                if (found != null)
+                    throw new JsonataEvaluationException("$single: more than one match found");
+                found = item;
+            }
+        }
+        if (found == null)
+            throw new JsonataEvaluationException("$single: no match found");
+        return found;
+    }
+
+    /**
+     * Returns an object containing only the key/value pairs of {@code obj}
+     * for which {@code fn} returns truthy.
+     * Passes {@code [value, key, object]} to the lambda so both
+     * {@code $v} and {@code $k} parameters are available.
+     */
+    public static JsonNode fn_sift(JsonNode obj, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (missing(obj) || !obj.isObject()) return MISSING;
+        ObjectNode result = NF.objectNode();
+        for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
+            Map.Entry<String, JsonNode> e = it.next();
+            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            if (isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
+        }
+        return result;
     }
 
     // =========================================================================
@@ -754,7 +844,7 @@ public final class JsonataRuntime {
     }
 
     /** Converts a {@link JsonNode} to a String representation. */
-    private static String toText(JsonNode n) throws JsonataEvaluationException {
+    static String toText(JsonNode n) throws JsonataEvaluationException {
         if (n.isTextual()) return n.textValue();
         if (n.isNumber()) {
             double v = n.doubleValue();
@@ -891,7 +981,9 @@ public final class JsonataRuntime {
         if (b != null) {
             JsonataBoundFunction fn = b.getFunction(name);
             if (fn != null) {
-                return fn.apply(new JsonataFunctionArguments(Arrays.asList(args)));
+                List<JsonNode> coerced = FunctionSignature.coerce(
+                        fn.getFunctionSignature(), Arrays.asList(args));
+                return fn.apply(new JsonataFunctionArguments(coerced));
             }
         }
         return MISSING;

@@ -76,7 +76,106 @@ try {
 
 ## JSONata language features
 
-The library implements all JSONata features except external variable binding and functional binding (coming soon!)
+The library implements all JSONata language features except:
+- a function as an argument of a bound function
+- a function as a bound value
+
+## Bindings
+
+Bindings let you inject named values and Java functions into an expression at runtime. Inside the expression they are referenced as `$name` (values) or called as `$name(args...)` (functions).
+
+### Per-evaluation bindings
+
+Pass a `JsonataBindings` instance as the second argument to `evaluate()` to supply values or functions for a single call:
+
+```java
+JsonataExpression expr = factory.compile("$taxRate * subtotal");
+
+JsonataBindings bindings = new JsonataBindings()
+        .bindValue("taxRate", mapper.convertValue(0.2, JsonNode.class));
+
+JsonNode result = expr.evaluate("{\"subtotal\": 500}", bindings);  // → 100.0
+```
+
+Per-evaluation bindings are not stored on the expression instance and do not affect other calls.
+
+### Permanent bindings
+
+Use `assign()` and `registerFunction()` to attach bindings permanently to an expression instance. They apply to every subsequent `evaluate()` call.
+
+```java
+JsonataExpression expr = factory.compile("$round2($taxRate * subtotal)");
+
+// Permanent value
+expr.assign("taxRate", mapper.convertValue(0.2, JsonNode.class));
+
+// Permanent function
+expr.registerFunction("round2", new JsonataBoundFunction() {
+    @Override
+    public String getFunctionSignature() { return "<n:n>"; }
+
+    @Override
+    public JsonNode apply(JsonataFunctionArguments args) {
+        double v = args.get(0).doubleValue();
+        return mapper.convertValue(Math.round(v * 100.0) / 100.0, JsonNode.class);
+    }
+});
+
+JsonNode r1 = expr.evaluate("{\"subtotal\": 100}");  // → 20.0
+JsonNode r2 = expr.evaluate("{\"subtotal\": 333}");  // → 66.6
+```
+
+Permanent bindings are isolated per instance — assigning to one `JsonataExpression` does not affect any other.
+
+### Precedence
+
+When both a permanent binding and a per-evaluation binding exist for the same name, the **per-evaluation binding wins**.
+
+### Implementing JsonataBoundFunction
+
+`JsonataBoundFunction` has two methods:
+
+| Method | Purpose |
+|---|---|
+| `String getFunctionSignature()` | Describes the expected argument types and return type (see signature syntax below) |
+| `JsonNode apply(JsonataFunctionArguments args)` | Executes the function; may throw `JsonataEvaluationException` |
+
+`JsonataFunctionArguments` wraps the argument list. Accessing an out-of-range index returns `MissingNode` rather than throwing.
+
+### Function signature syntax
+
+The signature has the form `<params:return>` where `params` is a sequence of type symbols and `return` is a single type symbol.
+
+**Simple types**
+
+| Symbol | Type |
+|---|---|
+| `b` | Boolean |
+| `n` | number |
+| `s` | string |
+| `l` | null |
+
+**Complex types**
+
+| Symbol | Type |
+|---|---|
+| `a` | array |
+| `o` | object |
+| `j` | any JSON type — equivalent to `(bnsloa)` |
+| `u` | Boolean, number, string, or null — equivalent to `(bnsl)` |
+| `(sao)` | union: string, array, or object |
+
+**Parametrised array types**: `a<s>` (array of strings), `a<x>` (array of any type).
+
+**Option modifiers** appended to a type symbol:
+
+| Modifier | Meaning |
+|---|---|
+| `+` | One or more arguments of this type (variadic) |
+| `?` | Optional argument |
+| `-` | Use the context value ("focus") if the argument is missing |
+
+Example: `$length` has signature `<s-:n>` — accepts a string (using context as focus if omitted) and returns a number.
 
 ## Advanced usage
 
@@ -123,12 +222,12 @@ The benchmark compiles one expression once, then runs 100 000 evaluations agains
 
 Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
 
-| Metric | jsonata-jvm-compiler | JSONata4Java |
-|---|---|---|
-| Compilation | 1 641 ms | 284 ms |
-| 100 000 evaluations | 5 223 ms | 44 767 ms |
-| Throughput | **~19 000 eval/s** | ~2 200 eval/s |
-| **Speedup** | **8.6× faster** | baseline |
+| Metric | jsonata-jvm-compiler | JSONata4Java  |
+|---|----------------------|---------------|
+| Compilation | 807 ms               | 147 ms        |
+| 100 000 evaluations | 4 079 ms             | 32 627 ms     |
+| Throughput | **~24 500 eval/s**   | ~3 100 eval/s |
+| **Speedup** | **7.9× faster**      | baseline      |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates.
 
@@ -178,7 +277,7 @@ expression string
 
 | Package | Contents |
 |---|---|
-| `org.json_kula.jsonata_jvm` | Public API: `JsonataExpression`, `JsonataExpressionFactory`, `JsonataCompilationException`, `JsonataEvaluationException` |
+| `org.json_kula.jsonata_jvm` | Public API: `JsonataExpression`, `JsonataExpressionFactory`, `JsonataBindings`, `JsonataBoundFunction`, `JsonataFunctionArguments`, `JsonataCompilationException`, `JsonataEvaluationException` |
 | `org.json_kula.jsonata_jvm.parser` | `Parser`, `ParseException` |
 | `org.json_kula.jsonata_jvm.parser.lexer` | `Lexer`, `Token`, `TokenType` |
 | `org.json_kula.jsonata_jvm.parser.ast` | `AstNode` sealed interface with all node types and `Visitor` |
