@@ -2,11 +2,15 @@ package org.json_kula.jsonata_jvm.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
+import org.json_kula.jsonata_jvm.JsonataBindings;
+import org.json_kula.jsonata_jvm.JsonataBoundFunction;
 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
+import org.json_kula.jsonata_jvm.JsonataFunctionArguments;
 
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Runtime support library for generated JSONata expression classes.
@@ -625,13 +629,103 @@ public final class JsonataRuntime {
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws JsonataEvaluationException {
         if (missing(arr)) return init;
-        // fn takes accumulated value via a pair array [acc, elem]
-        JsonNode acc = init;
-        Iterable<JsonNode> items = arr.isArray() ? arr : List.of(arr);
-        for (JsonNode elem : items) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(elem));
+        // fn receives a pair array [acc, elem]; the translator unpacks this for
+        // multi-param lambdas via genUnpackLambda.
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        // When no initial value is given (MISSING), use the first element as the
+        // accumulator and start folding from the second element — matching JSONata
+        // semantics for $reduce without initialValue.
+        int start;
+        JsonNode acc;
+        if (missing(init)) {
+            if (items.isEmpty()) return MISSING;
+            acc   = items.get(0);
+            start = 1;
+        } else {
+            acc   = init;
+            start = 0;
+        }
+        for (int i = start; i < items.size(); i++) {
+            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)));
         }
         return acc;
+    }
+
+    /**
+     * Variant of {@link #fn_map} for multi-param lambdas.
+     * Passes {@code [value, index, array]} to the lambda so that the
+     * {@code $i} and {@code $a} parameters are available.
+     */
+    public static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (missing(arr)) return MISSING;
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < items.size(); i++) {
+            result.add(fn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr)));
+        }
+        return result;
+    }
+
+    /**
+     * Variant of {@link #fn_filter} for multi-param lambdas.
+     * Passes {@code [value, index, array]} to the predicate.
+     */
+    public static JsonNode fn_filter_indexed(JsonNode arr, JsonataLambda predicate)
+            throws JsonataEvaluationException {
+        if (missing(arr)) return MISSING;
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < items.size(); i++) {
+            if (isTruthy(predicate.apply(
+                    NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr))))
+                result.add(items.get(i));
+        }
+        return unwrap(result);
+    }
+
+    /**
+     * Returns the single element of {@code arr} for which {@code predicate}
+     * returns truthy. Throws if zero or more than one element matches.
+     */
+    public static JsonNode fn_single(JsonNode arr, JsonataLambda predicate)
+            throws JsonataEvaluationException {
+        if (missing(arr))
+            throw new JsonataEvaluationException("$single: no match found");
+        List<JsonNode> items = new ArrayList<>();
+        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        JsonNode found = null;
+        for (JsonNode item : items) {
+            if (isTruthy(predicate.apply(item))) {
+                if (found != null)
+                    throw new JsonataEvaluationException("$single: more than one match found");
+                found = item;
+            }
+        }
+        if (found == null)
+            throw new JsonataEvaluationException("$single: no match found");
+        return found;
+    }
+
+    /**
+     * Returns an object containing only the key/value pairs of {@code obj}
+     * for which {@code fn} returns truthy.
+     * Passes {@code [value, key, object]} to the lambda so both
+     * {@code $v} and {@code $k} parameters are available.
+     */
+    public static JsonNode fn_sift(JsonNode obj, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (missing(obj) || !obj.isObject()) return MISSING;
+        ObjectNode result = NF.objectNode();
+        for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
+            Map.Entry<String, JsonNode> e = it.next();
+            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            if (isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
+        }
+        return result;
     }
 
     // =========================================================================
@@ -750,7 +844,7 @@ public final class JsonataRuntime {
     }
 
     /** Converts a {@link JsonNode} to a String representation. */
-    private static String toText(JsonNode n) throws JsonataEvaluationException {
+    static String toText(JsonNode n) throws JsonataEvaluationException {
         if (n.isTextual()) return n.textValue();
         if (n.isNumber()) {
             double v = n.doubleValue();
@@ -816,5 +910,82 @@ public final class JsonataRuntime {
         JsonataLambda fn = LAMBDA_REGISTRY.get(key);
         if (fn == null) throw new JsonataEvaluationException("Lambda expired or not found: " + key);
         return fn;
+    }
+
+    // =========================================================================
+    // Bindings support
+    // =========================================================================
+
+    /**
+     * Holds the active {@link JsonataBindings} for the current evaluation thread.
+     * Set by {@link #beginEvaluation} and cleared by {@link #endEvaluation}.
+     */
+    private static final ThreadLocal<JsonataBindings> CURRENT_BINDINGS = new ThreadLocal<>();
+
+    /**
+     * Merges permanent bindings from the generated class with per-evaluation
+     * bindings and installs the result as the active bindings for this thread.
+     *
+     * <p>Must be paired with a {@link #endEvaluation()} call in a finally block.
+     *
+     * @param permanentValues    permanent named values registered on the expression instance
+     * @param permanentFunctions permanent named functions registered on the expression instance
+     * @param perEval            per-evaluation bindings, or {@code null}
+     */
+    public static void beginEvaluation(Map<String, JsonNode> permanentValues,
+                                       Map<String, JsonataBoundFunction> permanentFunctions,
+                                       JsonataBindings perEval) {
+        JsonataBindings merged = new JsonataBindings();
+        permanentValues.forEach(merged::bindValue);
+        permanentFunctions.forEach(merged::bindFunction);
+        if (perEval != null) {
+            // Per-evaluation bindings override permanent ones.
+            perEval.getValues().forEach(merged::bindValue);
+            perEval.getFunctions().forEach(merged::bindFunction);
+        }
+        CURRENT_BINDINGS.set(merged);
+    }
+
+    /**
+     * Clears the active bindings for the current thread.
+     * Always call this in a {@code finally} block after {@link #beginEvaluation}.
+     */
+    public static void endEvaluation() {
+        CURRENT_BINDINGS.remove();
+    }
+
+    /**
+     * Resolves a named value from the active bindings.
+     *
+     * @param name the variable name (without the leading {@code $})
+     * @return the bound {@link JsonNode}, or {@link #MISSING} if not bound
+     */
+    public static JsonNode resolveBinding(String name) {
+        JsonataBindings b = CURRENT_BINDINGS.get();
+        if (b == null) return MISSING;
+        JsonNode v = b.getValue(name);
+        return v != null ? v : MISSING;
+    }
+
+    /**
+     * Calls a named function from the active bindings.
+     *
+     * @param name the function name (without the leading {@code $})
+     * @param args the arguments to pass
+     * @return the function result, or {@link #MISSING} if no function is bound to {@code name}
+     * @throws JsonataEvaluationException if the function throws
+     */
+    public static JsonNode callBoundFunction(String name, JsonNode[] args)
+            throws JsonataEvaluationException {
+        JsonataBindings b = CURRENT_BINDINGS.get();
+        if (b != null) {
+            JsonataBoundFunction fn = b.getFunction(name);
+            if (fn != null) {
+                List<JsonNode> coerced = FunctionSignature.coerce(
+                        fn.getFunctionSignature(), Arrays.asList(args));
+                return fn.apply(new JsonataFunctionArguments(coerced));
+            }
+        }
+        return MISSING;
     }
 }

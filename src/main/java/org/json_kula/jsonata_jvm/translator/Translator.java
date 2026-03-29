@@ -5,8 +5,12 @@ import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode.*;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Translates a JSONata AST into a complete, compilable Java 21 source file.
@@ -93,7 +97,36 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         int counter;
         final StringBuilder helperMethods = new StringBuilder();
 
+        /**
+         * Stack of locally-bound variable name sets, one entry per active scope
+         * (block or lambda body). Used by {@link #isLocal} to decide whether a
+         * {@code VariableRef} should resolve to a Java local variable or to a
+         * runtime binding lookup.
+         */
+        private final Deque<Set<String>> scopeStack = new ArrayDeque<>();
+
         int nextId() { return counter++; }
+
+        /** Opens a new lexical scope. */
+        void pushScope() { scopeStack.push(new HashSet<>()); }
+
+        /** Closes the innermost lexical scope. */
+        void popScope() { if (!scopeStack.isEmpty()) scopeStack.pop(); }
+
+        /** Adds {@code name} to the innermost open scope. */
+        void addLocalVar(String name) { if (!scopeStack.isEmpty()) scopeStack.peek().add(name); }
+
+        /**
+         * Returns {@code true} if {@code name} is defined in any active lexical
+         * scope, meaning it should be emitted as a Java local variable reference
+         * rather than a runtime binding lookup.
+         */
+        boolean isLocal(String name) {
+            for (Set<String> scope : scopeStack) {
+                if (scope.contains(name)) return true;
+            }
+            return false;
+        }
     }
 
     /**
@@ -157,7 +190,12 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
 
     @Override
     public String visitVariableRef(VariableRef n, GenCtx ctx) {
-        return "$" + n.name();
+        // If the variable was defined by a VariableBinding in an enclosing block or
+        // lambda parameter list, it exists as a Java local variable.  Otherwise it
+        // must be resolved from the active runtime bindings.
+        return ctx.state.isLocal(n.name())
+                ? "$" + n.name()
+                : "resolveBinding(\"" + n.name() + "\")";
     }
 
     @Override
@@ -345,6 +383,8 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             case "filter"   -> genHigherOrder("fn_filter", n, args, ctx, 0, 1);
             case "each"     -> genHigherOrder("fn_each",   n, args, ctx, 0, 1);
             case "reduce"   -> genReduce(n, args, ctx);
+            case "single"   -> genHigherOrder("fn_single", n, args, ctx, 0, 1);
+            case "sift"     -> genSift(n, args, ctx);
             // Object
             case "keys"     -> "fn_keys("   + oneArg(args) + ")";
             case "values"   -> "fn_values(" + oneArg(args) + ")";
@@ -360,10 +400,15 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
 
     /** Generates a call to a user-defined variable function: {@code $myFn(args)}. */
     private String genUserFunctionCall(FunctionCall n, List<String> args, GenCtx ctx) {
-        // fn is stored in variable $name; call its apply method via the runtime wrapper.
-        String arrayLiteral = args.isEmpty() ? "new JsonNode[0]"
+        String arrayLiteral = args.isEmpty()
+                ? "new JsonNode[0]"
                 : "new JsonNode[]{" + String.join(", ", args) + "}";
-        return "fn_apply($" + n.name() + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
+        if (ctx.state.isLocal(n.name())) {
+            // Lambda stored in a local variable — call via the runtime lambda wrapper.
+            return "fn_apply($" + n.name() + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
+        }
+        // Not a local — look up as an externally bound function.
+        return "callBoundFunction(\"" + n.name() + "\", " + arrayLiteral + ")";
     }
 
     /**
@@ -382,6 +427,12 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
      * If it is a Lambda, the body is inlined as a Java lambda expression so that
      * outer-scope variables (including {@code __root} and {@code __ctx}) are
      * captured correctly.
+     *
+     * <p>When the lambda has more than one parameter <em>and</em> the runtime
+     * method is {@code fn_map} or {@code fn_filter}, the indexed variant is used
+     * instead ({@code fn_map_indexed} / {@code fn_filter_indexed}), which passes a
+     * {@code [value, index, array]} tuple.  A tuple-unpacking helper is generated
+     * via {@link #genUnpackLambda} so each named parameter receives the right value.
      */
     private String genHigherOrder(String rtMethod,
                                    FunctionCall n, List<String> args,
@@ -389,6 +440,15 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
                                    int seqArgIndex, int fnArgIndex) {
         String seqExpr = args.get(seqArgIndex);
         AstNode fnArg  = n.args().get(fnArgIndex);
+
+        if (fnArg instanceof Lambda lam && lam.params().size() > 1
+                && (rtMethod.equals("fn_map") || rtMethod.equals("fn_filter"))) {
+            // Multi-param $map / $filter: use the indexed variant that passes
+            // [value, index, array] so $i and $a parameters are available.
+            String indexedMethod = rtMethod.equals("fn_map") ? "fn_map_indexed" : "fn_filter_indexed";
+            String lambdaExpr = genUnpackLambda(lam, ctx, 3);
+            return indexedMethod + "(" + seqExpr + ", " + lambdaExpr + ")";
+        }
 
         String lambdaExpr;
         if (fnArg instanceof Lambda lam) {
@@ -401,14 +461,91 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         return rtMethod + "(" + seqExpr + ", " + lambdaExpr + ")";
     }
 
-    /** Generates {@code fn_reduce(arr, fn, init)}. */
+    /**
+     * Generates {@code fn_reduce(arr, fn, init)}.
+     *
+     * <p>The runtime passes a {@code [acc, elem]} tuple to the lambda on each
+     * iteration.  For a single-param lambda the whole tuple is passed as-is (the
+     * caller rarely cares about the signature detail in that case).  For a
+     * multi-param lambda a tuple-unpacking helper is generated so {@code $prev}
+     * and {@code $curr} — or however the parameters are named — each receive their
+     * correct value.
+     */
     private String genReduce(FunctionCall n, List<String> args, GenCtx ctx) {
         String arrExpr  = args.get(0);
         AstNode fnArg   = n.args().get(1);
         String initExpr = args.size() > 2 ? args.get(2) : "MISSING";
-        String lambdaExpr = (fnArg instanceof Lambda lam)
-                ? inlineLambda(lam, ctx) : fnArg.accept(this, ctx);
+        String lambdaExpr;
+        if (fnArg instanceof Lambda lam && lam.params().size() > 1) {
+            // Unpack the [acc, elem] pair into named parameters.
+            lambdaExpr = genUnpackLambda(lam, ctx, 2);
+        } else {
+            lambdaExpr = (fnArg instanceof Lambda lam)
+                    ? inlineLambda(lam, ctx) : fnArg.accept(this, ctx);
+        }
         return "fn_reduce(" + arrExpr + ", " + lambdaExpr + ", " + initExpr + ")";
+    }
+
+    /**
+     * Generates {@code fn_sift(obj, fn)} where the lambda receives a
+     * {@code [value, key, object]} tuple.  A tuple-unpacking helper is always
+     * generated for Lambda arguments so that named parameters like {@code $v}
+     * and {@code $k} resolve to the correct tuple slots.
+     */
+    private String genSift(FunctionCall n, List<String> args, GenCtx ctx) {
+        String objExpr = args.get(0);
+        AstNode fnArg  = n.args().get(1);
+        String lambdaExpr;
+        if (fnArg instanceof Lambda lam) {
+            lambdaExpr = genUnpackLambda(lam, ctx, 3);
+        } else {
+            String fnExpr = fnArg.accept(this, ctx);
+            lambdaExpr = "(__elem -> fn_apply(" + fnExpr + ", __elem))";
+        }
+        return "fn_sift(" + objExpr + ", " + lambdaExpr + ")";
+    }
+
+    /**
+     * Generates a private helper method that receives a tuple {@link
+     * com.fasterxml.jackson.databind.node.ArrayNode ArrayNode} and unpacks its
+     * elements into the lambda's named parameters before evaluating the body.
+     * Used for multi-param lambdas passed to higher-order functions where the
+     * runtime packs multiple values (e.g. {@code [value, index, array]}) into a
+     * single {@code JsonNode}.
+     *
+     * @param lam      the lambda whose parameters and body to use
+     * @param ctx      code-gen context
+     * @param tupleLen number of tuple positions the runtime provides
+     * @return a {@code this::methodName} reference that can be used as a
+     *         {@link org.json_kula.jsonata_jvm.runtime.JsonataLambda}
+     */
+    private String genUnpackLambda(Lambda lam, GenCtx ctx, int tupleLen) {
+        int id = ctx.state.nextId();
+        String methodName = "__unpack" + id;
+
+        ctx.state.pushScope();
+        lam.params().forEach(ctx.state::addLocalVar);
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("\nprivate JsonNode ").append(methodName)
+              .append("(JsonNode __el) throws JsonataEvaluationException {\n");
+            for (int i = 0; i < lam.params().size(); i++) {
+                if (i < tupleLen) {
+                    sb.append("    JsonNode $").append(lam.params().get(i))
+                      .append(" = __el.get(").append(i).append(");\n");
+                } else {
+                    sb.append("    JsonNode $").append(lam.params().get(i)).append(" = MISSING;\n");
+                }
+            }
+            String bodyExpr = lam.body().accept(this, ctx.withCtx("__el"));
+            sb.append("    return ").append(bodyExpr).append(";\n");
+            sb.append("}\n");
+            ctx.state.helperMethods.append(sb);
+        } finally {
+            ctx.state.popScope();
+        }
+
+        return "this::" + methodName;
     }
 
     /**
@@ -426,8 +563,14 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         // the call site readable, and inline for single-param.
         if (lam.params().size() == 1) {
             String p1 = "$" + lam.params().get(0);
-            String bodyExpr = lam.body().accept(this, ctx);
-            return "(" + p1 + " -> " + bodyExpr + ")";
+            ctx.state.pushScope();
+            ctx.state.addLocalVar(lam.params().get(0));
+            try {
+                String bodyExpr = lam.body().accept(this, ctx);
+                return "(" + p1 + " -> " + bodyExpr + ")";
+            } finally {
+                ctx.state.popScope();
+            }
         }
         // Multi-param: generate a helper method.
         return genLambdaMethod(lam, ctx);
@@ -449,22 +592,28 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         int id = ctx.state.nextId();
         String methodName = "__lambda" + id;
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("\nprivate JsonNode ").append(methodName)
-          .append("(JsonNode __el) throws JsonataEvaluationException {\n");
-        // Bind each parameter; extras default to MISSING.
-        for (int i = 0; i < lam.params().size(); i++) {
-            // Single-arg interface: we only receive __el; map subsequent params to MISSING.
-            if (i == 0) {
-                sb.append("    JsonNode $").append(lam.params().get(i)).append(" = __el;\n");
-            } else {
-                sb.append("    JsonNode $").append(lam.params().get(i)).append(" = MISSING;\n");
+        ctx.state.pushScope();
+        lam.params().forEach(ctx.state::addLocalVar);
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("\nprivate JsonNode ").append(methodName)
+              .append("(JsonNode __el) throws JsonataEvaluationException {\n");
+            // Bind each parameter; extras default to MISSING.
+            for (int i = 0; i < lam.params().size(); i++) {
+                // Single-arg interface: we only receive __el; map subsequent params to MISSING.
+                if (i == 0) {
+                    sb.append("    JsonNode $").append(lam.params().get(i)).append(" = __el;\n");
+                } else {
+                    sb.append("    JsonNode $").append(lam.params().get(i)).append(" = MISSING;\n");
+                }
             }
+            String bodyExpr = lam.body().accept(this, ctx.withCtx("__el"));
+            sb.append("    return ").append(bodyExpr).append(";\n");
+            sb.append("}\n");
+            ctx.state.helperMethods.append(sb);
+        } finally {
+            ctx.state.popScope();
         }
-        String bodyExpr = lam.body().accept(this, ctx.withCtx("__el"));
-        sb.append("    return ").append(bodyExpr).append(";\n");
-        sb.append("}\n");
-        ctx.state.helperMethods.append(sb);
 
         return "this::" + methodName;
     }
@@ -490,33 +639,45 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         int id = ctx.state.nextId();
         String methodName = "__block" + id;
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("\nprivate JsonNode ").append(methodName)
-          .append("(JsonNode ").append(ctx.rootVar).append(", JsonNode ").append(ctx.ctxVar)
-          .append(") throws JsonataEvaluationException {\n");
+        // Open a scope for variables defined in this block so that VariableRef
+        // nodes within the same block resolve to Java local variables rather than
+        // runtime binding lookups.
+        ctx.state.pushScope();
+        for (AstNode expr : exprs) {
+            if (expr instanceof VariableBinding vb) ctx.state.addLocalVar(vb.name());
+        }
 
-        for (int i = 0; i < exprs.size() - 1; i++) {
-            AstNode expr = exprs.get(i);
-            if (expr instanceof VariableBinding vb) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("\nprivate JsonNode ").append(methodName)
+              .append("(JsonNode ").append(ctx.rootVar).append(", JsonNode ").append(ctx.ctxVar)
+              .append(") throws JsonataEvaluationException {\n");
+
+            for (int i = 0; i < exprs.size() - 1; i++) {
+                AstNode expr = exprs.get(i);
+                if (expr instanceof VariableBinding vb) {
+                    String valExpr = vb.value().accept(this, ctx);
+                    sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+                } else {
+                    // Side-effect expression: evaluate but discard.
+                    sb.append("    ").append(expr.accept(this, ctx)).append(";\n");
+                }
+            }
+
+            AstNode last = exprs.get(exprs.size() - 1);
+            if (last instanceof VariableBinding vb) {
                 String valExpr = vb.value().accept(this, ctx);
                 sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+                sb.append("    return $").append(vb.name()).append(";\n");
             } else {
-                // Side-effect expression: evaluate but discard.
-                sb.append("    ").append(expr.accept(this, ctx)).append(";\n");
+                sb.append("    return ").append(last.accept(this, ctx)).append(";\n");
             }
-        }
 
-        AstNode last = exprs.get(exprs.size() - 1);
-        if (last instanceof VariableBinding vb) {
-            String valExpr = vb.value().accept(this, ctx);
-            sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
-            sb.append("    return $").append(vb.name()).append(";\n");
-        } else {
-            sb.append("    return ").append(last.accept(this, ctx)).append(";\n");
+            sb.append("}\n");
+            ctx.state.helperMethods.append(sb);
+        } finally {
+            ctx.state.popScope();
         }
-
-        sb.append("}\n");
-        ctx.state.helperMethods.append(sb);
 
         return methodName + "(" + ctx.rootVar + ", " + ctx.ctxVar + ")";
     }
@@ -648,21 +809,39 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
                 + "import com.fasterxml.jackson.databind.JsonNode;\n"
                 + "import com.fasterxml.jackson.databind.ObjectMapper;\n"
                 + "import com.fasterxml.jackson.databind.node.MissingNode;\n"
+                + "import org.json_kula.jsonata_jvm.JsonataBindings;\n"
+                + "import org.json_kula.jsonata_jvm.JsonataBoundFunction;\n"
                 + "import org.json_kula.jsonata_jvm.JsonataEvaluationException;\n"
                 + "import org.json_kula.jsonata_jvm.JsonataExpression;\n"
                 + "import org.json_kula.jsonata_jvm.runtime.JsonataLambda;\n"
                 + "import static org.json_kula.jsonata_jvm.runtime.JsonataRuntime.*;\n"
+                + "import java.util.concurrent.ConcurrentHashMap;\n"
                 + "\n"
                 + "public final class " + className + " implements JsonataExpression {\n"
                 + "\n"
                 + "    private static final ObjectMapper __MAPPER = new ObjectMapper();\n"
                 + "    private static final String __SOURCE = " + javaString(sourceExpression) + ";\n"
                 + "\n"
+                + "    private final ConcurrentHashMap<String, JsonNode> __values = new ConcurrentHashMap<>();\n"
+                + "    private final ConcurrentHashMap<String, JsonataBoundFunction> __functions = new ConcurrentHashMap<>();\n"
+                + "\n"
                 + "    @Override\n"
                 + "    public String getSourceJsonata() { return __SOURCE; }\n"
                 + "\n"
                 + "    @Override\n"
+                + "    public void assign(String __name, JsonNode __value) { __values.put(__name, __value); }\n"
+                + "\n"
+                + "    @Override\n"
+                + "    public void registerFunction(String __name, JsonataBoundFunction __fn) { __functions.put(__name, __fn); }\n"
+                + "\n"
+                + "    @Override\n"
                 + "    public JsonNode evaluate(String __json) throws JsonataEvaluationException {\n"
+                + "        return evaluate(__json, null);\n"
+                + "    }\n"
+                + "\n"
+                + "    @Override\n"
+                + "    public JsonNode evaluate(String __json, JsonataBindings __perEval) throws JsonataEvaluationException {\n"
+                + "        beginEvaluation(__values, __functions, __perEval);\n"
                 + "        try {\n"
                 + "            final JsonNode __root = __MAPPER.readTree(__json);\n"
                 + "            if (__root == null) throw new JsonataEvaluationException(\"Invalid JSON\");\n"
@@ -673,6 +852,8 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
                 + "            throw __e;\n"
                 + "        } catch (Exception __e) {\n"
                 + "            throw new JsonataEvaluationException(__e.getMessage(), __e);\n"
+                + "        } finally {\n"
+                + "            endEvaluation();\n"
                 + "        }\n"
                 + "    }\n"
                 + helperMethods

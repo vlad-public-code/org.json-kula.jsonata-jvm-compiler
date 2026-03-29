@@ -5,14 +5,14 @@ Stack:
 - Java 21
 - Jackson to operate with JSON.
 
-Project structure:
+# Project structure
 - Parser which consumes input string containing JSONata expression and generates AST. Implemented in package `org.json_kula.jsonata_jvm.parser`:
   - `Parser` — recursive-descent parser; entry point is `Parser.parse(String expression)`.
   - `ParseException` — checked exception carrying the source position of the error.
-  - `lexer.parser.org.json_kula.jsonata_jvm.Lexer` — hand-written tokenizer; entry point is `Lexer.tokenize(String source)`.
-  - `lexer.parser.org.json_kula.jsonata_jvm.Token` — record(type, value, position).
-  - `lexer.parser.org.json_kula.jsonata_jvm.TokenType` — enum of all JSONata token kinds.
-  - `ast.parser.org.json_kula.jsonata_jvm.AstNode` — sealed interface with all AST node types as nested records plus a two-parameter `Visitor<R,C>` interface and a default `accept(Visitor, C)` dispatch method.
+  - `org.json_kula.jsonata_jvm.parser.lexer.Lexer` — hand-written tokenizer; entry point is `Lexer.tokenize(String source)`.
+  - `org.json_kula.jsonata_jvm.parser.lexer.Token` — record(type, value, position).
+  - `org.json_kula.jsonata_jvm.parser.lexer.TokenType` — enum of all JSONata token kinds.
+  - `org.json_kula.jsonata_jvm.parser.ast.AstNode` — sealed interface with all AST node types as nested records plus a two-parameter `Visitor<R,C>` interface and a default `accept(Visitor, C)` dispatch method.
 - Optimizer to optimize AST. Implemented in package `org.json_kula.jsonata_jvm.optimizer`:
   - `Optimizer` — single-pass, bottom-up tree rewriter; entry point is `Optimizer.optimize(AstNode)`.
   - Rewrites applied: constant folding (arithmetic, string concatenation, comparisons, boolean logic), arithmetic identity/absorption rules (`x+0`, `x*1`, `x*0`, etc.), string identity (`x & ""`), boolean short-circuit identities, conditional folding on literal conditions, unary-minus elimination (including double negation), block unwrapping (single-expression blocks), and `PathExpr` flattening.
@@ -31,3 +31,63 @@ Generated classes:
 - `JsonataExpression.evaluate(String json)` takes a JSON document as a string and returns a Jackson `JsonNode`.
 - Evaluation failures (invalid JSON input or runtime errors) are reported via `JsonataEvaluationException`.
 - Instances of `org.json_kula.jsonata_jvm.JsonataExpression` should be thread-safe.
+
+# Bindings
+The library implements functionality of bindings to extend the API. A client code can bind:
+1. A value. It's an immutable instance of JsonNode.
+2. A function. In this library you cannot bind a JavaScript function, but you can bind a Java class implementing 
+interface org.json_kula.jsonata_jvm.JsonataBoundFunction.
+
+There are two options how to bind values and functions.
+1. Per an execution of JsonataExpression.evaluate().
+2. Permanently for an instance of JsonataExpression.
+
+To bind values and functions per an execution use a method 
+org.json_kula.jsonata_jvm.JsonataExpression.evaluate(String, JsonataBindings) and pass the bindings in the second argument.
+JsonataBindings is a class containing named values and named functions.
+Named values is a map where key is a string and value is JsonNode.
+Named functions is a map where key is a string and value is instance of JsonataBoundFunction.
+
+To bind a value permanently use a method JsonataExpression.assign(String name, JsonNode value).
+To bind a function permanently use a method JsonataExpression.registerFunction(String name, JsonataBoundFunction fnc).
+
+Interface JsonataBoundFunction contains two methods:
+1. getFunctionSignature() which returns a string describing arguments types.
+2. apply(JsonataFunctionArguments) which returns JsonNode representing a result of the function.
+
+Function signature syntax
+A function signature is a string of the form <params:return>. params is a sequence of type symbols, each one representing an input argument's type. return is a single type symbol representing the return value type.
+Type symbols work as follows:
+Simple types:
+b - Boolean
+n - number
+s - string
+l - null
+
+Complex types:
+a - array
+o - object
+
+Type "f" which is for "function" is not supported in this library.
+
+Union types:
+(sao) - string, array or object
+(o) - same as o
+u - equivalent to (bnsl) i.e. Boolean, number, string or null
+j - any JSON type. Equivalent to (bnsloa) i.e. Boolean, number, string, null, object or array, but not function
+
+Type "x" which is for "bnsloaf" is not supported in this library.
+
+Parametrised types:
+a<s> - array of strings
+a<x> - array of values of any type
+
+Each type symbol may also have options applied.
++ - one or more arguments of this type
+    E.g. $zip has signature <a+>; it accepts one array, or two arrays, or three arrays, or...
+    ? - optional argument
+    E.g. $join has signature <a<s>s?:s>; it accepts an array of strings and an optional joiner string which defaults to the empty string. It returns a string.
+- - if this argument is missing, use the context value ("focus").
+    E.g. $length has signature <s-:n>; it can be called as $length(OrderID) (one argument) but equivalently as OrderID.$length().
+
+Class JsonataFunctionArguments represents a list of JsonNode.
