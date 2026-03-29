@@ -15,11 +15,25 @@ import org.json_kula.jsonata_jvm.translator.Translator;
  * JsonataExpression expr = new CompiledSumExpression();
  * JsonNode result = expr.evaluate("{\"orders\": [{\"price\": 10}, {\"price\": 20}]}");
  * }</pre>
+ *
+ * <h2>Bindings</h2>
+ * <p>External values and Java functions can be injected into the expression:
+ * <ul>
+ *   <li>Per-evaluation: pass a {@link JsonataBindings} instance to
+ *       {@link #evaluate(String, JsonataBindings)}.</li>
+ *   <li>Permanent (for the lifetime of this instance): call
+ *       {@link #assign(String, JsonNode)} or
+ *       {@link #registerFunction(String, JsonataBoundFunction)}.</li>
+ * </ul>
+ * Permanent bindings are merged with per-evaluation bindings at call time;
+ * per-evaluation values take precedence when both define the same name.
  */
 public interface JsonataExpression {
 
     /**
-     * Evaluates this JSONata expression against the given JSON input.
+     * Evaluates this JSONata expression against the given JSON input with no
+     * additional bindings beyond the permanent ones already registered on this
+     * instance.
      *
      * @param json the input JSON document as a string
      * @return the result of the expression, or {@code NullNode} if the expression
@@ -28,6 +42,49 @@ public interface JsonataExpression {
      *         expression cannot be applied to the given input
      */
     JsonNode evaluate(String json) throws JsonataEvaluationException;
+
+    /**
+     * Evaluates this JSONata expression against the given JSON input, making
+     * the supplied per-evaluation bindings available as {@code $name} references
+     * inside the expression.
+     *
+     * <p>Per-evaluation bindings are merged with any permanent bindings already
+     * registered via {@link #assign} / {@link #registerFunction}; per-evaluation
+     * values win when both define the same name.
+     *
+     * @param json     the input JSON document as a string
+     * @param bindings per-evaluation named values and functions, or {@code null}
+     *                 to use only permanent bindings
+     * @return the result of the expression, or {@code NullNode} if the expression
+     *         yields no match
+     * @throws JsonataEvaluationException if the input is not valid JSON or the
+     *         expression cannot be applied to the given input
+     */
+    default JsonNode evaluate(String json, JsonataBindings bindings) throws JsonataEvaluationException {
+        return evaluate(json);
+    }
+
+    /**
+     * Permanently binds {@code value} to {@code name} for all future evaluations
+     * of this instance.
+     *
+     * <p>The value is accessible inside the expression as {@code $name}.
+     *
+     * @param name  the variable name (without the leading {@code $})
+     * @param value the immutable {@link JsonNode} to bind
+     */
+    default void assign(String name, JsonNode value) {}
+
+    /**
+     * Permanently registers a Java function under {@code name} for all future
+     * evaluations of this instance.
+     *
+     * <p>The function is callable inside the expression as {@code $name(args...)}.
+     *
+     * @param name the function name (without the leading {@code $})
+     * @param fnc  the {@link JsonataBoundFunction} implementation
+     */
+    default void registerFunction(String name, JsonataBoundFunction fnc) {}
 
     /**
      * Returns the original JSONata expression string that was compiled into this
