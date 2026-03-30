@@ -112,6 +112,19 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Forces {@code node} to be an array, wrapping it in a single-element
+     * array if it is not already one.  Implements the {@code expr[]} operator.
+     * MISSING propagates as MISSING (nothing to wrap).
+     */
+    public static JsonNode forceArray(JsonNode node) {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) return node;
+        ArrayNode result = NF.arrayNode();
+        result.add(node);
+        return result;
+    }
+
+    /**
      * Filters {@code seq} by {@code predicate}, preserving elements for which
      * the predicate returns a truthy value.
      */

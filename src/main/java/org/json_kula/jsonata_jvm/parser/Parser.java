@@ -265,9 +265,9 @@ public final class Parser {
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
-            // Empty [] — means "ensure array" — treat as predicate with wildcard
+            // Empty [] — force-array operator: wraps the result in an array
             consume(RBRACKET);
-            return new PredicateExpr(source, new WildcardStep());
+            return new ForceArray(source);
         }
         // Range expression inside brackets: [from..to]
         AstNode inner = parseExpression();

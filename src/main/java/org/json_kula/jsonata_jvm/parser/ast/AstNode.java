@@ -41,7 +41,8 @@ public sealed interface AstNode permits
         AstNode.SortExpr,
         AstNode.GroupByExpr,
         AstNode.ChainExpr,
-        AstNode.TransformExpr {
+        AstNode.TransformExpr,
+        AstNode.ForceArray {
 
     // =========================================================================
     // Literals
@@ -291,6 +292,18 @@ public sealed interface AstNode permits
     record TransformExpr(AstNode source, AstNode pattern, AstNode update) implements AstNode {}
 
     /**
+     * The force-array postfix operator {@code expr[]}.
+     *
+     * <p>Forces the result of the path expression to be an array even when
+     * only one value was selected.  Stands in contrast to JSONata's normal
+     * singleton-collapsing behaviour where a one-element sequence is
+     * returned as a bare value.
+     *
+     * @param source the expression whose result must be an array
+     */
+    record ForceArray(AstNode source) implements AstNode {}
+
+    /**
      * Marks an expression that was written inside explicit parentheses in the source.
      *
      * <p>Parentheses are normally transparent (they don't change runtime semantics),
@@ -351,6 +364,7 @@ public sealed interface AstNode permits
         R visitChainExpr(ChainExpr node, C ctx);
         R visitTransformExpr(TransformExpr node, C ctx);
         R visitParenthesized(Parenthesized node, C ctx);
+        R visitForceArray(ForceArray node, C ctx);
     }
 
     /**
@@ -392,6 +406,7 @@ public sealed interface AstNode permits
             case ChainExpr      n -> visitor.visitChainExpr(n, ctx);
             case TransformExpr  n -> visitor.visitTransformExpr(n, ctx);
             case Parenthesized  n -> visitor.visitParenthesized(n, ctx);
+            case ForceArray     n -> visitor.visitForceArray(n, ctx);
         };
     }
 }

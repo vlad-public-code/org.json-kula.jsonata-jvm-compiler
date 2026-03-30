@@ -254,6 +254,12 @@ public final class Optimizer {
         }
 
         @Override
+        public AstNode visitForceArray(ForceArray n, Void c) {
+            AstNode source = rewrite(n.source());
+            return source == n.source() ? n : new ForceArray(source);
+        }
+
+        @Override
         public AstNode visitTransformExpr(TransformExpr n, Void c) {
             AstNode source  = rewrite(n.source());
             AstNode pattern = rewrite(n.pattern());

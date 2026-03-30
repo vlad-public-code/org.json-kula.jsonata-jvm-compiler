@@ -220,13 +220,24 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
     @Override
     public String visitPathExpr(PathExpr n, GenCtx ctx) {
         List<AstNode> steps = n.steps();
+        // Check whether the first step is a ForceArray marker.
+        // If so, use its inner source as the actual first step and wrap the
+        // final result in forceArray() to prevent singleton collapsing.
+        AstNode firstStep = steps.get(0);
+        boolean forceArr = firstStep instanceof ForceArray;
+        if (forceArr) firstStep = ((ForceArray) firstStep).source();
         // First step uses the outer context.
-        String expr = stepExpr(steps.get(0), ctx);
+        String expr = stepExpr(firstStep, ctx);
         // Each subsequent step receives the accumulated result as its input.
         for (int i = 1; i < steps.size(); i++) {
             expr = applyStep(expr, steps.get(i), ctx);
         }
-        return expr;
+        return forceArr ? "forceArray(" + expr + ")" : expr;
+    }
+
+    @Override
+    public String visitForceArray(ForceArray n, GenCtx ctx) {
+        return "forceArray(" + n.source().accept(this, ctx) + ")";
     }
 
     /** Generates an expression for the FIRST step in a path (uses {@code ctx.ctxVar}). */
