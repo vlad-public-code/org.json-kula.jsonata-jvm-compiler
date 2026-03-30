@@ -283,6 +283,20 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
                 String idxExpr = as.index().accept(this, ctx.withCtx(tmpCtx));
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
             }
+            case ArrayConstructor ac -> {
+                // e.g. Email.[address] — map per element, collect without flattening
+                // so each constructed array stays as a single element of the result.
+                String tmpCtx  = "__c" + ctx.state.nextId();
+                String stepExpr = ac.accept(this, ctx.withCtx(tmpCtx));
+                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+            }
+            case ObjectConstructor oc -> {
+                // e.g. Phone.{type: number} — map per element, collect without flattening
+                // so each constructed object stays as a single element of the result.
+                String tmpCtx  = "__c" + ctx.state.nextId();
+                String stepExpr = oc.accept(this, ctx.withCtx(tmpCtx));
+                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+            }
             default -> {
                 // For any other step type: rebind __ctx to prevExpr inside a lambda.
                 String tmpCtx = "__c" + ctx.state.nextId();
@@ -797,8 +811,15 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         sb.append("        JsonNode __val = ").append(valExpr).append(";\n");
         sb.append("        if (__result.has(__key)) {\n");
         sb.append("            JsonNode __existing = __result.get(__key);\n");
-        sb.append("            if (__existing.isArray()) { ((com.fasterxml.jackson.databind.node.ArrayNode)__existing).add(__val); }\n");
-        sb.append("            else { __result.set(__key, com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode().add(__existing).add(__val)); }\n");
+        sb.append("            com.fasterxml.jackson.databind.node.ArrayNode __arr;\n");
+        sb.append("            if (__existing.isArray()) {\n");
+        sb.append("                __arr = (com.fasterxml.jackson.databind.node.ArrayNode) __existing;\n");
+        sb.append("            } else {\n");
+        sb.append("                __arr = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode().add(__existing);\n");
+        sb.append("                __result.set(__key, __arr);\n");
+        sb.append("            }\n");
+        // Flatten the new value into the accumulator, matching appendToSequence semantics.
+        sb.append("            if (__val.isArray()) { __val.forEach(__arr::add); } else { __arr.add(__val); }\n");
         sb.append("        } else { __result.set(__key, __val); }\n");
         sb.append("    }\n");
         sb.append("    return __result;\n");

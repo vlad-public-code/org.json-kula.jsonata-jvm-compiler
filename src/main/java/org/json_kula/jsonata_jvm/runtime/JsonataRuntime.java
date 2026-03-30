@@ -208,6 +208,27 @@ public final class JsonataRuntime {
         return fn.apply(node);
     }
 
+    /**
+     * Maps {@code fn} over every element of a sequence and collects results
+     * <em>without</em> flattening. Used for array and object constructor steps
+     * inside path expressions (e.g. the {@code [addr]} or {@code {key:val}} step
+     * in {@code Email.[address]} / {@code Phone.{type: number}}) where each
+     * constructed value must be kept as a single element of the output sequence.
+     */
+    public static JsonNode mapConstructorStep(JsonNode node, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : node) {
+                JsonNode val = fn.apply(elem);
+                if (!val.isMissingNode()) result.add(val); // direct add — no flattening
+            }
+            return unwrap(result);
+        }
+        return fn.apply(node);
+    }
+
     // =========================================================================
     // Arithmetic
     // =========================================================================
@@ -352,7 +373,14 @@ public final class JsonataRuntime {
     /** Creates a JSON array from the given elements, skipping missing values. */
     public static JsonNode array(JsonNode... elements) {
         ArrayNode result = NF.arrayNode();
-        for (JsonNode e : elements) if (!missing(e)) result.add(e);
+        for (JsonNode e : elements) {
+            if (missing(e)) continue;
+            // A sequence/array value contributes its elements individually so that
+            // [Phone.number] collects all numbers into a flat array rather than
+            // wrapping the whole sequence in a nested array.
+            if (e.isArray()) e.forEach(result::add);
+            else result.add(e);
+        }
         return result;
     }
 
