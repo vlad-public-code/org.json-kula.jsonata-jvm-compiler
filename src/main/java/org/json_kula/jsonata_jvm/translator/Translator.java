@@ -253,14 +253,24 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             case ContextRef cr     -> prevExpr;
             case RootRef rr        -> ctx.rootVar;
             case PredicateExpr pe  -> {
+                // Range subscript: arr[[from..to]] — select elements by index range
+                if (pe.predicate() instanceof RangeExpr re) {
+                    String fromExpr = re.from().accept(this, ctx);
+                    String toExpr   = re.to().accept(this, ctx);
+                    yield "rangeSubscript(" + prevExpr + ", " + fromExpr + ", " + toExpr + ")";
+                }
                 // source is prevExpr; predicate uses a fresh element variable
                 String elemVar = "__el" + ctx.state.nextId();
                 String predExpr = pe.predicate().accept(this, ctx.withCtx(elemVar));
                 yield "filter(" + prevExpr + ", " + elemVar + " -> " + predExpr + ")";
             }
             case ArraySubscript as -> {
-                String idxExpr = as.index().accept(this, ctx);
-                yield "subscript(" + prevExpr + ", " + idxExpr + ")";
+                // Path-step subscript — apply per-element via mapStep so that
+                // a.b[n] maps [n] over each element rather than the whole sequence.
+                String tmpCtx  = "__c" + ctx.state.nextId();
+                String srcExpr = as.source().accept(this, ctx.withCtx(tmpCtx));
+                String idxExpr = as.index().accept(this, ctx.withCtx(tmpCtx));
+                yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
             }
             default -> {
                 // For any other step type: rebind __ctx to prevExpr inside a lambda.
@@ -273,7 +283,13 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
 
     @Override
     public String visitPredicateExpr(PredicateExpr n, GenCtx ctx) {
-        String srcExpr  = n.source().accept(this, ctx);
+        String srcExpr = n.source().accept(this, ctx);
+        // Range subscript: arr[[from..to]] — select elements by index range
+        if (n.predicate() instanceof RangeExpr re) {
+            String fromExpr = re.from().accept(this, ctx);
+            String toExpr   = re.to().accept(this, ctx);
+            return "rangeSubscript(" + srcExpr + ", " + fromExpr + ", " + toExpr + ")";
+        }
         String elemVar  = "__el" + ctx.state.nextId();
         String predExpr = n.predicate().accept(this, ctx.withCtx(elemVar));
         return "filter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
@@ -281,9 +297,18 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
 
     @Override
     public String visitArraySubscript(ArraySubscript n, GenCtx ctx) {
+        // Direct (non-path-step) subscript — applies to the whole array/sequence.
+        // Used for arr[n], $[n], (expr)[n], etc.
         String srcExpr = n.source().accept(this, ctx);
         String idxExpr = n.index().accept(this, ctx);
         return "subscript(" + srcExpr + ", " + idxExpr + ")";
+    }
+
+    @Override
+    public String visitParenthesized(Parenthesized n, GenCtx ctx) {
+        // Parentheses are transparent at the expression level; they only affect
+        // subscript binding, which is handled at parse time via this wrapper node.
+        return n.inner().accept(this, ctx);
     }
 
     // =========================================================================

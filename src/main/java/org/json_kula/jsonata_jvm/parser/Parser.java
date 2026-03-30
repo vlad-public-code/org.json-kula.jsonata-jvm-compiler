@@ -279,6 +279,16 @@ public final class Parser {
         }
         consume(RBRACKET);
         if (inner instanceof NumberLiteral) {
+            // a.b[n] — fold the subscript into the last path step so it is
+            // applied per-element when the path maps over a sequence.
+            // (a.b)[n] has source=Parenthesized and is NOT folded; the subscript
+            // is applied to the whole collected result instead.
+            if (source instanceof PathExpr pe) {
+                List<AstNode> steps = new ArrayList<>(pe.steps());
+                AstNode lastStep = steps.remove(steps.size() - 1);
+                steps.add(new ArraySubscript(lastStep, inner));
+                return new PathExpr(steps);
+            }
             return new ArraySubscript(source, inner);
         }
         return new PredicateExpr(source, inner);
@@ -401,7 +411,10 @@ public final class Parser {
             exprs.add(parseExpression());
         }
         consume(RPAREN);
-        return exprs.size() == 1 ? exprs.get(0) : new Block(exprs);
+        // Wrap in Parenthesized so that a following subscript [n] knows to apply
+        // to the whole collected result rather than per path-step element.
+        AstNode inner = exprs.size() == 1 ? exprs.get(0) : new Block(exprs);
+        return new Parenthesized(inner);
     }
 
     // [elem, elem, ...] — range is handled inside parsePrimary via LBRACKET

@@ -243,6 +243,17 @@ public final class Optimizer {
         }
 
         @Override
+        public AstNode visitParenthesized(Parenthesized n, Void c) {
+            // The Parenthesized wrapper only exists to suppress path-step subscript
+            // folding during parsing.  Once parsing is done the AST structure itself
+            // encodes the distinction: a folded subscript lives *inside* the PathExpr
+            // steps, while a parenthesised subscript wraps the PathExpr with a plain
+            // ArraySubscript.  The wrapper can therefore be stripped here so that
+            // constant-folding and other rewrites see through it normally.
+            return rewrite(n.inner());
+        }
+
+        @Override
         public AstNode visitTransformExpr(TransformExpr n, Void c) {
             AstNode source  = rewrite(n.source());
             AstNode pattern = rewrite(n.pattern());

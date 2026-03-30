@@ -145,12 +145,53 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Returns a sub-array containing elements at indices {@code from} through
+     * {@code to} (inclusive, zero-based, negatives count from end).
+     * Used for the {@code arr[[from..to]]} range-subscript syntax.
+     */
+    public static JsonNode rangeSubscript(JsonNode seq, JsonNode from, JsonNode to)
+            throws JsonataEvaluationException {
+        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (!seq.isArray()) return MISSING;
+        int f = (int) toNumber(from);
+        int t = (int) toNumber(to);
+        int size = seq.size();
+        int actualF = f < 0 ? size + f : f;
+        int actualT = t < 0 ? size + t : t;
+        ArrayNode result = NF.arrayNode();
+        for (int i = Math.max(0, actualF); i <= Math.min(size - 1, actualT); i++) {
+            result.add(seq.get(i));
+        }
+        return unwrap(result);
+    }
+
+    /**
      * Applies {@code fn} with the element as the new context. Used by the
      * translator for complex path steps where context must be rebound.
      */
     public static JsonNode applyStep(JsonNode node, JsonataLambda fn)
             throws JsonataEvaluationException {
         if (node == null || node.isMissingNode()) return MISSING;
+        return fn.apply(node);
+    }
+
+    /**
+     * Maps {@code fn} over every element of a sequence, collecting non-missing
+     * results. Used by the translator for subscript steps inside path expressions
+     * (e.g. the {@code [n]} in {@code a.b[n]}) where the subscript must be
+     * applied per-element rather than to the whole collected sequence.
+     */
+    public static JsonNode mapStep(JsonNode node, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : node) {
+                JsonNode val = fn.apply(elem);
+                if (!val.isMissingNode()) appendToSequence(result, val);
+            }
+            return unwrap(result);
+        }
         return fn.apply(node);
     }
 

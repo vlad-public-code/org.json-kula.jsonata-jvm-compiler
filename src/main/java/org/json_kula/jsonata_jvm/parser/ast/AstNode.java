@@ -29,6 +29,7 @@ public sealed interface AstNode permits
         AstNode.PathExpr,
         AstNode.PredicateExpr,
         AstNode.ArraySubscript,
+        AstNode.Parenthesized,
         AstNode.BinaryOp,
         AstNode.UnaryMinus,
         AstNode.FunctionCall,
@@ -289,6 +290,23 @@ public sealed interface AstNode permits
      */
     record TransformExpr(AstNode source, AstNode pattern, AstNode update) implements AstNode {}
 
+    /**
+     * Marks an expression that was written inside explicit parentheses in the source.
+     *
+     * <p>Parentheses are normally transparent (they don't change runtime semantics),
+     * but they <em>do</em> affect how a following subscript {@code [n]} is applied:
+     * <ul>
+     *   <li>{@code a.b[n]} — subscript applied per-element (bound to step {@code b}).</li>
+     *   <li>{@code (a.b)[n]} — subscript applied to the whole collected sequence.</li>
+     * </ul>
+     * Wrapping the inner expression in this node lets the parser record that the
+     * expression was parenthesised so that {@code parseSubscriptOrPredicate} can
+     * choose the correct binding strategy.
+     *
+     * @param inner the wrapped expression
+     */
+    record Parenthesized(AstNode inner) implements AstNode {}
+
     // =========================================================================
     // Visitor
     // =========================================================================
@@ -332,6 +350,7 @@ public sealed interface AstNode permits
         R visitGroupByExpr(GroupByExpr node, C ctx);
         R visitChainExpr(ChainExpr node, C ctx);
         R visitTransformExpr(TransformExpr node, C ctx);
+        R visitParenthesized(Parenthesized node, C ctx);
     }
 
     /**
@@ -372,6 +391,7 @@ public sealed interface AstNode permits
             case GroupByExpr    n -> visitor.visitGroupByExpr(n, ctx);
             case ChainExpr      n -> visitor.visitChainExpr(n, ctx);
             case TransformExpr  n -> visitor.visitTransformExpr(n, ctx);
+            case Parenthesized  n -> visitor.visitParenthesized(n, ctx);
         };
     }
 }
