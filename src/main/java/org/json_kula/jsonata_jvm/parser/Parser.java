@@ -355,6 +355,12 @@ public final class Parser {
             case TRUE           -> { cursor++; yield new BooleanLiteral(true); }
             case FALSE          -> { cursor++; yield new BooleanLiteral(false); }
             case NULL           -> { cursor++; yield new NullLiteral(); }
+            case REGEX          -> {
+                cursor++;
+                int sep = t.value().lastIndexOf('/');
+                yield new RegexLiteral(t.value().substring(0, sep),
+                                       t.value().substring(sep + 1));
+            }
             case DOLLAR_DOLLAR  -> { cursor++; yield new RootRef(); }
             case DOLLAR         -> { cursor++; yield new ContextRef(); }
             case VARIABLE       -> parseVariableOrFunctionCall();

@@ -10,6 +10,7 @@ public enum TokenType {
     TRUE,           // true
     FALSE,          // false
     NULL,           // null
+    REGEX,          // /pattern/flags
 
     // References
     DOLLAR,         // $   (context value / root in function params)

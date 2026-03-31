@@ -18,6 +18,7 @@ public sealed interface AstNode permits
         AstNode.NumberLiteral,
         AstNode.BooleanLiteral,
         AstNode.NullLiteral,
+        AstNode.RegexLiteral,
         AstNode.ContextRef,
         AstNode.RootRef,
         AstNode.VariableRef,
@@ -63,6 +64,14 @@ public sealed interface AstNode permits
 
     /** The literal {@code null}. */
     record NullLiteral() implements AstNode {}
+
+    /**
+     * A regex literal, e.g. {@code /foo/i}.
+     *
+     * @param pattern the regex pattern string (without the surrounding {@code /})
+     * @param flags   the flags string (e.g. {@code "i"}, {@code "im"}, or {@code ""})
+     */
+    record RegexLiteral(String pattern, String flags) implements AstNode {}
 
     // =========================================================================
     // References
@@ -372,6 +381,7 @@ public sealed interface AstNode permits
         R visitNumberLiteral(NumberLiteral node, C ctx);
         R visitBooleanLiteral(BooleanLiteral node, C ctx);
         R visitNullLiteral(NullLiteral node, C ctx);
+        R visitRegexLiteral(RegexLiteral node, C ctx);
         R visitContextRef(ContextRef node, C ctx);
         R visitRootRef(RootRef node, C ctx);
         R visitVariableRef(VariableRef node, C ctx);
@@ -418,6 +428,7 @@ public sealed interface AstNode permits
             case NumberLiteral  n -> visitor.visitNumberLiteral(n, ctx);
             case BooleanLiteral n -> visitor.visitBooleanLiteral(n, ctx);
             case NullLiteral    n -> visitor.visitNullLiteral(n, ctx);
+            case RegexLiteral   n -> visitor.visitRegexLiteral(n, ctx);
             case ContextRef     n -> visitor.visitContextRef(n, ctx);
             case RootRef        n -> visitor.visitRootRef(n, ctx);
             case VariableRef    n -> visitor.visitVariableRef(n, ctx);

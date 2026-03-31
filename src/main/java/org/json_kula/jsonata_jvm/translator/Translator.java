@@ -258,6 +258,11 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
     }
 
     @Override
+    public String visitRegexLiteral(RegexLiteral n, GenCtx ctx) {
+        return "regexNode(" + javaString(n.pattern()) + ", " + javaString(n.flags()) + ")";
+    }
+
+    @Override
     public String visitContextRef(ContextRef n, GenCtx ctx) {
         return ctx.ctxVar;
     }
@@ -560,7 +565,15 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             case "substringBefore" -> "fn_substringBefore(" + args.get(0) + ", " + args.get(1) + ")";
             case "substringAfter"  -> "fn_substringAfter("  + args.get(0) + ", " + args.get(1) + ")";
             case "contains"        -> "fn_contains(" + args.get(0) + ", " + args.get(1) + ")";
-            case "split"           -> "fn_split("   + args.get(0) + ", " + args.get(1) + ")";
+            case "split"   -> args.size() == 2
+                    ? "fn_split(" + args.get(0) + ", " + args.get(1) + ")"
+                    : "fn_split(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
+            case "match"   -> args.size() == 2
+                    ? "fn_match(" + args.get(0) + ", " + args.get(1) + ")"
+                    : "fn_match(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
+            case "replace" -> args.size() == 3
+                    ? "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")"
+                    : "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ", " + args.get(3) + ")";
             case "join"            -> args.size() == 1
                     ? "fn_join(" + args.get(0) + ", MISSING)"
                     : "fn_join(" + args.get(0) + ", " + args.get(1) + ")";

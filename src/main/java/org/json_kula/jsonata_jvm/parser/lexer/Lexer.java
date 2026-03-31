@@ -19,6 +19,7 @@ import java.util.Map;
  *   <li>Numbers: integer, decimal, and scientific notation</li>
  *   <li>Keywords: {@code true}, {@code false}, {@code null}, {@code and}, {@code or},
  *       {@code in}, {@code not}</li>
+ *   <li>Regex literals: {@code /pattern/flags}</li>
  * </ul>
  *
  * <p>Backtick-quoted names are emitted as {@link TokenType#IDENTIFIER} with the raw
@@ -38,6 +39,8 @@ public final class Lexer {
 
     private final String src;
     private int pos;
+    /** Type of the last meaningful (non-whitespace, non-comment) token emitted. */
+    private TokenType lastToken = null;
 
     private Lexer(String src) {
         this.src = src;
@@ -70,7 +73,7 @@ public final class Lexer {
             Token token = switch (c) {
                 case '+' -> { pos++; yield Token.of(TokenType.PLUS, start); }
                 case '-' -> { pos++; yield Token.of(TokenType.MINUS, start); }
-                case '/' -> { pos++; yield Token.of(TokenType.SLASH, start); }
+                case '/' -> { yield lexSlashOrRegex(start); }
                 case '%' -> { pos++; yield Token.of(TokenType.PERCENT, start); }
                 case '&' -> { pos++; yield Token.of(TokenType.AMPERSAND, start); }
                 case '?' -> { yield lexQuestion(start); }
@@ -104,6 +107,7 @@ public final class Lexer {
                 }
             };
             tokens.add(token);
+            lastToken = token.type();
         }
         tokens.add(Token.of(TokenType.EOF, pos));
         return List.copyOf(tokens);
@@ -199,6 +203,89 @@ public final class Lexer {
             return Token.of(TokenType.DOLLAR, start);
         }
         return Token.of(TokenType.VARIABLE, name, start);
+    }
+
+    // -------------------------------------------------------------------------
+    // Slash: division or regex literal
+    // -------------------------------------------------------------------------
+
+    /**
+     * Decides whether {@code /} starts a regex literal or is an arithmetic
+     * division operator, based on the type of the last emitted token.
+     *
+     * <p>A {@code /} is treated as <em>division</em> only when it follows a
+     * value-producing token: a literal ({@code NUMBER}, {@code STRING},
+     * {@code TRUE}, {@code FALSE}, {@code NULL}), a closing bracket/paren
+     * ({@code RPAREN}, {@code RBRACKET}, {@code RBRACE}), a variable
+     * ({@code VARIABLE}, {@code DOLLAR}, {@code DOLLAR_DOLLAR}), or a bare
+     * identifier ({@code IDENTIFIER}). In all other positions (start of
+     * expression, after an operator, after an opening bracket) a {@code /}
+     * begins a regex literal.
+     */
+    private Token lexSlashOrRegex(int start) throws ParseException {
+        if (lastToken != null && isDivisionContext(lastToken)) {
+            pos++;
+            return Token.of(TokenType.SLASH, start);
+        }
+        return lexRegex(start);
+    }
+
+    private static boolean isDivisionContext(TokenType t) {
+        return switch (t) {
+            case NUMBER, STRING, TRUE, FALSE, NULL,
+                 RPAREN, RBRACKET, RBRACE,
+                 VARIABLE, DOLLAR, DOLLAR_DOLLAR, IDENTIFIER -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Lexes a regex literal {@code /pattern/flags}.
+     * The token value is {@code "pattern/flags"} (the enclosing slashes are
+     * consumed but not included; the separator slash before flags is kept as a
+     * delimiter so the pattern and flags can be recovered with
+     * {@code value.lastIndexOf('/')}).
+     */
+    private Token lexRegex(int start) throws ParseException {
+        pos++; // consume opening '/'
+        StringBuilder pattern = new StringBuilder();
+        boolean inCharClass = false;
+        while (pos < src.length()) {
+            char c = src.charAt(pos);
+            if (c == '[') {
+                inCharClass = true;
+                pattern.append(c);
+                pos++;
+            } else if (c == ']') {
+                inCharClass = false;
+                pattern.append(c);
+                pos++;
+            } else if (c == '\\' && pos + 1 < src.length()) {
+                pattern.append(c).append(src.charAt(pos + 1));
+                pos += 2;
+            } else if (c == '/' && !inCharClass) {
+                pos++; // consume closing '/'
+                break;
+            } else if (c == '\n' || c == '\r') {
+                throw new ParseException("Unterminated regex literal", start);
+            } else {
+                pattern.append(c);
+                pos++;
+            }
+        }
+        // Collect flags — JSONata supports 'i' (case-insensitive) and 'm' (multiline)
+        StringBuilder flags = new StringBuilder();
+        while (pos < src.length()) {
+            char f = src.charAt(pos);
+            if (f == 'i' || f == 'm') {
+                flags.append(f);
+                pos++;
+            } else {
+                break;
+            }
+        }
+        // Value encodes pattern and flags separated by '/': "pat/flags"
+        return Token.of(TokenType.REGEX, pattern + "/" + flags, start);
     }
 
     // -------------------------------------------------------------------------

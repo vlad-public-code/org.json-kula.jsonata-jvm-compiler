@@ -70,6 +70,7 @@ public final class Optimizer {
         @Override public AstNode visitNumberLiteral(NumberLiteral n, Void c)   { return n; }
         @Override public AstNode visitBooleanLiteral(BooleanLiteral n, Void c) { return n; }
         @Override public AstNode visitNullLiteral(NullLiteral n, Void c)       { return n; }
+        @Override public AstNode visitRegexLiteral(RegexLiteral n, Void c)     { return n; }
         @Override public AstNode visitContextRef(ContextRef n, Void c)         { return n; }
         @Override public AstNode visitRootRef(RootRef n, Void c)               { return n; }
         @Override public AstNode visitVariableRef(VariableRef n, Void c)       { return n; }

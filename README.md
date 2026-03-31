@@ -16,6 +16,7 @@ This library is currently under active development and has not been thoroughly t
 |---|---|
 | Java | 21 (JDK — a JRE is not sufficient; the in-memory compiler needs `javac`) |
 | Jackson Databind | 2.18+ |
+| [joni](https://github.com/jruby/joni) | 2.2+ (Oniguruma regex engine — used for `/pattern/flags` literals and the `$match`, `$replace`, `$split`, `$contains` functions) |
 
 ## Getting started
 
