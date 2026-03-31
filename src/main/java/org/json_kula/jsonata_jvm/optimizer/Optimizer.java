@@ -70,6 +70,7 @@ public final class Optimizer {
         @Override public AstNode visitNumberLiteral(NumberLiteral n, Void c)   { return n; }
         @Override public AstNode visitBooleanLiteral(BooleanLiteral n, Void c) { return n; }
         @Override public AstNode visitNullLiteral(NullLiteral n, Void c)       { return n; }
+        @Override public AstNode visitRegexLiteral(RegexLiteral n, Void c)     { return n; }
         @Override public AstNode visitContextRef(ContextRef n, Void c)         { return n; }
         @Override public AstNode visitRootRef(RootRef n, Void c)               { return n; }
         @Override public AstNode visitVariableRef(VariableRef n, Void c)       { return n; }
@@ -243,12 +244,52 @@ public final class Optimizer {
         }
 
         @Override
+        public AstNode visitParenthesized(Parenthesized n, Void c) {
+            // The Parenthesized wrapper only exists to suppress path-step subscript
+            // folding during parsing.  Once parsing is done the AST structure itself
+            // encodes the distinction: a folded subscript lives *inside* the PathExpr
+            // steps, while a parenthesised subscript wraps the PathExpr with a plain
+            // ArraySubscript.  The wrapper can therefore be stripped here so that
+            // constant-folding and other rewrites see through it normally.
+            return rewrite(n.inner());
+        }
+
+        @Override
+        public AstNode visitForceArray(ForceArray n, Void c) {
+            AstNode source = rewrite(n.source());
+            return source == n.source() ? n : new ForceArray(source);
+        }
+
+        @Override
         public AstNode visitTransformExpr(TransformExpr n, Void c) {
             AstNode source  = rewrite(n.source());
             AstNode pattern = rewrite(n.pattern());
             AstNode update  = rewrite(n.update());
             return source == n.source() && pattern == n.pattern() && update == n.update()
                     ? n : new TransformExpr(source, pattern, update);
+        }
+
+        @Override
+        public AstNode visitElvisExpr(ElvisExpr n, Void c) {
+            AstNode left  = rewrite(n.left());
+            AstNode right = rewrite(n.right());
+            return left == n.left() && right == n.right() ? n : new ElvisExpr(left, right);
+        }
+
+        @Override
+        public AstNode visitCoalesceExpr(CoalesceExpr n, Void c) {
+            AstNode left  = rewrite(n.left());
+            AstNode right = rewrite(n.right());
+            return left == n.left() && right == n.right() ? n : new CoalesceExpr(left, right);
+        }
+
+        @Override
+        public AstNode visitPartialPlaceholder(PartialPlaceholder n, Void c) { return n; }
+
+        @Override
+        public AstNode visitPartialApplication(PartialApplication n, Void c) {
+            List<AstNode> args = rewriteList(n.args());
+            return args.equals(n.args()) ? n : new PartialApplication(n.name(), args);
         }
 
         // =====================================================================

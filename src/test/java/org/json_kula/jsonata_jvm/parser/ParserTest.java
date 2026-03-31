@@ -377,8 +377,11 @@ class ParserTest {
 
     @Test
     void parse_block_multipleStatements() throws ParseException {
+        // Parenthesised blocks are now wrapped in Parenthesized to distinguish
+        // (a.b)[n] (whole-result subscript) from a.b[n] (per-element subscript).
         AstNode ast = Parser.parse("($a := 1; $b := 2; $a + $b)");
-        Block block = (Block) ast;
+        assertInstanceOf(Parenthesized.class, ast);
+        Block block = (Block) ((Parenthesized) ast).inner();
         assertEquals(3, block.expressions().size());
         assertInstanceOf(VariableBinding.class, block.expressions().get(0));
         assertInstanceOf(VariableBinding.class, block.expressions().get(1));
@@ -386,10 +389,13 @@ class ParserTest {
     }
 
     @Test
-    void parse_block_singleExpressionUnwrapped() throws ParseException {
-        // A block with one expression should not be wrapped in Block
+    void parse_block_singleExpressionWrappedInParenthesized() throws ParseException {
+        // (expr) is represented as Parenthesized(inner) — the inner expression is
+        // not a Block, but the Parenthesized wrapper is retained by the parser so
+        // that a following subscript [n] can choose whole-result semantics.
         AstNode ast = Parser.parse("(42)");
-        assertEquals(new NumberLiteral(42), ast);
+        assertInstanceOf(Parenthesized.class, ast);
+        assertEquals(new NumberLiteral(42), ((Parenthesized) ast).inner());
     }
 
     // --- Array and object constructors ---

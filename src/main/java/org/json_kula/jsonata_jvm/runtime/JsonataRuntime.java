@@ -112,6 +112,19 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Forces {@code node} to be an array, wrapping it in a single-element
+     * array if it is not already one.  Implements the {@code expr[]} operator.
+     * MISSING propagates as MISSING (nothing to wrap).
+     */
+    public static JsonNode forceArray(JsonNode node) {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) return node;
+        ArrayNode result = NF.arrayNode();
+        result.add(node);
+        return result;
+    }
+
+    /**
      * Filters {@code seq} by {@code predicate}, preserving elements for which
      * the predicate returns a truthy value.
      */
@@ -145,6 +158,27 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Returns a sub-array containing elements at indices {@code from} through
+     * {@code to} (inclusive, zero-based, negatives count from end).
+     * Used for the {@code arr[[from..to]]} range-subscript syntax.
+     */
+    public static JsonNode rangeSubscript(JsonNode seq, JsonNode from, JsonNode to)
+            throws JsonataEvaluationException {
+        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (!seq.isArray()) return MISSING;
+        int f = (int) toNumber(from);
+        int t = (int) toNumber(to);
+        int size = seq.size();
+        int actualF = f < 0 ? size + f : f;
+        int actualT = t < 0 ? size + t : t;
+        ArrayNode result = NF.arrayNode();
+        for (int i = Math.max(0, actualF); i <= Math.min(size - 1, actualT); i++) {
+            result.add(seq.get(i));
+        }
+        return unwrap(result);
+    }
+
+    /**
      * Applies {@code fn} with the element as the new context. Used by the
      * translator for complex path steps where context must be rebound.
      */
@@ -154,42 +188,92 @@ public final class JsonataRuntime {
         return fn.apply(node);
     }
 
+    /**
+     * Maps {@code fn} over every element of a sequence, collecting non-missing
+     * results. Used by the translator for subscript steps inside path expressions
+     * (e.g. the {@code [n]} in {@code a.b[n]}) where the subscript must be
+     * applied per-element rather than to the whole collected sequence.
+     */
+    public static JsonNode mapStep(JsonNode node, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : node) {
+                JsonNode val = fn.apply(elem);
+                if (!val.isMissingNode()) appendToSequence(result, val);
+            }
+            return unwrap(result);
+        }
+        return fn.apply(node);
+    }
+
+    /**
+     * Maps {@code fn} over every element of a sequence and collects results
+     * <em>without</em> flattening. Used for array and object constructor steps
+     * inside path expressions (e.g. the {@code [addr]} or {@code {key:val}} step
+     * in {@code Email.[address]} / {@code Phone.{type: number}}) where each
+     * constructed value must be kept as a single element of the output sequence.
+     */
+    public static JsonNode mapConstructorStep(JsonNode node, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (node == null || node.isMissingNode()) return MISSING;
+        if (node.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : node) {
+                JsonNode val = fn.apply(elem);
+                if (!val.isMissingNode()) result.add(val); // direct add — no flattening
+            }
+            return unwrap(result);
+        }
+        return fn.apply(node);
+    }
+
     // =========================================================================
     // Arithmetic
     // =========================================================================
 
     public static JsonNode add(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) + toNumber(b));
+        return numNode(toNumber(a) + toNumber(b));
     }
 
     public static JsonNode subtract(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) - toNumber(b));
+        return numNode(toNumber(a) - toNumber(b));
     }
 
     public static JsonNode multiply(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) * toNumber(b));
+        return numNode(toNumber(a) * toNumber(b));
     }
 
     public static JsonNode divide(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
         double denom = toNumber(b);
         if (denom == 0) throw new JsonataEvaluationException("Division by zero");
-        return NF.numberNode(toNumber(a) / denom);
+        return numNode(toNumber(a) / denom);
     }
 
     public static JsonNode modulo(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
         double denom = toNumber(b);
         if (denom == 0) throw new JsonataEvaluationException("Modulo by zero");
-        return NF.numberNode(toNumber(a) % denom);
+        return numNode(toNumber(a) % denom);
     }
 
     public static JsonNode negate(JsonNode a) throws JsonataEvaluationException {
         if (missing(a)) return MISSING;
-        return NF.numberNode(-toNumber(a));
+        return numNode(-toNumber(a));
+    }
+
+    /** Returns a LongNode when {@code v} is a whole number within long range, else DoubleNode. */
+    private static JsonNode numNode(double v) {
+        if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.floor(v)
+                && v >= Long.MIN_VALUE && v <= Long.MAX_VALUE) {
+            return NF.numberNode((long) v);
+        }
+        return NF.numberNode(v);
     }
 
     // =========================================================================
@@ -298,7 +382,14 @@ public final class JsonataRuntime {
     /** Creates a JSON array from the given elements, skipping missing values. */
     public static JsonNode array(JsonNode... elements) {
         ArrayNode result = NF.arrayNode();
-        for (JsonNode e : elements) if (!missing(e)) result.add(e);
+        for (JsonNode e : elements) {
+            if (missing(e)) continue;
+            // A sequence/array value contributes its elements individually so that
+            // [Phone.number] collects all numbers into a flat array rather than
+            // wrapping the whole sequence in a nested array.
+            if (e.isArray()) e.forEach(result::add);
+            else result.add(e);
+        }
         return result;
     }
 
@@ -421,7 +512,10 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_trim(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.textNode(toText(arg).trim());
+        // JSONata $trim normalises whitespace: collapse all internal runs of
+        // whitespace (tabs, newlines, multiple spaces) to a single space and
+        // strip leading/trailing whitespace.
+        return NF.textNode(toText(arg).replaceAll("\\s+", " ").strip());
     }
 
     public static JsonNode fn_length(JsonNode arg) throws JsonataEvaluationException {
@@ -468,16 +562,212 @@ public final class JsonataRuntime {
     public static JsonNode fn_contains(JsonNode str, JsonNode search)
             throws JsonataEvaluationException {
         if (missing(str) || missing(search)) return MISSING;
+        if (isRegexToken(search)) {
+            byte[] bytes = toText(str).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            return bool(lookupRegex(search).matcher(bytes)
+                    .search(0, bytes.length, org.joni.Option.NONE) >= 0);
+        }
         return bool(toText(str).contains(toText(search)));
     }
 
     public static JsonNode fn_split(JsonNode str, JsonNode separator)
             throws JsonataEvaluationException {
+        return fn_split(str, separator, MISSING);
+    }
+
+    public static JsonNode fn_split(JsonNode str, JsonNode separator, JsonNode limit)
+            throws JsonataEvaluationException {
         if (missing(str) || missing(separator)) return MISSING;
-        String[] parts = toText(str).split(toText(separator), -1);
+        String s = toText(str);
+        int lim = missing(limit) ? -1 : (int) toNumber(limit);
         ArrayNode result = NF.arrayNode();
-        for (String p : parts) result.add(p);
+        if (isRegexToken(separator)) {
+            org.joni.Regex rx = lookupRegex(separator);
+            byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            int start = 0;
+            int count = 0;
+            org.joni.Matcher m = rx.matcher(bytes);
+            while (start <= bytes.length) {
+                if (lim >= 0 && count >= lim) break;
+                int found = m.search(start, bytes.length, org.joni.Option.NONE);
+                if (found < 0) {
+                    result.add(new String(bytes, start, bytes.length - start,
+                            java.nio.charset.StandardCharsets.UTF_8));
+                    break;
+                }
+                result.add(new String(bytes, start, found - start,
+                        java.nio.charset.StandardCharsets.UTF_8));
+                count++;
+                int end = m.getEnd();
+                start = (end > found) ? end : end + 1;
+            }
+        } else {
+            String sep = toText(separator);
+            if (sep.isEmpty()) {
+                s.codePoints().forEach(cp -> result.add(new String(Character.toChars(cp))));
+            } else {
+                int start = 0;
+                int count = 0;
+                int idx;
+                while ((idx = s.indexOf(sep, start)) >= 0) {
+                    if (lim >= 0 && count >= lim) break;
+                    result.add(s.substring(start, idx));
+                    count++;
+                    start = idx + sep.length();
+                }
+                if (lim < 0 || count < lim) result.add(s.substring(start));
+            }
+        }
         return result;
+    }
+
+    public static JsonNode fn_match(JsonNode str, JsonNode pattern)
+            throws JsonataEvaluationException {
+        return fn_match(str, pattern, MISSING);
+    }
+
+    public static JsonNode fn_match(JsonNode str, JsonNode pattern, JsonNode limit)
+            throws JsonataEvaluationException {
+        if (missing(str) || missing(pattern)) return MISSING;
+        String s = toText(str);
+        org.joni.Regex rx = isRegexToken(pattern) ? lookupRegex(pattern)
+                : buildLiteralRegex(toText(pattern));
+        int lim = missing(limit) ? Integer.MAX_VALUE : (int) toNumber(limit);
+        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        org.joni.Matcher m = rx.matcher(bytes);
+        ArrayNode results = NF.arrayNode();
+        int pos = 0;
+        int count = 0;
+        while (pos <= bytes.length && count < lim) {
+            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
+            if (found < 0) break;
+            int end = m.getEnd();
+            org.joni.Region region = m.getRegion();
+            ObjectNode obj = NF.objectNode();
+            obj.put("match", new String(bytes, found, end - found,
+                    java.nio.charset.StandardCharsets.UTF_8));
+            obj.put("index", bytePosToCharPos(s, found));
+            ArrayNode groups = NF.arrayNode();
+            if (region != null) {
+                for (int i = 1; i < region.getNumRegs(); i++) {
+                    int gb = region.getBeg(i);
+                    int ge = region.getEnd(i);
+                    groups.add(gb >= 0
+                            ? new String(bytes, gb, ge - gb, java.nio.charset.StandardCharsets.UTF_8)
+                            : "");
+                }
+            }
+            obj.set("groups", groups);
+            results.add(obj);
+            count++;
+            pos = (end > found) ? end : end + 1;
+        }
+        return results.isEmpty() ? MISSING : results;
+    }
+
+    public static JsonNode fn_replace(JsonNode str, JsonNode pattern, JsonNode replacement)
+            throws JsonataEvaluationException {
+        return fn_replace(str, pattern, replacement, MISSING);
+    }
+
+    public static JsonNode fn_replace(JsonNode str, JsonNode pattern,
+                                       JsonNode replacement, JsonNode limit)
+            throws JsonataEvaluationException {
+        if (missing(str) || missing(pattern) || missing(replacement)) return MISSING;
+        String s = toText(str);
+        org.joni.Regex rx = isRegexToken(pattern) ? lookupRegex(pattern)
+                : buildLiteralRegex(toText(pattern));
+        int lim = missing(limit) ? Integer.MAX_VALUE : (int) toNumber(limit);
+        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        org.joni.Matcher m = rx.matcher(bytes);
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        int count = 0;
+        while (pos <= bytes.length && count < lim) {
+            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
+            if (found < 0) break;
+            int end = m.getEnd();
+            sb.append(new String(bytes, pos, found - pos,
+                    java.nio.charset.StandardCharsets.UTF_8));
+            String matchStr = new String(bytes, found, end - found,
+                    java.nio.charset.StandardCharsets.UTF_8);
+            org.joni.Region region = m.getRegion();
+            if (isLambdaToken(replacement)) {
+                ObjectNode matchObj = NF.objectNode();
+                matchObj.put("match", matchStr);
+                matchObj.put("index", bytePosToCharPos(s, found));
+                ArrayNode groups = NF.arrayNode();
+                if (region != null) {
+                    for (int i = 1; i < region.getNumRegs(); i++) {
+                        int gb = region.getBeg(i);
+                        int ge = region.getEnd(i);
+                        groups.add(gb >= 0
+                                ? new String(bytes, gb, ge - gb, java.nio.charset.StandardCharsets.UTF_8)
+                                : "");
+                    }
+                }
+                matchObj.set("groups", groups);
+                sb.append(toText(lookupLambda(replacement).apply(matchObj)));
+            } else {
+                sb.append(expandReplacement(toText(replacement), matchStr, bytes, region));
+            }
+            count++;
+            pos = (end > found) ? end : end + 1;
+        }
+        if (pos <= bytes.length) {
+            sb.append(new String(bytes, pos, bytes.length - pos,
+                    java.nio.charset.StandardCharsets.UTF_8));
+        }
+        return NF.textNode(sb.toString());
+    }
+
+    private static String expandReplacement(String repl, String wholeMatch,
+                                             byte[] bytes, org.joni.Region region) {
+        StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < repl.length()) {
+            char c = repl.charAt(i);
+            if (c == '$' && i + 1 < repl.length()) {
+                char next = repl.charAt(i + 1);
+                if (next == '$') {
+                    out.append('$');
+                    i += 2;
+                } else if (Character.isDigit(next)) {
+                    int j = i + 1;
+                    while (j < repl.length() && Character.isDigit(repl.charAt(j))) j++;
+                    int idx = Integer.parseInt(repl.substring(i + 1, j));
+                    if (idx == 0) {
+                        out.append(wholeMatch);
+                    } else if (region != null && idx < region.getNumRegs()) {
+                        int gb = region.getBeg(idx);
+                        int ge = region.getEnd(idx);
+                        if (gb >= 0) {
+                            out.append(new String(bytes, gb, ge - gb,
+                                    java.nio.charset.StandardCharsets.UTF_8));
+                        }
+                    }
+                    i = j;
+                } else {
+                    out.append(c);
+                    i++;
+                }
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    private static int bytePosToCharPos(String s, int bytePos) {
+        int charPos = 0;
+        int b = 0;
+        while (b < bytePos && charPos < s.length()) {
+            int cp = s.codePointAt(charPos);
+            charPos += Character.charCount(cp);
+            b += new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        }
+        return charPos;
     }
 
     public static JsonNode fn_join(JsonNode arr, JsonNode separator)
@@ -796,7 +1086,33 @@ public final class JsonataRuntime {
     // =========================================================================
 
     /**
-     * Applies {@code fn} to {@code arg} — used by the {@code ~>} chain operator.
+     * Implements the {@code ~>} (chain/pipe) operator.
+     *
+     * <ul>
+     *   <li>If {@code arg} is also a lambda token the two are <em>composed</em>:
+     *       returns a new lambda that applies {@code arg} first, then {@code fn}.
+     *       This supports {@code $f ~> $g} yielding a composed function.</li>
+     *   <li>Otherwise {@code fn} is invoked with {@code arg} as its argument
+     *       (standard value-piping: {@code value ~> $fn}).</li>
+     * </ul>
+     */
+    public static JsonNode fn_pipe(JsonNode arg, JsonNode fn)
+            throws JsonataEvaluationException {
+        if (!isLambdaToken(fn)) {
+            throw new JsonataEvaluationException(
+                    "Right-hand side of ~> is not a function; got: " + fn);
+        }
+        if (isLambdaToken(arg)) {
+            final JsonataLambda f = lookupLambda(arg);
+            final JsonataLambda g = lookupLambda(fn);
+            return lambdaNode(x -> g.apply(f.apply(x)));
+        }
+        return lookupLambda(fn).apply(arg);
+    }
+
+    /**
+     * Applies {@code fn} to {@code arg} — used when calling a user-defined
+     * lambda stored in a local variable.
      * {@code fn} must be a lambda token produced by {@link #lambdaNode}.
      */
     public static JsonNode fn_apply(JsonNode fn, JsonNode arg)
@@ -822,6 +1138,11 @@ public final class JsonataRuntime {
     // =========================================================================
     // Internal helpers
     // =========================================================================
+
+    /** Public variant used by generated coalesce expressions ({@code ??}). */
+    public static boolean isMissing(JsonNode n) {
+        return n == null || n.isMissingNode();
+    }
 
     private static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
@@ -910,6 +1231,68 @@ public final class JsonataRuntime {
         JsonataLambda fn = LAMBDA_REGISTRY.get(key);
         if (fn == null) throw new JsonataEvaluationException("Lambda expired or not found: " + key);
         return fn;
+    }
+
+    // =========================================================================
+    // Internal — regex registry
+    // =========================================================================
+
+    /**
+     * Compiles a JSONata regex literal and stores it in the registry.
+     * Returns a sentinel {@link TextNode} with prefix {@code "__rx:"} that
+     * can be passed through the Jackson type system and later resolved by
+     * {@link #lookupRegex}.
+     *
+     * @param pattern the regex pattern string (without delimiters)
+     * @param flags   flags string: {@code "i"} for case-insensitive,
+     *                {@code "m"} for multiline, or {@code ""} for none
+     */
+    public static JsonNode regexNode(String pattern, String flags)
+            throws JsonataEvaluationException {
+        int opts = org.joni.Option.NONE;
+        if (flags.contains("i")) opts |= org.joni.Option.IGNORECASE;
+        if (flags.contains("m")) opts |= org.joni.Option.MULTILINE;
+        byte[] pat = pattern.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        org.joni.Regex rx = new org.joni.Regex(pat, 0, pat.length, opts,
+                org.jcodings.specific.UTF8Encoding.INSTANCE,
+                org.joni.Syntax.ECMAScript,
+                org.joni.WarnCallback.DEFAULT);
+        String key = String.valueOf(REGEX_COUNTER.incrementAndGet());
+        REGEX_REGISTRY.put(key, rx);
+        return NF.textNode(REGEX_PREFIX + key);
+    }
+
+    /** Builds a regex that matches the literal string {@code s} (no special regex chars). */
+    private static org.joni.Regex buildLiteralRegex(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            // Escape ECMAScript metacharacters
+            if ("\\^$.|?*+()[]{}/".indexOf(c) >= 0) sb.append('\\');
+            sb.append(c);
+        }
+        byte[] pat = sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return new org.joni.Regex(pat, 0, pat.length, org.joni.Option.NONE,
+                org.jcodings.specific.UTF8Encoding.INSTANCE,
+                org.joni.Syntax.ECMAScript,
+                org.joni.WarnCallback.DEFAULT);
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<String, org.joni.Regex>
+            REGEX_REGISTRY = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final String REGEX_PREFIX = "__rx:";
+    private static final java.util.concurrent.atomic.AtomicLong REGEX_COUNTER =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private static boolean isRegexToken(JsonNode n) {
+        return n != null && n.isTextual() && n.textValue().startsWith(REGEX_PREFIX);
+    }
+
+    private static org.joni.Regex lookupRegex(JsonNode n) throws JsonataEvaluationException {
+        String key = n.textValue().substring(REGEX_PREFIX.length());
+        org.joni.Regex rx = REGEX_REGISTRY.get(key);
+        if (rx == null) throw new JsonataEvaluationException("Regex token expired: " + key);
+        return rx;
     }
 
     // =========================================================================

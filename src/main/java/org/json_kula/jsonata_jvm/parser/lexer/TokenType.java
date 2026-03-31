@@ -10,6 +10,7 @@ public enum TokenType {
     TRUE,           // true
     FALSE,          // false
     NULL,           // null
+    REGEX,          // /pattern/flags
 
     // References
     DOLLAR,         // $   (context value / root in function params)
@@ -44,9 +45,11 @@ public enum TokenType {
     NOT,            // not  (keyword, used as function-like prefix)
 
     // Conditional / binding
-    QUESTION,       // ?
-    COLON,          // :
-    COLON_ASSIGN,   // :=
+    QUESTION,         // ?
+    QUESTION_COLON,   // ?:  (Elvis / default operator)
+    QUESTION_QUESTION,// ??  (Coalescing operator)
+    COLON,            // :
+    COLON_ASSIGN,     // :=
 
     // Path / step operators
     DOT,            // .

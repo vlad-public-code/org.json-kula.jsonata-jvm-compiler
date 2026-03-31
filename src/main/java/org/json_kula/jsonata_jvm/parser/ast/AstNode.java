@@ -18,6 +18,7 @@ public sealed interface AstNode permits
         AstNode.NumberLiteral,
         AstNode.BooleanLiteral,
         AstNode.NullLiteral,
+        AstNode.RegexLiteral,
         AstNode.ContextRef,
         AstNode.RootRef,
         AstNode.VariableRef,
@@ -29,6 +30,7 @@ public sealed interface AstNode permits
         AstNode.PathExpr,
         AstNode.PredicateExpr,
         AstNode.ArraySubscript,
+        AstNode.Parenthesized,
         AstNode.BinaryOp,
         AstNode.UnaryMinus,
         AstNode.FunctionCall,
@@ -40,7 +42,12 @@ public sealed interface AstNode permits
         AstNode.SortExpr,
         AstNode.GroupByExpr,
         AstNode.ChainExpr,
-        AstNode.TransformExpr {
+        AstNode.TransformExpr,
+        AstNode.ForceArray,
+        AstNode.ElvisExpr,
+        AstNode.CoalesceExpr,
+        AstNode.PartialPlaceholder,
+        AstNode.PartialApplication {
 
     // =========================================================================
     // Literals
@@ -57,6 +64,14 @@ public sealed interface AstNode permits
 
     /** The literal {@code null}. */
     record NullLiteral() implements AstNode {}
+
+    /**
+     * A regex literal, e.g. {@code /foo/i}.
+     *
+     * @param pattern the regex pattern string (without the surrounding {@code /})
+     * @param flags   the flags string (e.g. {@code "i"}, {@code "im"}, or {@code ""})
+     */
+    record RegexLiteral(String pattern, String flags) implements AstNode {}
 
     // =========================================================================
     // References
@@ -289,6 +304,63 @@ public sealed interface AstNode permits
      */
     record TransformExpr(AstNode source, AstNode pattern, AstNode update) implements AstNode {}
 
+    /**
+     * The force-array postfix operator {@code expr[]}.
+     *
+     * <p>Forces the result of the path expression to be an array even when
+     * only one value was selected.  Stands in contrast to JSONata's normal
+     * singleton-collapsing behaviour where a one-element sequence is
+     * returned as a bare value.
+     *
+     * @param source the expression whose result must be an array
+     */
+    record ForceArray(AstNode source) implements AstNode {}
+
+    /**
+     * Elvis / default operator: {@code left ?: right}.
+     * Returns {@code left} if truthy, otherwise {@code right}.
+     */
+    record ElvisExpr(AstNode left, AstNode right) implements AstNode {}
+
+    /**
+     * Coalescing operator: {@code left ?? right}.
+     * Returns {@code left} if not missing, otherwise {@code right}.
+     */
+    record CoalesceExpr(AstNode left, AstNode right) implements AstNode {}
+
+    /**
+     * Partial-application placeholder: the {@code ?} token inside a function call.
+     * Replaced at runtime by the argument supplied to the partially-applied function.
+     */
+    record PartialPlaceholder() implements AstNode {}
+
+    /**
+     * A partial function application: {@code $fn(arg1, ?, arg3, ...)}.
+     * Any argument that is a {@link PartialPlaceholder} will be supplied when the
+     * resulting function is invoked.
+     *
+     * @param name the function name (without leading {@code $})
+     * @param args the argument list, some of which may be {@link PartialPlaceholder}
+     */
+    record PartialApplication(String name, List<AstNode> args) implements AstNode {}
+
+    /**
+     * Marks an expression that was written inside explicit parentheses in the source.
+     *
+     * <p>Parentheses are normally transparent (they don't change runtime semantics),
+     * but they <em>do</em> affect how a following subscript {@code [n]} is applied:
+     * <ul>
+     *   <li>{@code a.b[n]} — subscript applied per-element (bound to step {@code b}).</li>
+     *   <li>{@code (a.b)[n]} — subscript applied to the whole collected sequence.</li>
+     * </ul>
+     * Wrapping the inner expression in this node lets the parser record that the
+     * expression was parenthesised so that {@code parseSubscriptOrPredicate} can
+     * choose the correct binding strategy.
+     *
+     * @param inner the wrapped expression
+     */
+    record Parenthesized(AstNode inner) implements AstNode {}
+
     // =========================================================================
     // Visitor
     // =========================================================================
@@ -309,6 +381,7 @@ public sealed interface AstNode permits
         R visitNumberLiteral(NumberLiteral node, C ctx);
         R visitBooleanLiteral(BooleanLiteral node, C ctx);
         R visitNullLiteral(NullLiteral node, C ctx);
+        R visitRegexLiteral(RegexLiteral node, C ctx);
         R visitContextRef(ContextRef node, C ctx);
         R visitRootRef(RootRef node, C ctx);
         R visitVariableRef(VariableRef node, C ctx);
@@ -332,6 +405,12 @@ public sealed interface AstNode permits
         R visitGroupByExpr(GroupByExpr node, C ctx);
         R visitChainExpr(ChainExpr node, C ctx);
         R visitTransformExpr(TransformExpr node, C ctx);
+        R visitParenthesized(Parenthesized node, C ctx);
+        R visitForceArray(ForceArray node, C ctx);
+        R visitElvisExpr(ElvisExpr node, C ctx);
+        R visitCoalesceExpr(CoalesceExpr node, C ctx);
+        R visitPartialPlaceholder(PartialPlaceholder node, C ctx);
+        R visitPartialApplication(PartialApplication node, C ctx);
     }
 
     /**
@@ -349,6 +428,7 @@ public sealed interface AstNode permits
             case NumberLiteral  n -> visitor.visitNumberLiteral(n, ctx);
             case BooleanLiteral n -> visitor.visitBooleanLiteral(n, ctx);
             case NullLiteral    n -> visitor.visitNullLiteral(n, ctx);
+            case RegexLiteral   n -> visitor.visitRegexLiteral(n, ctx);
             case ContextRef     n -> visitor.visitContextRef(n, ctx);
             case RootRef        n -> visitor.visitRootRef(n, ctx);
             case VariableRef    n -> visitor.visitVariableRef(n, ctx);
@@ -372,6 +452,12 @@ public sealed interface AstNode permits
             case GroupByExpr    n -> visitor.visitGroupByExpr(n, ctx);
             case ChainExpr      n -> visitor.visitChainExpr(n, ctx);
             case TransformExpr  n -> visitor.visitTransformExpr(n, ctx);
+            case Parenthesized      n -> visitor.visitParenthesized(n, ctx);
+            case ForceArray         n -> visitor.visitForceArray(n, ctx);
+            case ElvisExpr          n -> visitor.visitElvisExpr(n, ctx);
+            case CoalesceExpr       n -> visitor.visitCoalesceExpr(n, ctx);
+            case PartialPlaceholder n -> visitor.visitPartialPlaceholder(n, ctx);
+            case PartialApplication n -> visitor.visitPartialApplication(n, ctx);
         };
     }
 }

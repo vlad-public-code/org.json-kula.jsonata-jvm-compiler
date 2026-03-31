@@ -84,20 +84,36 @@ public final class Parser {
         return parseConditional();
     }
 
-    // Level 2: conditional  condition ? then : else
+    // Level 2: conditional  condition ? then : else  /  left ?: right  /  left ?? right
+    //
+    // The ternary operator is right-associative so that chained ternaries like
+    //   $x > 0 ? "pos" : $x < 0 ? "neg" : "zero"
+    // parse as  ($x > 0 ? "pos" : ($x < 0 ? "neg" : "zero")).
+    // Both the 'then' and 'otherwise' branches are parsed via a recursive call to
+    // parseConditional() rather than parseOr() to achieve this.
     private AstNode parseConditional() throws ParseException {
-        AstNode condition = parseOr();
+        AstNode left = parseOr();
         if (peek().type() == QUESTION) {
             consume(QUESTION);
-            AstNode then = parseOr();
+            AstNode then      = parseConditional();   // right-associative
             AstNode otherwise = null;
             if (peek().type() == COLON) {
                 consume(COLON);
-                otherwise = parseOr();
+                otherwise = parseConditional();       // right-associative
             }
-            return new ConditionalExpr(condition, then, otherwise);
+            return new ConditionalExpr(left, then, otherwise);
         }
-        return condition;
+        if (peek().type() == QUESTION_COLON) {
+            consume(QUESTION_COLON);
+            AstNode right = parseConditional();
+            return new ElvisExpr(left, right);
+        }
+        if (peek().type() == QUESTION_QUESTION) {
+            consume(QUESTION_QUESTION);
+            AstNode right = parseConditional();
+            return new CoalesceExpr(left, right);
+        }
+        return left;
     }
 
     // Level 3: or
@@ -265,9 +281,9 @@ public final class Parser {
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
-            // Empty [] — means "ensure array" — treat as predicate with wildcard
+            // Empty [] — force-array operator: wraps the result in an array
             consume(RBRACKET);
-            return new PredicateExpr(source, new WildcardStep());
+            return new ForceArray(source);
         }
         // Range expression inside brackets: [from..to]
         AstNode inner = parseExpression();
@@ -279,6 +295,16 @@ public final class Parser {
         }
         consume(RBRACKET);
         if (inner instanceof NumberLiteral) {
+            // a.b[n] — fold the subscript into the last path step so it is
+            // applied per-element when the path maps over a sequence.
+            // (a.b)[n] has source=Parenthesized and is NOT folded; the subscript
+            // is applied to the whole collected result instead.
+            if (source instanceof PathExpr pe) {
+                List<AstNode> steps = new ArrayList<>(pe.steps());
+                AstNode lastStep = steps.remove(steps.size() - 1);
+                steps.add(new ArraySubscript(lastStep, inner));
+                return new PathExpr(steps);
+            }
             return new ArraySubscript(source, inner);
         }
         return new PredicateExpr(source, inner);
@@ -329,6 +355,12 @@ public final class Parser {
             case TRUE           -> { cursor++; yield new BooleanLiteral(true); }
             case FALSE          -> { cursor++; yield new BooleanLiteral(false); }
             case NULL           -> { cursor++; yield new NullLiteral(); }
+            case REGEX          -> {
+                cursor++;
+                int sep = t.value().lastIndexOf('/');
+                yield new RegexLiteral(t.value().substring(0, sep),
+                                       t.value().substring(sep + 1));
+            }
             case DOLLAR_DOLLAR  -> { cursor++; yield new RootRef(); }
             case DOLLAR         -> { cursor++; yield new ContextRef(); }
             case VARIABLE       -> parseVariableOrFunctionCall();
@@ -338,6 +370,7 @@ public final class Parser {
             case LPAREN         -> parseParenthesised();
             case LBRACKET       -> parseArrayConstructor();
             case LBRACE         -> parseObjectConstructorNode();
+            case QUESTION       -> { cursor++; yield new PartialPlaceholder(); }
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
             default             -> throw new ParseException(
@@ -357,8 +390,8 @@ public final class Parser {
     // bareIdentifier, built-in function call, or lambda (function keyword)
     private AstNode parseIdentifierOrFunctionCall() throws ParseException {
         Token t = consume(IDENTIFIER);
-        // 'function' keyword introduces a lambda expression
-        if ("function".equals(t.value()) && peek().type() == LPAREN) {
+        // 'function' keyword (or Greek λ) introduces a lambda expression
+        if (("function".equals(t.value()) || "\u03bb".equals(t.value())) && peek().type() == LPAREN) {
             return parseLambda();
         }
         if (peek().type() == LPAREN) {
@@ -373,11 +406,13 @@ public final class Parser {
         List<AstNode> args = new ArrayList<>();
         if (peek().type() != RPAREN) {
             do {
-                // support lambda shorthand: function($x){ body } as argument
                 args.add(parseExpression());
             } while (tryConsume(COMMA));
         }
         consume(RPAREN);
+        // If any argument is a PartialPlaceholder, produce a PartialApplication node.
+        boolean hasPlaceholder = args.stream().anyMatch(a -> a instanceof PartialPlaceholder);
+        if (hasPlaceholder) return new PartialApplication(name, args);
         return new FunctionCall(name, args);
     }
 
@@ -401,7 +436,10 @@ public final class Parser {
             exprs.add(parseExpression());
         }
         consume(RPAREN);
-        return exprs.size() == 1 ? exprs.get(0) : new Block(exprs);
+        // Wrap in Parenthesized so that a following subscript [n] knows to apply
+        // to the whole collected result rather than per path-step element.
+        AstNode inner = exprs.size() == 1 ? exprs.get(0) : new Block(exprs);
+        return new Parenthesized(inner);
     }
 
     // [elem, elem, ...] — range is handled inside parsePrimary via LBRACKET
