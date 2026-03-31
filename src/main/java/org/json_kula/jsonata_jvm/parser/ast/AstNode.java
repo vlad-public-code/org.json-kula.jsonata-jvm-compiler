@@ -42,7 +42,11 @@ public sealed interface AstNode permits
         AstNode.GroupByExpr,
         AstNode.ChainExpr,
         AstNode.TransformExpr,
-        AstNode.ForceArray {
+        AstNode.ForceArray,
+        AstNode.ElvisExpr,
+        AstNode.CoalesceExpr,
+        AstNode.PartialPlaceholder,
+        AstNode.PartialApplication {
 
     // =========================================================================
     // Literals
@@ -304,6 +308,34 @@ public sealed interface AstNode permits
     record ForceArray(AstNode source) implements AstNode {}
 
     /**
+     * Elvis / default operator: {@code left ?: right}.
+     * Returns {@code left} if truthy, otherwise {@code right}.
+     */
+    record ElvisExpr(AstNode left, AstNode right) implements AstNode {}
+
+    /**
+     * Coalescing operator: {@code left ?? right}.
+     * Returns {@code left} if not missing, otherwise {@code right}.
+     */
+    record CoalesceExpr(AstNode left, AstNode right) implements AstNode {}
+
+    /**
+     * Partial-application placeholder: the {@code ?} token inside a function call.
+     * Replaced at runtime by the argument supplied to the partially-applied function.
+     */
+    record PartialPlaceholder() implements AstNode {}
+
+    /**
+     * A partial function application: {@code $fn(arg1, ?, arg3, ...)}.
+     * Any argument that is a {@link PartialPlaceholder} will be supplied when the
+     * resulting function is invoked.
+     *
+     * @param name the function name (without leading {@code $})
+     * @param args the argument list, some of which may be {@link PartialPlaceholder}
+     */
+    record PartialApplication(String name, List<AstNode> args) implements AstNode {}
+
+    /**
      * Marks an expression that was written inside explicit parentheses in the source.
      *
      * <p>Parentheses are normally transparent (they don't change runtime semantics),
@@ -365,6 +397,10 @@ public sealed interface AstNode permits
         R visitTransformExpr(TransformExpr node, C ctx);
         R visitParenthesized(Parenthesized node, C ctx);
         R visitForceArray(ForceArray node, C ctx);
+        R visitElvisExpr(ElvisExpr node, C ctx);
+        R visitCoalesceExpr(CoalesceExpr node, C ctx);
+        R visitPartialPlaceholder(PartialPlaceholder node, C ctx);
+        R visitPartialApplication(PartialApplication node, C ctx);
     }
 
     /**
@@ -405,8 +441,12 @@ public sealed interface AstNode permits
             case GroupByExpr    n -> visitor.visitGroupByExpr(n, ctx);
             case ChainExpr      n -> visitor.visitChainExpr(n, ctx);
             case TransformExpr  n -> visitor.visitTransformExpr(n, ctx);
-            case Parenthesized  n -> visitor.visitParenthesized(n, ctx);
-            case ForceArray     n -> visitor.visitForceArray(n, ctx);
+            case Parenthesized      n -> visitor.visitParenthesized(n, ctx);
+            case ForceArray         n -> visitor.visitForceArray(n, ctx);
+            case ElvisExpr          n -> visitor.visitElvisExpr(n, ctx);
+            case CoalesceExpr       n -> visitor.visitCoalesceExpr(n, ctx);
+            case PartialPlaceholder n -> visitor.visitPartialPlaceholder(n, ctx);
+            case PartialApplication n -> visitor.visitPartialApplication(n, ctx);
         };
     }
 }

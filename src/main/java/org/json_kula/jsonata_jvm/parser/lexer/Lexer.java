@@ -73,7 +73,7 @@ public final class Lexer {
                 case '/' -> { pos++; yield Token.of(TokenType.SLASH, start); }
                 case '%' -> { pos++; yield Token.of(TokenType.PERCENT, start); }
                 case '&' -> { pos++; yield Token.of(TokenType.AMPERSAND, start); }
-                case '?' -> { pos++; yield Token.of(TokenType.QUESTION, start); }
+                case '?' -> { yield lexQuestion(start); }
                 case ',' -> { pos++; yield Token.of(TokenType.COMMA, start); }
                 case ';' -> { pos++; yield Token.of(TokenType.SEMICOLON, start); }
                 case '(' -> { pos++; yield Token.of(TokenType.LPAREN, start); }
@@ -112,6 +112,13 @@ public final class Lexer {
     // -------------------------------------------------------------------------
     // Multi-char token helpers
     // -------------------------------------------------------------------------
+
+    private Token lexQuestion(int start) {
+        pos++;
+        if (pos < src.length() && src.charAt(pos) == ':') { pos++; return Token.of(TokenType.QUESTION_COLON, start); }
+        if (pos < src.length() && src.charAt(pos) == '?') { pos++; return Token.of(TokenType.QUESTION_QUESTION, start); }
+        return Token.of(TokenType.QUESTION, start);
+    }
 
     private Token lexStar(int start) {
         pos++;

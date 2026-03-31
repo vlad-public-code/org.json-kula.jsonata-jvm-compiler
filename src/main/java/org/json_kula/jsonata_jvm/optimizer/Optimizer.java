@@ -268,6 +268,29 @@ public final class Optimizer {
                     ? n : new TransformExpr(source, pattern, update);
         }
 
+        @Override
+        public AstNode visitElvisExpr(ElvisExpr n, Void c) {
+            AstNode left  = rewrite(n.left());
+            AstNode right = rewrite(n.right());
+            return left == n.left() && right == n.right() ? n : new ElvisExpr(left, right);
+        }
+
+        @Override
+        public AstNode visitCoalesceExpr(CoalesceExpr n, Void c) {
+            AstNode left  = rewrite(n.left());
+            AstNode right = rewrite(n.right());
+            return left == n.left() && right == n.right() ? n : new CoalesceExpr(left, right);
+        }
+
+        @Override
+        public AstNode visitPartialPlaceholder(PartialPlaceholder n, Void c) { return n; }
+
+        @Override
+        public AstNode visitPartialApplication(PartialApplication n, Void c) {
+            List<AstNode> args = rewriteList(n.args());
+            return args.equals(n.args()) ? n : new PartialApplication(n.name(), args);
+        }
+
         // =====================================================================
         // Constant-folding logic
         // =====================================================================

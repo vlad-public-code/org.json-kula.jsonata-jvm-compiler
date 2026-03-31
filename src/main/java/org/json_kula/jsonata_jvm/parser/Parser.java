@@ -84,9 +84,9 @@ public final class Parser {
         return parseConditional();
     }
 
-    // Level 2: conditional  condition ? then : else
+    // Level 2: conditional  condition ? then : else  /  left ?: right  /  left ?? right
     private AstNode parseConditional() throws ParseException {
-        AstNode condition = parseOr();
+        AstNode left = parseOr();
         if (peek().type() == QUESTION) {
             consume(QUESTION);
             AstNode then = parseOr();
@@ -95,9 +95,19 @@ public final class Parser {
                 consume(COLON);
                 otherwise = parseOr();
             }
-            return new ConditionalExpr(condition, then, otherwise);
+            return new ConditionalExpr(left, then, otherwise);
         }
-        return condition;
+        if (peek().type() == QUESTION_COLON) {
+            consume(QUESTION_COLON);
+            AstNode right = parseOr();
+            return new ElvisExpr(left, right);
+        }
+        if (peek().type() == QUESTION_QUESTION) {
+            consume(QUESTION_QUESTION);
+            AstNode right = parseOr();
+            return new CoalesceExpr(left, right);
+        }
+        return left;
     }
 
     // Level 3: or
@@ -348,6 +358,7 @@ public final class Parser {
             case LPAREN         -> parseParenthesised();
             case LBRACKET       -> parseArrayConstructor();
             case LBRACE         -> parseObjectConstructorNode();
+            case QUESTION       -> { cursor++; yield new PartialPlaceholder(); }
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
             default             -> throw new ParseException(
@@ -383,11 +394,13 @@ public final class Parser {
         List<AstNode> args = new ArrayList<>();
         if (peek().type() != RPAREN) {
             do {
-                // support lambda shorthand: function($x){ body } as argument
                 args.add(parseExpression());
             } while (tryConsume(COMMA));
         }
         consume(RPAREN);
+        // If any argument is a PartialPlaceholder, produce a PartialApplication node.
+        boolean hasPlaceholder = args.stream().anyMatch(a -> a instanceof PartialPlaceholder);
+        if (hasPlaceholder) return new PartialApplication(name, args);
         return new FunctionCall(name, args);
     }
 

@@ -503,7 +503,10 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_trim(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.textNode(toText(arg).trim());
+        // JSONata $trim normalises whitespace: collapse all internal runs of
+        // whitespace (tabs, newlines, multiple spaces) to a single space and
+        // strip leading/trailing whitespace.
+        return NF.textNode(toText(arg).replaceAll("\\s+", " ").strip());
     }
 
     public static JsonNode fn_length(JsonNode arg) throws JsonataEvaluationException {
@@ -878,7 +881,33 @@ public final class JsonataRuntime {
     // =========================================================================
 
     /**
-     * Applies {@code fn} to {@code arg} — used by the {@code ~>} chain operator.
+     * Implements the {@code ~>} (chain/pipe) operator.
+     *
+     * <ul>
+     *   <li>If {@code arg} is also a lambda token the two are <em>composed</em>:
+     *       returns a new lambda that applies {@code arg} first, then {@code fn}.
+     *       This supports {@code $f ~> $g} yielding a composed function.</li>
+     *   <li>Otherwise {@code fn} is invoked with {@code arg} as its argument
+     *       (standard value-piping: {@code value ~> $fn}).</li>
+     * </ul>
+     */
+    public static JsonNode fn_pipe(JsonNode arg, JsonNode fn)
+            throws JsonataEvaluationException {
+        if (!isLambdaToken(fn)) {
+            throw new JsonataEvaluationException(
+                    "Right-hand side of ~> is not a function; got: " + fn);
+        }
+        if (isLambdaToken(arg)) {
+            final JsonataLambda f = lookupLambda(arg);
+            final JsonataLambda g = lookupLambda(fn);
+            return lambdaNode(x -> g.apply(f.apply(x)));
+        }
+        return lookupLambda(fn).apply(arg);
+    }
+
+    /**
+     * Applies {@code fn} to {@code arg} — used when calling a user-defined
+     * lambda stored in a local variable.
      * {@code fn} must be a lambda token produced by {@link #lambdaNode}.
      */
     public static JsonNode fn_apply(JsonNode fn, JsonNode arg)
@@ -904,6 +933,11 @@ public final class JsonataRuntime {
     // =========================================================================
     // Internal helpers
     // =========================================================================
+
+    /** Public variant used by generated coalesce expressions ({@code ??}). */
+    public static boolean isMissing(JsonNode n) {
+        return n == null || n.isMissingNode();
+    }
 
     private static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
