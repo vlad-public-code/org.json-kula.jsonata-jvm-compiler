@@ -85,26 +85,32 @@ public final class Parser {
     }
 
     // Level 2: conditional  condition ? then : else  /  left ?: right  /  left ?? right
+    //
+    // The ternary operator is right-associative so that chained ternaries like
+    //   $x > 0 ? "pos" : $x < 0 ? "neg" : "zero"
+    // parse as  ($x > 0 ? "pos" : ($x < 0 ? "neg" : "zero")).
+    // Both the 'then' and 'otherwise' branches are parsed via a recursive call to
+    // parseConditional() rather than parseOr() to achieve this.
     private AstNode parseConditional() throws ParseException {
         AstNode left = parseOr();
         if (peek().type() == QUESTION) {
             consume(QUESTION);
-            AstNode then = parseOr();
+            AstNode then      = parseConditional();   // right-associative
             AstNode otherwise = null;
             if (peek().type() == COLON) {
                 consume(COLON);
-                otherwise = parseOr();
+                otherwise = parseConditional();       // right-associative
             }
             return new ConditionalExpr(left, then, otherwise);
         }
         if (peek().type() == QUESTION_COLON) {
             consume(QUESTION_COLON);
-            AstNode right = parseOr();
+            AstNode right = parseConditional();
             return new ElvisExpr(left, right);
         }
         if (peek().type() == QUESTION_QUESTION) {
             consume(QUESTION_QUESTION);
-            AstNode right = parseOr();
+            AstNode right = parseConditional();
             return new CoalesceExpr(left, right);
         }
         return left;

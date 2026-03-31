@@ -386,7 +386,7 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
                 // For any other step type: rebind __ctx to prevExpr inside a lambda.
                 String tmpCtx = "__c" + ctx.state.nextId();
                 String stepExpr = step.accept(this, ctx.withCtx(tmpCtx));
-                yield "applyStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+                yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
         };
     }
@@ -562,7 +562,7 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             case "contains"        -> "fn_contains(" + args.get(0) + ", " + args.get(1) + ")";
             case "split"           -> "fn_split("   + args.get(0) + ", " + args.get(1) + ")";
             case "join"            -> args.size() == 1
-                    ? "fn_join(" + args.get(0) + ", NULL)"
+                    ? "fn_join(" + args.get(0) + ", MISSING)"
                     : "fn_join(" + args.get(0) + ", " + args.get(1) + ")";
             // Sequence / array
             case "count"    -> "fn_count("   + oneArg(args) + ")";
@@ -688,9 +688,12 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         if (fnArg instanceof Lambda lam && lam.params().size() > 1) {
             // Unpack the [acc, elem] pair into named parameters.
             lambdaExpr = genUnpackLambda(lam, ctx, 2);
+        } else if (fnArg instanceof Lambda lam) {
+            lambdaExpr = inlineLambda(lam, ctx);
         } else {
-            lambdaExpr = (fnArg instanceof Lambda lam)
-                    ? inlineLambda(lam, ctx) : fnArg.accept(this, ctx);
+            // fn is an expression that evaluates to a lambdaNode (e.g. a variable holding
+            // a user-defined function).  Wrap it so fn_reduce receives a JsonataLambda.
+            lambdaExpr = "(__elem -> fn_apply(" + fnArg.accept(this, ctx) + ", __elem))";
         }
         return "fn_reduce(" + arrExpr + ", " + lambdaExpr + ", " + initExpr + ")";
     }
@@ -914,6 +917,13 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             if (expr instanceof VariableBinding vb) blockLocalNames.add(vb.name());
         }
 
+        // Pre-pass: find every variable that needs an array-holder.
+        // This covers both self-recursive lambdas AND forward references — i.e. a
+        // lambda that is defined at position i but calls a variable bound at j > i.
+        // All holder arrays are pre-declared at the top of the helper method so that
+        // lambdas defined earlier can safely capture them before they are assigned.
+        Set<String> holderNeeded = computeHolderNeeded(exprs, blockLocalNames);
+
         // Find outer-scope locals that are free variables in this block's body.
         // They must be passed as extra method parameters so the helper method
         // can reference them (outer Java locals are not accessible across methods).
@@ -938,7 +948,10 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
         // was called (e.g. from inside an inline lambda with ctxVar = "$x").
         GenCtx innerCtx = new GenCtx("__ctx", "__root", ctx.state);
 
-        // Open a scope for the block's own bindings.
+        // Activate all holder variables BEFORE compiling the body so that
+        // visitVariableRef emits $nameRef[0] for every holder reference,
+        // including forward references to variables not yet assigned.
+        ctx.state.holderVars.addAll(holderNeeded);
         ctx.state.pushScope();
         for (String name : blockLocalNames) ctx.state.addLocalVar(name);
 
@@ -948,6 +961,12 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
               .append("(JsonNode __root, JsonNode __ctx")
               .append(extraParamDecls)
               .append(") throws JsonataEvaluationException {\n");
+
+            // Pre-declare all holder arrays at the very top so lambdas defined
+            // earlier in the block can capture them before assignment.
+            for (String name : holderNeeded) {
+                sb.append("    JsonNode[] $").append(name).append("Ref = {MISSING};\n");
+            }
 
             for (int i = 0; i < exprs.size() - 1; i++) {
                 AstNode expr = exprs.get(i);
@@ -970,6 +989,7 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
             ctx.state.helperMethods.append(sb);
         } finally {
             ctx.state.popScope();
+            ctx.state.holderVars.removeAll(holderNeeded);
         }
 
         return methodName + "(" + ctx.rootVar + ", " + ctx.ctxVar + extraCallArgs + ")";
@@ -977,23 +997,61 @@ public final class Translator implements AstNode.Visitor<String, Translator.GenC
 
     /**
      * Emits a single {@link VariableBinding} as a {@code JsonNode $name = ...;}
-     * statement, using an array-holder pattern for recursive lambdas.
+     * statement.  If {@code name} is in {@code ctx.state.holderVars} the holder
+     * array was already pre-declared at the top of the block method; we only need
+     * to write the assignment and the corresponding {@code $nameRef[0] = $name;}
+     * update so that lambdas that captured the holder see the real value.
      */
     private void emitVarBinding(VariableBinding vb, StringBuilder sb, GenCtx ctx) {
-        if (vb.value() instanceof Lambda lam && containsVarRef(lam.body(), vb.name())) {
-            // Recursive lambda: pre-create the holder array so the lambda body can
-            // call itself via $nameRef[0] before the variable is fully initialized.
-            String holder = "$" + vb.name() + "Ref";
-            sb.append("    JsonNode[] ").append(holder).append(" = {MISSING};\n");
-            ctx.state.holderVars.add(vb.name());
-            String valExpr = lam.accept(this, ctx);   // visitLambda → buildInlineLambda
-            ctx.state.holderVars.remove(vb.name());
-            sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
-            sb.append("    ").append(holder).append("[0] = $").append(vb.name()).append(";\n");
-        } else {
-            String valExpr = vb.value().accept(this, ctx);
-            sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+        String valExpr = vb.value().accept(this, ctx);
+        sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+        if (ctx.state.holderVars.contains(vb.name())) {
+            sb.append("    $").append(vb.name()).append("Ref[0] = $").append(vb.name()).append(";\n");
         }
+    }
+
+    /**
+     * Returns the set of variable names in {@code exprs} that require an
+     * array-holder pattern.  This covers two cases:
+     * <ol>
+     *   <li><b>Self-recursive lambdas</b> — the lambda body directly or
+     *       indirectly refers to the variable being defined.</li>
+     *   <li><b>Forward references</b> — a lambda at position {@code i} in the
+     *       block refers to a variable that is only bound at position {@code j > i}.
+     *       The array holder is pre-declared before any binding so the earlier
+     *       lambda can capture it safely; the holder is filled in when the later
+     *       binding is eventually executed.</li>
+     * </ol>
+     */
+    private static Set<String> computeHolderNeeded(List<AstNode> exprs,
+                                                    Set<String> blockLocalNames) {
+        Set<String> result = new HashSet<>();
+
+        // Build an index: variable name → position in binding list.
+        List<VariableBinding> bindings = exprs.stream()
+                .filter(e -> e instanceof VariableBinding)
+                .map(e -> (VariableBinding) e)
+                .toList();
+        Map<String, Integer> bindingIndex = new HashMap<>();
+        for (int i = 0; i < bindings.size(); i++) bindingIndex.put(bindings.get(i).name(), i);
+
+        for (int i = 0; i < bindings.size(); i++) {
+            VariableBinding vb = bindings.get(i);
+            if (!(vb.value() instanceof Lambda lam)) continue;
+
+            // Case 1: self-recursive — body references the variable itself.
+            if (containsVarRef(lam.body(), vb.name())) result.add(vb.name());
+
+            // Case 2: forward reference — body references a variable bound later.
+            Set<String> refs  = new LinkedHashSet<>();
+            Set<String> bound = new HashSet<>(lam.params()); // params are locally bound
+            collectFreeVarsInto(lam.body(), refs, bound);
+            for (String ref : refs) {
+                Integer j = bindingIndex.get(ref);
+                if (j != null && j > i) result.add(ref); // ref is defined after this lambda
+            }
+        }
+        return result;
     }
 
     /**
