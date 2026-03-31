@@ -235,36 +235,45 @@ public final class JsonataRuntime {
 
     public static JsonNode add(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) + toNumber(b));
+        return numNode(toNumber(a) + toNumber(b));
     }
 
     public static JsonNode subtract(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) - toNumber(b));
+        return numNode(toNumber(a) - toNumber(b));
     }
 
     public static JsonNode multiply(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return NF.numberNode(toNumber(a) * toNumber(b));
+        return numNode(toNumber(a) * toNumber(b));
     }
 
     public static JsonNode divide(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
         double denom = toNumber(b);
         if (denom == 0) throw new JsonataEvaluationException("Division by zero");
-        return NF.numberNode(toNumber(a) / denom);
+        return numNode(toNumber(a) / denom);
     }
 
     public static JsonNode modulo(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
         double denom = toNumber(b);
         if (denom == 0) throw new JsonataEvaluationException("Modulo by zero");
-        return NF.numberNode(toNumber(a) % denom);
+        return numNode(toNumber(a) % denom);
     }
 
     public static JsonNode negate(JsonNode a) throws JsonataEvaluationException {
         if (missing(a)) return MISSING;
-        return NF.numberNode(-toNumber(a));
+        return numNode(-toNumber(a));
+    }
+
+    /** Returns a LongNode when {@code v} is a whole number within long range, else DoubleNode. */
+    private static JsonNode numNode(double v) {
+        if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.floor(v)
+                && v >= Long.MIN_VALUE && v <= Long.MAX_VALUE) {
+            return NF.numberNode((long) v);
+        }
+        return NF.numberNode(v);
     }
 
     // =========================================================================

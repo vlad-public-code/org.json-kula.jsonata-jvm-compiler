@@ -338,4 +338,16 @@ class ProgrammingTest {
                     """,
             "{}"));
     }
+
+    @Test
+    void greekLambdaAsFunction() throws Exception {
+        assertJsonEqual("[1, 1, 2, 3, 5, 8, 13, 21, 34]",
+                eval("""
+                (
+                  $fib := λ($n) { $n <= 1 ? $n : $fib($n-1) + $fib($n-2) };
+                  [1,2,3,4,5,6,7,8,9].$fib($)
+                )
+                """,
+                "{}"));
+    }
 }

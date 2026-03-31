@@ -384,8 +384,8 @@ public final class Parser {
     // bareIdentifier, built-in function call, or lambda (function keyword)
     private AstNode parseIdentifierOrFunctionCall() throws ParseException {
         Token t = consume(IDENTIFIER);
-        // 'function' keyword introduces a lambda expression
-        if ("function".equals(t.value()) && peek().type() == LPAREN) {
+        // 'function' keyword (or Greek λ) introduces a lambda expression
+        if (("function".equals(t.value()) || "\u03bb".equals(t.value())) && peek().type() == LPAREN) {
             return parseLambda();
         }
         if (peek().type() == LPAREN) {
