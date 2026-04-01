@@ -77,6 +77,9 @@ public final class Optimizer {
         @Override public AstNode visitFieldRef(FieldRef n, Void c)             { return n; }
         @Override public AstNode visitWildcardStep(WildcardStep n, Void c)     { return n; }
         @Override public AstNode visitDescendantStep(DescendantStep n, Void c) { return n; }
+        @Override public AstNode visitParentStep(ParentStep n, Void c)         { return n; }
+        @Override public AstNode visitPositionBinding(PositionBinding n, Void c) { return n; }
+        @Override public AstNode visitContextBinding(ContextBinding n, Void c)   { return n; }
 
         // ---- Unary minus ----
 
@@ -145,15 +148,29 @@ public final class Optimizer {
 
         @Override
         public AstNode visitPathExpr(PathExpr n, Void c) {
-            // Rewrite each step, then flatten nested PathExprs
+            // Rewrite each step, then flatten nested PathExprs.
+            // NOTE: Parenthesized nodes that appear as path steps MUST be preserved
+            // (not stripped) so the translator can detect cross-join patterns such as
+            // @$l.(library.books) where the parenthesized sub-expression is evaluated
+            // from the document root rather than the current context element.
             List<AstNode> flat = new ArrayList<>();
+            boolean prevWasContextBinding = false;
             for (AstNode step : n.steps()) {
+                if (prevWasContextBinding && step instanceof Parenthesized p) {
+                    // Preserve the Parenthesized wrapper so the translator can detect
+                    // the cross-join pattern: rewrite only the inner expression.
+                    AstNode innerRewritten = rewrite(p.inner());
+                    flat.add(innerRewritten == p.inner() ? p : new Parenthesized(innerRewritten));
+                    prevWasContextBinding = false;
+                    continue;
+                }
                 AstNode rewritten = rewrite(step);
                 if (rewritten instanceof PathExpr inner) {
                     flat.addAll(inner.steps());
                 } else {
                     flat.add(rewritten);
                 }
+                prevWasContextBinding = rewritten instanceof ContextBinding;
             }
             return flat.equals(n.steps()) ? n : new PathExpr(flat);
         }
@@ -265,8 +282,19 @@ public final class Optimizer {
             AstNode source  = rewrite(n.source());
             AstNode pattern = rewrite(n.pattern());
             AstNode update  = rewrite(n.update());
-            return source == n.source() && pattern == n.pattern() && update == n.update()
-                    ? n : new TransformExpr(source, pattern, update);
+            AstNode delete  = n.delete() != null ? rewrite(n.delete()) : null;
+            return source == n.source() && pattern == n.pattern()
+                    && update == n.update() && delete == n.delete()
+                    ? n : new TransformExpr(source, pattern, update, delete);
+        }
+
+        @Override
+        public AstNode visitTransformLambda(TransformLambda n, Void c) {
+            AstNode pattern = rewrite(n.pattern());
+            AstNode update  = rewrite(n.update());
+            AstNode delete  = n.delete() != null ? rewrite(n.delete()) : null;
+            return pattern == n.pattern() && update == n.update() && delete == n.delete()
+                    ? n : new TransformLambda(pattern, update, delete);
         }
 
         @Override
@@ -374,14 +402,20 @@ public final class Optimizer {
         /** Boolean identity/absorption rules where only one side is a literal. */
         private static AstNode tryFoldBoolIdentity(String op, AstNode left, AstNode right) {
             if ("and".equals(op)) {
+                // Absorption: one false side → always false
                 if (isFalse(left) || isFalse(right)) return new BooleanLiteral(false);
-                if (isTrue(left))  return right;
-                if (isTrue(right)) return left;
+                // Identity: true and x → x, but ONLY when x is already a boolean literal.
+                // For non-boolean x the runtime wraps the result in bool(...); returning x
+                // raw would drop that wrapping and change the result type.
+                if (isTrue(left)  && right instanceof BooleanLiteral) return right;
+                if (isTrue(right) && left  instanceof BooleanLiteral) return left;
             }
             if ("or".equals(op)) {
+                // Absorption: one true side → always true
                 if (isTrue(left) || isTrue(right))   return new BooleanLiteral(true);
-                if (isFalse(left))  return right;
-                if (isFalse(right)) return left;
+                // Identity: false or x → x, but ONLY when x is already a boolean literal.
+                if (isFalse(left)  && right instanceof BooleanLiteral) return right;
+                if (isFalse(right) && left  instanceof BooleanLiteral) return left;
             }
             return null;
         }

@@ -25,6 +25,9 @@ public sealed interface AstNode permits
         AstNode.FieldRef,
         AstNode.WildcardStep,
         AstNode.DescendantStep,
+        AstNode.ParentStep,
+        AstNode.PositionBinding,
+        AstNode.ContextBinding,
         AstNode.ArrayConstructor,
         AstNode.ObjectConstructor,
         AstNode.PathExpr,
@@ -43,6 +46,7 @@ public sealed interface AstNode permits
         AstNode.GroupByExpr,
         AstNode.ChainExpr,
         AstNode.TransformExpr,
+        AstNode.TransformLambda,
         AstNode.ForceArray,
         AstNode.ElvisExpr,
         AstNode.CoalesceExpr,
@@ -111,6 +115,23 @@ public sealed interface AstNode permits
 
     /** The {@code **} recursive-descent wildcard — matches all descendants. */
     record DescendantStep() implements AstNode {}
+
+    /** The {@code %} parent step in a path — navigates to the parent object. */
+    record ParentStep() implements AstNode {}
+
+    /**
+     * Positional variable binding: {@code expr#$var}.
+     * Binds the 0-based index of each sequence element to {@code varName}.
+     * Appears as a step inside a {@link PathExpr}.
+     */
+    record PositionBinding(String varName) implements AstNode {}
+
+    /**
+     * Context variable binding: {@code expr@$var}.
+     * Binds the current context element to {@code varName} for use in subsequent steps.
+     * Appears as a step inside a {@link PathExpr}.
+     */
+    record ContextBinding(String varName) implements AstNode {}
 
     // =========================================================================
     // Constructors
@@ -296,13 +317,28 @@ public sealed interface AstNode permits
 
     /**
      * A transform expression using the pipe ({@code |}) syntax:
-     * {@code expr | pattern | update |}.
+     * {@code expr | pattern | update [, delete] |}.
      *
-     * @param source  the source expression
-     * @param pattern the pattern selector
-     * @param update  the update object constructor
+     * @param source  the source expression (the document to transform)
+     * @param pattern the location path evaluated against the source
+     * @param update  the update object merged into each matched node
+     * @param delete  optional expression evaluating to a field name or array of
+     *                field names to remove from each matched node; may be {@code null}
      */
-    record TransformExpr(AstNode source, AstNode pattern, AstNode update) implements AstNode {}
+    record TransformExpr(AstNode source, AstNode pattern, AstNode update, AstNode delete) implements AstNode {}
+
+    /**
+     * A standalone transform function literal: {@code | pattern | update [, delete] |}.
+     *
+     * <p>When used in a chain ({@code src ~> |pattern|update|}) the chain operator
+     * passes the left-hand value as the source.  The translator emits this node as a
+     * {@code lambdaNode} so that {@code fn_pipe} can invoke it.
+     *
+     * @param pattern the location path evaluated against the supplied source
+     * @param update  the update object merged into each matched node
+     * @param delete  optional delete-field expression; may be {@code null}
+     */
+    record TransformLambda(AstNode pattern, AstNode update, AstNode delete) implements AstNode {}
 
     /**
      * The force-array postfix operator {@code expr[]}.
@@ -388,6 +424,9 @@ public sealed interface AstNode permits
         R visitFieldRef(FieldRef node, C ctx);
         R visitWildcardStep(WildcardStep node, C ctx);
         R visitDescendantStep(DescendantStep node, C ctx);
+        R visitParentStep(ParentStep node, C ctx);
+        R visitPositionBinding(PositionBinding node, C ctx);
+        R visitContextBinding(ContextBinding node, C ctx);
         R visitArrayConstructor(ArrayConstructor node, C ctx);
         R visitObjectConstructor(ObjectConstructor node, C ctx);
         R visitPathExpr(PathExpr node, C ctx);
@@ -405,6 +444,7 @@ public sealed interface AstNode permits
         R visitGroupByExpr(GroupByExpr node, C ctx);
         R visitChainExpr(ChainExpr node, C ctx);
         R visitTransformExpr(TransformExpr node, C ctx);
+        R visitTransformLambda(TransformLambda node, C ctx);
         R visitParenthesized(Parenthesized node, C ctx);
         R visitForceArray(ForceArray node, C ctx);
         R visitElvisExpr(ElvisExpr node, C ctx);
@@ -435,6 +475,9 @@ public sealed interface AstNode permits
             case FieldRef       n -> visitor.visitFieldRef(n, ctx);
             case WildcardStep   n -> visitor.visitWildcardStep(n, ctx);
             case DescendantStep n -> visitor.visitDescendantStep(n, ctx);
+            case ParentStep     n -> visitor.visitParentStep(n, ctx);
+            case PositionBinding n -> visitor.visitPositionBinding(n, ctx);
+            case ContextBinding  n -> visitor.visitContextBinding(n, ctx);
             case ArrayConstructor  n -> visitor.visitArrayConstructor(n, ctx);
             case ObjectConstructor n -> visitor.visitObjectConstructor(n, ctx);
             case PathExpr       n -> visitor.visitPathExpr(n, ctx);
@@ -452,6 +495,7 @@ public sealed interface AstNode permits
             case GroupByExpr    n -> visitor.visitGroupByExpr(n, ctx);
             case ChainExpr      n -> visitor.visitChainExpr(n, ctx);
             case TransformExpr  n -> visitor.visitTransformExpr(n, ctx);
+            case TransformLambda n -> visitor.visitTransformLambda(n, ctx);
             case Parenthesized      n -> visitor.visitParenthesized(n, ctx);
             case ForceArray         n -> visitor.visitForceArray(n, ctx);
             case ElvisExpr          n -> visitor.visitElvisExpr(n, ctx);

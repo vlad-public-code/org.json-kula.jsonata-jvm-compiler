@@ -5,12 +5,8 @@ import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataBoundFunction;
 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
-import org.json_kula.jsonata_jvm.JsonataFunctionArguments;
 
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Runtime support library for generated JSONata expression classes.
@@ -34,13 +30,35 @@ public final class JsonataRuntime {
 
     private JsonataRuntime() {}
 
-    private static final JsonNodeFactory NF = JsonNodeFactory.instance;
+    static final JsonNodeFactory NF = JsonNodeFactory.instance;
 
     /** The JSONata {@code null} literal. */
     public static final JsonNode NULL    = NullNode.getInstance();
 
     /** The JSONata "undefined" sentinel (a value that is absent). */
     public static final JsonNode MISSING = MissingNode.getInstance();
+
+    /**
+     * Delegate for {@code $eval()} — evaluates a JSONata expression string at runtime.
+     * Registered by {@code JsonataExpressionFactory} so the runtime package does not
+     * create a circular dependency on the top-level package.
+     */
+    @FunctionalInterface
+    public interface EvalDelegate {
+        JsonNode eval(String expr, JsonNode context) throws JsonataEvaluationException;
+    }
+
+    private static volatile EvalDelegate EVAL_DELEGATE = null;
+
+    /** Registers the delegate used by {@code $eval()}. */
+    public static void registerEvalDelegate(EvalDelegate delegate) {
+        EVAL_DELEGATE = delegate;
+    }
+
+    /** Returns the currently registered eval delegate, or {@code null} if none. */
+    static EvalDelegate getEvalDelegate() {
+        return EVAL_DELEGATE;
+    }
 
     // =========================================================================
     // Factory helpers
@@ -235,40 +253,62 @@ public final class JsonataRuntime {
 
     public static JsonNode add(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return numNode(toNumber(a) + toNumber(b));
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the + operator must evaluate to a number");
+        if (!b.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the + operator must evaluate to a number");
+        return numNode(a.doubleValue() + b.doubleValue());
     }
 
     public static JsonNode subtract(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return numNode(toNumber(a) - toNumber(b));
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the - operator must evaluate to a number");
+        if (!b.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the - operator must evaluate to a number");
+        return numNode(a.doubleValue() - b.doubleValue());
     }
 
     public static JsonNode multiply(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        return numNode(toNumber(a) * toNumber(b));
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the * operator must evaluate to a number");
+        if (!b.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the * operator must evaluate to a number");
+        return numNode(a.doubleValue() * b.doubleValue());
     }
 
     public static JsonNode divide(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        double denom = toNumber(b);
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the / operator must evaluate to a number");
+        if (!b.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the / operator must evaluate to a number");
+        double denom = b.doubleValue();
         if (denom == 0) throw new JsonataEvaluationException("Division by zero");
-        return numNode(toNumber(a) / denom);
+        return numNode(a.doubleValue() / denom);
     }
 
     public static JsonNode modulo(JsonNode a, JsonNode b) throws JsonataEvaluationException {
         if (missing(a) || missing(b)) return MISSING;
-        double denom = toNumber(b);
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the % operator must evaluate to a number");
+        if (!b.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the % operator must evaluate to a number");
+        double denom = b.doubleValue();
         if (denom == 0) throw new JsonataEvaluationException("Modulo by zero");
-        return numNode(toNumber(a) % denom);
+        return numNode(a.doubleValue() % denom);
     }
 
     public static JsonNode negate(JsonNode a) throws JsonataEvaluationException {
         if (missing(a)) return MISSING;
-        return numNode(-toNumber(a));
+        if (!a.isNumber()) throw new JsonataEvaluationException(
+                "The operand of the - operator must evaluate to a number");
+        return numNode(-a.doubleValue());
     }
 
     /** Returns a LongNode when {@code v} is a whole number within long range, else DoubleNode. */
-    private static JsonNode numNode(double v) {
+    static JsonNode numNode(double v) {
         if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.floor(v)
                 && v >= Long.MIN_VALUE && v <= Long.MAX_VALUE) {
             return NF.numberNode((long) v);
@@ -301,8 +341,8 @@ public final class JsonataRuntime {
     }
 
     public static JsonNode ne(JsonNode a, JsonNode b) {
-        JsonNode result = eq(a, b);
-        return bool(!result.booleanValue());
+        if (missing(a) || missing(b)) return bool(false);
+        return bool(!eq(a, b).booleanValue());
     }
 
     public static JsonNode lt(JsonNode a, JsonNode b) throws JsonataEvaluationException {
@@ -345,6 +385,22 @@ public final class JsonataRuntime {
         return bool(isTruthy(a) || isTruthy(b));
     }
 
+    /**
+     * Elvis / default operator: returns {@code left} if truthy, otherwise {@code right}.
+     * Evaluates {@code left} exactly once.
+     */
+    public static JsonNode elvis(JsonNode left, JsonNode right) {
+        return isTruthy(left) ? left : right;
+    }
+
+    /**
+     * Coalescing operator: returns {@code left} if defined (not MISSING), otherwise {@code right}.
+     * Evaluates {@code left} exactly once.
+     */
+    public static JsonNode coalesce(JsonNode left, JsonNode right) {
+        return missing(left) ? right : left;
+    }
+
     /** Tests whether {@code item} is contained in {@code seq}. */
     public static JsonNode in_(JsonNode item, JsonNode seq) {
         if (missing(item) || missing(seq)) return bool(false);
@@ -362,7 +418,9 @@ public final class JsonataRuntime {
      * <ul>
      *   <li>false, null, missing → false</li>
      *   <li>0, "" → false</li>
-     *   <li>empty array / empty object → false</li>
+     *   <li>empty object → false</li>
+     *   <li>array: empty or all members falsy → false; at least one truthy member → true</li>
+     *   <li>function (lambda token) → false</li>
      *   <li>everything else → true</li>
      * </ul>
      */
@@ -370,8 +428,18 @@ public final class JsonataRuntime {
         if (n == null || n.isMissingNode() || n.isNull()) return false;
         if (n.isBoolean()) return n.booleanValue();
         if (n.isNumber()) return n.doubleValue() != 0;
-        if (n.isTextual()) return !n.textValue().isEmpty();
-        if (n.isArray() || n.isObject()) return n.size() > 0;
+        if (n.isTextual()) {
+            // Lambda / function tokens are falsy per the JSONata spec ("functions → false")
+            if (LambdaRegistry.isLambdaToken(n)) return false;
+            return !n.textValue().isEmpty();
+        }
+        if (n.isObject()) return n.size() > 0;
+        if (n.isArray()) {
+            // An array is truthy iff at least one of its members is truthy (spec rule).
+            // An empty array or an array whose every member is falsy is falsy.
+            for (JsonNode elem : n) { if (isTruthy(elem)) return true; }
+            return false;
+        }
         return true;
     }
 
@@ -416,8 +484,19 @@ public final class JsonataRuntime {
 
     /** Creates an integer range array {@code [from, from+1, ..., to]}. */
     public static JsonNode range(JsonNode from, JsonNode to) throws JsonataEvaluationException {
-        int f = (int) toNumber(from);
-        int t = (int) toNumber(to);
+        if (missing(from) || missing(to)) return MISSING;
+        if (!from.isNumber()) throw new JsonataEvaluationException(
+                "The left side of the range operator (..) must evaluate to an integer");
+        if (!to.isNumber()) throw new JsonataEvaluationException(
+                "The right side of the range operator (..) must evaluate to an integer");
+        double fd = from.doubleValue();
+        double td = to.doubleValue();
+        if (fd != Math.floor(fd)) throw new JsonataEvaluationException(
+                "The left side of the range operator (..) must be an integer");
+        if (td != Math.floor(td)) throw new JsonataEvaluationException(
+                "The right side of the range operator (..) must be an integer");
+        int f = (int) fd;
+        int t = (int) td;
         ArrayNode result = NF.arrayNode();
         for (int i = f; i <= t; i++) result.add(i);
         return result;
@@ -432,28 +511,36 @@ public final class JsonataRuntime {
         return NF.textNode(toText(arg));
     }
 
-    public static JsonNode fn_number(JsonNode arg) throws JsonataEvaluationException {
+    public static JsonNode fn_string(JsonNode arg, JsonNode prettify) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode(toNumber(arg));
+        if (missing(prettify) || !isTruthy(prettify)) return fn_string(arg);
+        return StringBuiltins.fn_string_prettify(arg);
+    }
+
+    public static JsonNode fn_number(JsonNode arg) throws JsonataEvaluationException {
+        return NumericBuiltins.fn_number(arg);
     }
 
     public static JsonNode fn_boolean(JsonNode arg) {
+        if (missing(arg)) return MISSING;
         return bool(isTruthy(arg));
     }
 
     public static JsonNode fn_not(JsonNode arg) {
+        if (missing(arg)) return MISSING;
         return bool(!isTruthy(arg));
     }
 
     public static JsonNode fn_type(JsonNode arg) {
-        if (missing(arg)) return NF.textNode("undefined");
+        if (missing(arg)) return MISSING;
+        if (LambdaRegistry.isLambdaToken(arg)) return NF.textNode("function");
         if (arg.isNull())    return NF.textNode("null");
         if (arg.isNumber())  return NF.textNode("number");
         if (arg.isTextual()) return NF.textNode("string");
         if (arg.isBoolean()) return NF.textNode("boolean");
         if (arg.isArray())   return NF.textNode("array");
         if (arg.isObject())  return NF.textNode("object");
-        return NF.textNode("undefined");
+        return MISSING;
     }
 
     public static JsonNode fn_exists(JsonNode arg) {
@@ -475,309 +562,183 @@ public final class JsonataRuntime {
     }
 
     public static JsonNode fn_round(JsonNode arg) throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        return NF.numberNode(Math.round(toNumber(arg)));
+        return NumericBuiltins.fn_round(arg, MISSING);
+    }
+
+    public static JsonNode fn_round(JsonNode arg, JsonNode precision) throws JsonataEvaluationException {
+        return NumericBuiltins.fn_round(arg, precision);
     }
 
     public static JsonNode fn_abs(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode(Math.abs(toNumber(arg)));
+        return numNode(Math.abs(toNumber(arg)));
     }
 
     public static JsonNode fn_sqrt(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
         double v = toNumber(arg);
         if (v < 0) throw new JsonataEvaluationException("$sqrt: argument must be non-negative");
-        return NF.numberNode(Math.sqrt(v));
+        return numNode(Math.sqrt(v));
     }
 
     public static JsonNode fn_power(JsonNode base, JsonNode exp) throws JsonataEvaluationException {
         if (missing(base) || missing(exp)) return MISSING;
-        return NF.numberNode(Math.pow(toNumber(base), toNumber(exp)));
+        double result = Math.pow(toNumber(base), toNumber(exp));
+        if (Double.isInfinite(result) || Double.isNaN(result))
+            throw new JsonataEvaluationException(
+                    "$power: the result of the power function is out of range");
+        return numNode(result);
+    }
+
+    public static JsonNode fn_random() {
+        return NumericBuiltins.fn_random();
+    }
+
+    public static JsonNode fn_formatBase(JsonNode number, JsonNode radix)
+            throws JsonataEvaluationException {
+        return NumericBuiltins.fn_formatBase(number, radix);
+    }
+
+    public static JsonNode fn_formatNumber(JsonNode number, JsonNode picture)
+            throws JsonataEvaluationException {
+        return NumericBuiltins.fn_formatNumber(number, picture, MISSING);
+    }
+
+    public static JsonNode fn_formatNumber(JsonNode number, JsonNode picture, JsonNode options)
+            throws JsonataEvaluationException {
+        return NumericBuiltins.fn_formatNumber(number, picture, options);
+    }
+
+    public static JsonNode fn_formatInteger(JsonNode number, JsonNode picture)
+            throws JsonataEvaluationException {
+        return NumericBuiltins.fn_formatInteger(number, picture);
+    }
+
+    public static JsonNode fn_parseInteger(JsonNode string, JsonNode picture)
+            throws JsonataEvaluationException {
+        return NumericBuiltins.fn_parseInteger(string, picture);
     }
 
     // =========================================================================
-    // Built-in functions — string
+    // Built-in functions — string (thin delegations to StringBuiltins)
     // =========================================================================
 
     public static JsonNode fn_uppercase(JsonNode arg) throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        return NF.textNode(toText(arg).toUpperCase());
+        return StringBuiltins.fn_uppercase(arg);
     }
 
     public static JsonNode fn_lowercase(JsonNode arg) throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        return NF.textNode(toText(arg).toLowerCase());
+        return StringBuiltins.fn_lowercase(arg);
     }
 
     public static JsonNode fn_trim(JsonNode arg) throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        // JSONata $trim normalises whitespace: collapse all internal runs of
-        // whitespace (tabs, newlines, multiple spaces) to a single space and
-        // strip leading/trailing whitespace.
-        return NF.textNode(toText(arg).replaceAll("\\s+", " ").strip());
+        return StringBuiltins.fn_trim(arg);
     }
 
     public static JsonNode fn_length(JsonNode arg) throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        return NF.numberNode(toText(arg).length());
+        return StringBuiltins.fn_length(arg);
     }
 
     public static JsonNode fn_substring(JsonNode str, JsonNode start)
             throws JsonataEvaluationException {
-        if (missing(str)) return MISSING;
-        String s = toText(str);
-        int begin = clampIndex((int) toNumber(start), s.length());
-        return NF.textNode(s.substring(begin));
+        return StringBuiltins.fn_substring(str, start);
     }
 
     public static JsonNode fn_substring(JsonNode str, JsonNode start, JsonNode length)
             throws JsonataEvaluationException {
-        if (missing(str)) return MISSING;
-        String s = toText(str);
-        int len  = s.length();
-        int begin = clampIndex((int) toNumber(start), len);
-        int end   = Math.min(begin + (int) toNumber(length), len);
-        return NF.textNode(begin < end ? s.substring(begin, end) : "");
+        return StringBuiltins.fn_substring(str, start, length);
     }
 
     public static JsonNode fn_substringBefore(JsonNode str, JsonNode chars)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(chars)) return MISSING;
-        String s = toText(str);
-        String c = toText(chars);
-        int idx = s.indexOf(c);
-        return NF.textNode(idx < 0 ? s : s.substring(0, idx));
+        return StringBuiltins.fn_substringBefore(str, chars);
     }
 
     public static JsonNode fn_substringAfter(JsonNode str, JsonNode chars)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(chars)) return MISSING;
-        String s = toText(str);
-        String c = toText(chars);
-        int idx = s.indexOf(c);
-        return NF.textNode(idx < 0 ? "" : s.substring(idx + c.length()));
+        return StringBuiltins.fn_substringAfter(str, chars);
     }
 
     public static JsonNode fn_contains(JsonNode str, JsonNode search)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(search)) return MISSING;
-        if (isRegexToken(search)) {
-            byte[] bytes = toText(str).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            return bool(lookupRegex(search).matcher(bytes)
-                    .search(0, bytes.length, org.joni.Option.NONE) >= 0);
-        }
-        return bool(toText(str).contains(toText(search)));
+        return StringBuiltins.fn_contains(str, search);
     }
 
     public static JsonNode fn_split(JsonNode str, JsonNode separator)
             throws JsonataEvaluationException {
-        return fn_split(str, separator, MISSING);
+        return StringBuiltins.fn_split(str, separator);
     }
 
     public static JsonNode fn_split(JsonNode str, JsonNode separator, JsonNode limit)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(separator)) return MISSING;
-        String s = toText(str);
-        int lim = missing(limit) ? -1 : (int) toNumber(limit);
-        ArrayNode result = NF.arrayNode();
-        if (isRegexToken(separator)) {
-            org.joni.Regex rx = lookupRegex(separator);
-            byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            int start = 0;
-            int count = 0;
-            org.joni.Matcher m = rx.matcher(bytes);
-            while (start <= bytes.length) {
-                if (lim >= 0 && count >= lim) break;
-                int found = m.search(start, bytes.length, org.joni.Option.NONE);
-                if (found < 0) {
-                    result.add(new String(bytes, start, bytes.length - start,
-                            java.nio.charset.StandardCharsets.UTF_8));
-                    break;
-                }
-                result.add(new String(bytes, start, found - start,
-                        java.nio.charset.StandardCharsets.UTF_8));
-                count++;
-                int end = m.getEnd();
-                start = (end > found) ? end : end + 1;
-            }
-        } else {
-            String sep = toText(separator);
-            if (sep.isEmpty()) {
-                s.codePoints().forEach(cp -> result.add(new String(Character.toChars(cp))));
-            } else {
-                int start = 0;
-                int count = 0;
-                int idx;
-                while ((idx = s.indexOf(sep, start)) >= 0) {
-                    if (lim >= 0 && count >= lim) break;
-                    result.add(s.substring(start, idx));
-                    count++;
-                    start = idx + sep.length();
-                }
-                if (lim < 0 || count < lim) result.add(s.substring(start));
-            }
-        }
-        return result;
+        return StringBuiltins.fn_split(str, separator, limit);
     }
 
     public static JsonNode fn_match(JsonNode str, JsonNode pattern)
             throws JsonataEvaluationException {
-        return fn_match(str, pattern, MISSING);
+        return StringBuiltins.fn_match(str, pattern);
     }
 
     public static JsonNode fn_match(JsonNode str, JsonNode pattern, JsonNode limit)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(pattern)) return MISSING;
-        String s = toText(str);
-        org.joni.Regex rx = isRegexToken(pattern) ? lookupRegex(pattern)
-                : buildLiteralRegex(toText(pattern));
-        int lim = missing(limit) ? Integer.MAX_VALUE : (int) toNumber(limit);
-        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        org.joni.Matcher m = rx.matcher(bytes);
-        ArrayNode results = NF.arrayNode();
-        int pos = 0;
-        int count = 0;
-        while (pos <= bytes.length && count < lim) {
-            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
-            if (found < 0) break;
-            int end = m.getEnd();
-            org.joni.Region region = m.getRegion();
-            ObjectNode obj = NF.objectNode();
-            obj.put("match", new String(bytes, found, end - found,
-                    java.nio.charset.StandardCharsets.UTF_8));
-            obj.put("index", bytePosToCharPos(s, found));
-            ArrayNode groups = NF.arrayNode();
-            if (region != null) {
-                for (int i = 1; i < region.getNumRegs(); i++) {
-                    int gb = region.getBeg(i);
-                    int ge = region.getEnd(i);
-                    groups.add(gb >= 0
-                            ? new String(bytes, gb, ge - gb, java.nio.charset.StandardCharsets.UTF_8)
-                            : "");
-                }
-            }
-            obj.set("groups", groups);
-            results.add(obj);
-            count++;
-            pos = (end > found) ? end : end + 1;
-        }
-        return results.isEmpty() ? MISSING : results;
+        return StringBuiltins.fn_match(str, pattern, limit);
     }
 
     public static JsonNode fn_replace(JsonNode str, JsonNode pattern, JsonNode replacement)
             throws JsonataEvaluationException {
-        return fn_replace(str, pattern, replacement, MISSING);
+        return StringBuiltins.fn_replace(str, pattern, replacement);
     }
 
     public static JsonNode fn_replace(JsonNode str, JsonNode pattern,
                                        JsonNode replacement, JsonNode limit)
             throws JsonataEvaluationException {
-        if (missing(str) || missing(pattern) || missing(replacement)) return MISSING;
-        String s = toText(str);
-        org.joni.Regex rx = isRegexToken(pattern) ? lookupRegex(pattern)
-                : buildLiteralRegex(toText(pattern));
-        int lim = missing(limit) ? Integer.MAX_VALUE : (int) toNumber(limit);
-        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        org.joni.Matcher m = rx.matcher(bytes);
-        StringBuilder sb = new StringBuilder();
-        int pos = 0;
-        int count = 0;
-        while (pos <= bytes.length && count < lim) {
-            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
-            if (found < 0) break;
-            int end = m.getEnd();
-            sb.append(new String(bytes, pos, found - pos,
-                    java.nio.charset.StandardCharsets.UTF_8));
-            String matchStr = new String(bytes, found, end - found,
-                    java.nio.charset.StandardCharsets.UTF_8);
-            org.joni.Region region = m.getRegion();
-            if (isLambdaToken(replacement)) {
-                ObjectNode matchObj = NF.objectNode();
-                matchObj.put("match", matchStr);
-                matchObj.put("index", bytePosToCharPos(s, found));
-                ArrayNode groups = NF.arrayNode();
-                if (region != null) {
-                    for (int i = 1; i < region.getNumRegs(); i++) {
-                        int gb = region.getBeg(i);
-                        int ge = region.getEnd(i);
-                        groups.add(gb >= 0
-                                ? new String(bytes, gb, ge - gb, java.nio.charset.StandardCharsets.UTF_8)
-                                : "");
-                    }
-                }
-                matchObj.set("groups", groups);
-                sb.append(toText(lookupLambda(replacement).apply(matchObj)));
-            } else {
-                sb.append(expandReplacement(toText(replacement), matchStr, bytes, region));
-            }
-            count++;
-            pos = (end > found) ? end : end + 1;
-        }
-        if (pos <= bytes.length) {
-            sb.append(new String(bytes, pos, bytes.length - pos,
-                    java.nio.charset.StandardCharsets.UTF_8));
-        }
-        return NF.textNode(sb.toString());
-    }
-
-    private static String expandReplacement(String repl, String wholeMatch,
-                                             byte[] bytes, org.joni.Region region) {
-        StringBuilder out = new StringBuilder();
-        int i = 0;
-        while (i < repl.length()) {
-            char c = repl.charAt(i);
-            if (c == '$' && i + 1 < repl.length()) {
-                char next = repl.charAt(i + 1);
-                if (next == '$') {
-                    out.append('$');
-                    i += 2;
-                } else if (Character.isDigit(next)) {
-                    int j = i + 1;
-                    while (j < repl.length() && Character.isDigit(repl.charAt(j))) j++;
-                    int idx = Integer.parseInt(repl.substring(i + 1, j));
-                    if (idx == 0) {
-                        out.append(wholeMatch);
-                    } else if (region != null && idx < region.getNumRegs()) {
-                        int gb = region.getBeg(idx);
-                        int ge = region.getEnd(idx);
-                        if (gb >= 0) {
-                            out.append(new String(bytes, gb, ge - gb,
-                                    java.nio.charset.StandardCharsets.UTF_8));
-                        }
-                    }
-                    i = j;
-                } else {
-                    out.append(c);
-                    i++;
-                }
-            } else {
-                out.append(c);
-                i++;
-            }
-        }
-        return out.toString();
-    }
-
-    private static int bytePosToCharPos(String s, int bytePos) {
-        int charPos = 0;
-        int b = 0;
-        while (b < bytePos && charPos < s.length()) {
-            int cp = s.codePointAt(charPos);
-            charPos += Character.charCount(cp);
-            b += new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        }
-        return charPos;
+        return StringBuiltins.fn_replace(str, pattern, replacement, limit);
     }
 
     public static JsonNode fn_join(JsonNode arr, JsonNode separator)
             throws JsonataEvaluationException {
-        if (missing(arr)) return MISSING;
-        String sep = missing(separator) ? "" : toText(separator);
-        if (!arr.isArray()) return fn_string(arr);
-        StringJoiner sj = new StringJoiner(sep);
-        for (JsonNode elem : arr) sj.add(toText(elem));
-        return NF.textNode(sj.toString());
+        return StringBuiltins.fn_join(arr, separator);
+    }
+
+    public static JsonNode fn_pad(JsonNode str, JsonNode width) throws JsonataEvaluationException {
+        return StringBuiltins.fn_pad(str, width, MISSING);
+    }
+
+    public static JsonNode fn_pad(JsonNode str, JsonNode width, JsonNode padChar)
+            throws JsonataEvaluationException {
+        return StringBuiltins.fn_pad(str, width, padChar);
+    }
+
+    public static JsonNode fn_eval(JsonNode expr) throws JsonataEvaluationException {
+        return StringBuiltins.fn_eval(expr, MISSING);
+    }
+
+    public static JsonNode fn_eval(JsonNode expr, JsonNode context) throws JsonataEvaluationException {
+        return StringBuiltins.fn_eval(expr, context);
+    }
+
+    public static JsonNode fn_base64encode(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_base64encode(str);
+    }
+
+    public static JsonNode fn_base64decode(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_base64decode(str);
+    }
+
+    public static JsonNode fn_encodeUrlComponent(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_encodeUrlComponent(str);
+    }
+
+    public static JsonNode fn_decodeUrlComponent(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_decodeUrlComponent(str);
+    }
+
+    public static JsonNode fn_encodeUrl(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_encodeUrl(str);
+    }
+
+    public static JsonNode fn_decodeUrl(JsonNode str) throws JsonataEvaluationException {
+        return StringBuiltins.fn_decodeUrl(str);
     }
 
     // =========================================================================
@@ -791,37 +752,46 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_sum(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return NF.numberNode(0);
-        if (!arg.isArray()) return NF.numberNode(toNumber(arg));
+        if (!arg.isArray()) {
+            requireNumericArg(arg, "$sum");
+            return numNode(arg.doubleValue());
+        }
         double sum = 0;
-        for (JsonNode elem : arg) sum += toNumber(elem);
-        return NF.numberNode(sum);
+        for (JsonNode elem : arg) { requireNumericArg(elem, "$sum"); sum += elem.doubleValue(); }
+        return numNode(sum);
     }
 
     public static JsonNode fn_max(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return NF.numberNode(toNumber(arg));
+        if (!arg.isArray()) { requireNumericArg(arg, "$max"); return numNode(arg.doubleValue()); }
         if (arg.size() == 0) return MISSING;
         double max = Double.NEGATIVE_INFINITY;
-        for (JsonNode elem : arg) { double v = toNumber(elem); if (v > max) max = v; }
-        return NF.numberNode(max);
+        for (JsonNode elem : arg) { requireNumericArg(elem, "$max"); double v = elem.doubleValue(); if (v > max) max = v; }
+        return numNode(max);
     }
 
     public static JsonNode fn_min(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return NF.numberNode(toNumber(arg));
+        if (!arg.isArray()) { requireNumericArg(arg, "$min"); return numNode(arg.doubleValue()); }
         if (arg.size() == 0) return MISSING;
         double min = Double.POSITIVE_INFINITY;
-        for (JsonNode elem : arg) { double v = toNumber(elem); if (v < min) min = v; }
-        return NF.numberNode(min);
+        for (JsonNode elem : arg) { requireNumericArg(elem, "$min"); double v = elem.doubleValue(); if (v < min) min = v; }
+        return numNode(min);
     }
 
     public static JsonNode fn_average(JsonNode arg) throws JsonataEvaluationException {
         if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return NF.numberNode(toNumber(arg));
+        if (!arg.isArray()) { requireNumericArg(arg, "$average"); return numNode(arg.doubleValue()); }
         if (arg.size() == 0) return MISSING;
         double sum = 0;
-        for (JsonNode elem : arg) sum += toNumber(elem);
-        return NF.numberNode(sum / arg.size());
+        for (JsonNode elem : arg) { requireNumericArg(elem, "$average"); sum += elem.doubleValue(); }
+        return numNode(sum / arg.size());
+    }
+
+    private static void requireNumericArg(JsonNode n, String fnName) throws JsonataEvaluationException {
+        if (!n.isNumber())
+            throw new JsonataEvaluationException(
+                    fnName + " requires an array of numbers, but found " + n.getNodeType());
     }
 
     public static JsonNode fn_append(JsonNode a, JsonNode b) {
@@ -866,80 +836,54 @@ public final class JsonataRuntime {
         else if (!node.isMissingNode()) acc.add(node);
     }
 
+    public static JsonNode fn_shuffle(JsonNode arg) {
+        return SequenceBuiltins.fn_shuffle(arg);
+    }
+
+    public static JsonNode fn_zip(JsonNode... arrays) {
+        if (arrays.length == 0) return MISSING;
+        int minLen = Integer.MAX_VALUE;
+        for (JsonNode arr : arrays) {
+            if (missing(arr)) return MISSING;
+            if (!arr.isArray()) return MISSING;
+            minLen = Math.min(minLen, arr.size());
+        }
+        if (minLen == Integer.MAX_VALUE) minLen = 0;
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < minLen; i++) {
+            ArrayNode tuple = NF.arrayNode();
+            for (JsonNode arr : arrays) tuple.add(arr.get(i));
+            result.add(tuple);
+        }
+        return result;
+    }
+
+    // =========================================================================
+    // Built-in functions — higher-order sequence (thin delegations to SequenceBuiltins)
+    // =========================================================================
+
     public static JsonNode fn_sort(JsonNode arg) throws JsonataEvaluationException {
-        return fn_sort(arg, null);
+        return SequenceBuiltins.fn_sort(arg);
     }
 
     public static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn)
             throws JsonataEvaluationException {
-        if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return arg;
-        List<JsonNode> list = new ArrayList<>();
-        for (JsonNode e : arg) list.add(e);
-        Comparator<JsonNode> cmp = (a, b) -> {
-            try {
-                JsonNode ka = keyFn != null ? keyFn.apply(a) : a;
-                JsonNode kb = keyFn != null ? keyFn.apply(b) : b;
-                if (ka.isNumber() && kb.isNumber())
-                    return Double.compare(ka.doubleValue(), kb.doubleValue());
-                if (ka.isTextual() && kb.isTextual())
-                    return ka.textValue().compareTo(kb.textValue());
-                return 0;
-            } catch (JsonataEvaluationException ex) {
-                throw new RuntimeException(ex);
-            }
-        };
-        try { list.sort(cmp); }
-        catch (RuntimeException e) {
-            if (e.getCause() instanceof JsonataEvaluationException jee) throw jee;
-            throw e;
-        }
-        ArrayNode result = NF.arrayNode();
-        list.forEach(result::add);
-        return result;
+        return SequenceBuiltins.fn_sort(arg, keyFn);
     }
 
     public static JsonNode fn_map(JsonNode arr, JsonataLambda fn)
             throws JsonataEvaluationException {
-        if (missing(arr)) return MISSING;
-        ArrayNode result = NF.arrayNode();
-        if (arr.isArray()) {
-            for (JsonNode elem : arr) result.add(fn.apply(elem));
-        } else {
-            result.add(fn.apply(arr));
-        }
-        return result;
+        return SequenceBuiltins.fn_map(arr, fn);
     }
 
     public static JsonNode fn_filter(JsonNode arr, JsonataLambda predicate)
             throws JsonataEvaluationException {
-        return filter(arr, predicate);
+        return SequenceBuiltins.fn_filter(arr, predicate);
     }
 
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws JsonataEvaluationException {
-        if (missing(arr)) return init;
-        // fn receives a pair array [acc, elem]; the translator unpacks this for
-        // multi-param lambdas via genUnpackLambda.
-        List<JsonNode> items = new ArrayList<>();
-        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
-        // When no initial value is given (MISSING), use the first element as the
-        // accumulator and start folding from the second element — matching JSONata
-        // semantics for $reduce without initialValue.
-        int start;
-        JsonNode acc;
-        if (missing(init)) {
-            if (items.isEmpty()) return MISSING;
-            acc   = items.get(0);
-            start = 1;
-        } else {
-            acc   = init;
-            start = 0;
-        }
-        for (int i = start; i < items.size(); i++) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)));
-        }
-        return acc;
+        return SequenceBuiltins.fn_reduce(arr, fn, init);
     }
 
     /**
@@ -949,14 +893,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn)
             throws JsonataEvaluationException {
-        if (missing(arr)) return MISSING;
-        List<JsonNode> items = new ArrayList<>();
-        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
-        ArrayNode result = NF.arrayNode();
-        for (int i = 0; i < items.size(); i++) {
-            result.add(fn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr)));
-        }
-        return result;
+        return SequenceBuiltins.fn_map_indexed(arr, fn);
     }
 
     /**
@@ -965,14 +902,24 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_filter_indexed(JsonNode arr, JsonataLambda predicate)
             throws JsonataEvaluationException {
-        if (missing(arr)) return MISSING;
+        return SequenceBuiltins.fn_filter_indexed(arr, predicate);
+    }
+
+    /**
+     * Maps {@code fn} over each element of {@code seq}, passing {@code [element, index]}
+     * to the lambda. Results are collected (non-missing) and flattened one level.
+     * Used by the positional-binding operator ({@code #$i}).
+     */
+    public static JsonNode eachIndexed(JsonNode seq, JsonataLambda fn)
+            throws JsonataEvaluationException {
+        if (seq == null || seq.isMissingNode()) return MISSING;
         List<JsonNode> items = new ArrayList<>();
-        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
+        if (seq.isArray()) seq.forEach(items::add); else items.add(seq);
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < items.size(); i++) {
-            if (isTruthy(predicate.apply(
-                    NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr))))
-                result.add(items.get(i));
+            JsonNode pair = NF.arrayNode().add(items.get(i)).add(NF.numberNode(i));
+            JsonNode val = fn.apply(pair);
+            if (!val.isMissingNode()) appendToSequence(result, val);
         }
         return unwrap(result);
     }
@@ -983,21 +930,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_single(JsonNode arr, JsonataLambda predicate)
             throws JsonataEvaluationException {
-        if (missing(arr))
-            throw new JsonataEvaluationException("$single: no match found");
-        List<JsonNode> items = new ArrayList<>();
-        if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
-        JsonNode found = null;
-        for (JsonNode item : items) {
-            if (isTruthy(predicate.apply(item))) {
-                if (found != null)
-                    throw new JsonataEvaluationException("$single: more than one match found");
-                found = item;
-            }
-        }
-        if (found == null)
-            throw new JsonataEvaluationException("$single: no match found");
-        return found;
+        return SequenceBuiltins.fn_single(arr, predicate);
     }
 
     /**
@@ -1008,14 +941,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_sift(JsonNode obj, JsonataLambda fn)
             throws JsonataEvaluationException {
-        if (missing(obj) || !obj.isObject()) return MISSING;
-        ObjectNode result = NF.objectNode();
-        for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
-            Map.Entry<String, JsonNode> e = it.next();
-            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
-            if (isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
-        }
-        return result;
+        return SequenceBuiltins.fn_sift(obj, fn);
     }
 
     // =========================================================================
@@ -1026,14 +952,66 @@ public final class JsonataRuntime {
         if (missing(obj) || !obj.isObject()) return MISSING;
         ArrayNode result = NF.arrayNode();
         obj.fieldNames().forEachRemaining(result::add);
-        return result;
+        return result.isEmpty() ? MISSING : result;
     }
 
     public static JsonNode fn_values(JsonNode obj) {
         if (missing(obj) || !obj.isObject()) return MISSING;
         ArrayNode result = NF.arrayNode();
         obj.fields().forEachRemaining(e -> result.add(e.getValue()));
-        return result;
+        return result.isEmpty() ? MISSING : result;
+    }
+
+    /**
+     * Implements the JSONata transform operator {@code src ~> |location|update[,delete]|}.
+     *
+     * <ol>
+     *   <li>Deep-copies {@code source} so the original is never mutated.</li>
+     *   <li>Evaluates {@code locationFn} against the copy to obtain the target nodes.</li>
+     *   <li>For each target (ObjectNode), merges the result of {@code updateFn} into it.</li>
+     *   <li>Optionally removes fields named by {@code deleteFields} from each target.</li>
+     * </ol>
+     *
+     * @param source      the document to transform
+     * @param locationFn  lambda that navigates to the nodes to update (receives the copy)
+     * @param updateFn    lambda that produces the update object (receives each matched node)
+     * @param deleteFields a string or array-of-strings naming fields to delete, or MISSING
+     */
+    public static JsonNode fn_transform(JsonNode source,
+                                        JsonataLambda locationFn,
+                                        JsonataLambda updateFn,
+                                        JsonNode deleteFields)
+            throws JsonataEvaluationException {
+        if (missing(source)) return MISSING;
+        // Deep-copy so mutations don't affect the caller's document.
+        JsonNode copy = source.deepCopy();
+        // Navigate to the target nodes (they are in-copy references, so mutations stick).
+        JsonNode targets = locationFn.apply(copy);
+        if (!missing(targets)) {
+            List<JsonNode> targetList = new ArrayList<>();
+            if (targets.isArray()) targets.forEach(targetList::add);
+            else targetList.add(targets);
+            for (JsonNode target : targetList) {
+                if (!target.isObject()) continue;
+                ObjectNode targetObj = (ObjectNode) target;
+                // Merge update fields (evaluate update against the ORIGINAL target values).
+                JsonNode update = updateFn.apply(target);
+                if (!missing(update) && update.isObject()) {
+                    update.fields().forEachRemaining(e -> targetObj.set(e.getKey(), e.getValue()));
+                }
+                // Delete fields.
+                if (!missing(deleteFields)) {
+                    if (deleteFields.isTextual()) {
+                        targetObj.remove(deleteFields.textValue());
+                    } else if (deleteFields.isArray()) {
+                        for (JsonNode f : deleteFields) {
+                            if (f.isTextual()) targetObj.remove(f.textValue());
+                        }
+                    }
+                }
+            }
+        }
+        return copy;
     }
 
     public static JsonNode fn_merge(JsonNode arr) {
@@ -1046,15 +1024,77 @@ public final class JsonataRuntime {
         return result;
     }
 
+    /**
+     * Returns the value associated with {@code key} in {@code obj}.
+     * When {@code obj} is an array of objects, returns an array of all matching values.
+     */
+    public static JsonNode fn_lookup(JsonNode obj, JsonNode key) {
+        if (missing(obj) || missing(key)) return MISSING;
+        String k = key.textValue();
+        if (k == null) return MISSING;
+        if (obj.isObject()) {
+            JsonNode v = obj.get(k);
+            return (v == null || v.isMissingNode()) ? MISSING : v;
+        }
+        if (obj.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : obj) {
+                if (elem.isObject()) {
+                    JsonNode v = elem.get(k);
+                    if (v != null && !v.isMissingNode()) appendToSequence(result, v);
+                }
+            }
+            return unwrap(result);
+        }
+        return MISSING;
+    }
+
+    /**
+     * Splits each key/value pair of {@code obj} into a separate single-key object,
+     * returning an array of those objects.
+     */
+    public static JsonNode fn_spread(JsonNode obj) {
+        if (missing(obj)) return MISSING;
+        if (obj.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : obj) {
+                JsonNode spread = fn_spread(elem);
+                if (!missing(spread)) appendToSequence(result, spread);
+            }
+            return unwrap(result);
+        }
+        if (!obj.isObject()) return MISSING;
+        ArrayNode result = NF.arrayNode();
+        obj.fields().forEachRemaining(e -> {
+            ObjectNode single = NF.objectNode();
+            single.set(e.getKey(), e.getValue());
+            result.add(single);
+        });
+        return result;
+    }
+
+    /**
+     * Throws a {@link JsonataEvaluationException} with {@code message} if
+     * {@code condition} is falsy; otherwise returns MISSING (undefined).
+     */
+    public static JsonNode fn_assert(JsonNode condition, JsonNode message)
+            throws JsonataEvaluationException {
+        if (!isTruthy(condition)) {
+            String m = missing(message) ? "$assert() statement failed" : toText(message);
+            throw new JsonataEvaluationException(m);
+        }
+        return MISSING;
+    }
+
     public static JsonNode fn_each(JsonNode obj, JsonataLambda fn)
             throws JsonataEvaluationException {
         if (missing(obj) || !obj.isObject()) return MISSING;
         ArrayNode result = NF.arrayNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> e = it.next();
-            // fn receives [key, value] pair
-            JsonNode pair = NF.arrayNode().add(e.getKey()).add(e.getValue());
-            JsonNode r = fn.apply(pair);
+            // fn receives [value, key, object] — value first, matching JSONata spec
+            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            JsonNode r = fn.apply(triple);
             if (!missing(r)) result.add(r);
         }
         return unwrap(result);
@@ -1064,12 +1104,101 @@ public final class JsonataRuntime {
     // Built-in functions — date/time
     // =========================================================================
 
+    /**
+     * {@code $now()} — returns the evaluation-start timestamp as an ISO 8601 UTC string.
+     *
+     * <p>The same frozen timestamp is returned for every call within one evaluation,
+     * per the JSONata specification.
+     */
     public static JsonNode fn_now() {
-        return NF.textNode(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        return NF.textNode(DateTimeUtils.millisToIso(EvaluationContext.evaluationMillis()));
     }
 
+    /**
+     * {@code $now(picture)} — returns the evaluation-start timestamp formatted with
+     * an XPath/XQuery picture string (UTC timezone).
+     */
+    public static JsonNode fn_now(JsonNode picture) throws JsonataEvaluationException {
+        if (missing(picture)) return fn_now();
+        return NF.textNode(DateTimeUtils.millisToPicture(
+                EvaluationContext.evaluationMillis(), toText(picture), null));
+    }
+
+    /**
+     * {@code $now(picture, timezone)} — returns the evaluation-start timestamp formatted
+     * with an XPath/XQuery picture string in the given {@code ±HHMM} timezone.
+     */
+    public static JsonNode fn_now(JsonNode picture, JsonNode timezone)
+            throws JsonataEvaluationException {
+        if (missing(picture)) return fn_now();
+        String tz = missing(timezone) ? null : toText(timezone);
+        return NF.textNode(DateTimeUtils.millisToPicture(
+                EvaluationContext.evaluationMillis(), toText(picture), tz));
+    }
+
+    /**
+     * {@code $millis()} — returns the evaluation-start timestamp as milliseconds
+     * since the Unix epoch.
+     *
+     * <p>The same frozen value is returned for every call within one evaluation.
+     */
     public static JsonNode fn_millis() {
-        return NF.numberNode(System.currentTimeMillis());
+        return NF.numberNode(EvaluationContext.evaluationMillis());
+    }
+
+    /**
+     * {@code $fromMillis(number)} — converts milliseconds since the Unix epoch to
+     * an ISO 8601 UTC string, e.g. {@code "2017-11-07T15:12:37.121Z"}.
+     */
+    public static JsonNode fn_fromMillis(JsonNode millis) throws JsonataEvaluationException {
+        if (missing(millis)) return MISSING;
+        return NF.textNode(DateTimeUtils.millisToIso((long) toNumber(millis)));
+    }
+
+    /**
+     * {@code $fromMillis(number, picture)} — converts milliseconds since the Unix epoch
+     * to a string formatted with an XPath/XQuery picture string (UTC timezone).
+     */
+    public static JsonNode fn_fromMillis(JsonNode millis, JsonNode picture)
+            throws JsonataEvaluationException {
+        if (missing(millis)) return MISSING;
+        if (missing(picture)) return fn_fromMillis(millis);
+        return NF.textNode(DateTimeUtils.millisToPicture(
+                (long) toNumber(millis), toText(picture), null));
+    }
+
+    /**
+     * {@code $fromMillis(number, picture, timezone)} — converts milliseconds since the
+     * Unix epoch to a string formatted with an XPath/XQuery picture string in the given
+     * {@code ±HHMM} timezone.
+     */
+    public static JsonNode fn_fromMillis(JsonNode millis, JsonNode picture, JsonNode timezone)
+            throws JsonataEvaluationException {
+        if (missing(millis)) return MISSING;
+        if (missing(picture)) return fn_fromMillis(millis);
+        String tz = missing(timezone) ? null : toText(timezone);
+        return NF.textNode(DateTimeUtils.millisToPicture(
+                (long) toNumber(millis), toText(picture), tz));
+    }
+
+    /**
+     * {@code $toMillis(timestamp)} — parses an ISO 8601 timestamp string and returns
+     * milliseconds since the Unix epoch.
+     */
+    public static JsonNode fn_toMillis(JsonNode timestamp) throws JsonataEvaluationException {
+        if (missing(timestamp)) return MISSING;
+        return NF.numberNode(DateTimeUtils.isoToMillis(toText(timestamp)));
+    }
+
+    /**
+     * {@code $toMillis(timestamp, picture)} — parses a timestamp string using an
+     * XPath/XQuery picture string and returns milliseconds since the Unix epoch.
+     */
+    public static JsonNode fn_toMillis(JsonNode timestamp, JsonNode picture)
+            throws JsonataEvaluationException {
+        if (missing(timestamp)) return MISSING;
+        if (missing(picture)) return fn_toMillis(timestamp);
+        return NF.numberNode(DateTimeUtils.pictureToMillis(toText(timestamp), toText(picture)));
     }
 
     // =========================================================================
@@ -1082,7 +1211,7 @@ public final class JsonataRuntime {
     }
 
     // =========================================================================
-    // Chain operator helper
+    // Chain operator helper (thin delegations to LambdaRegistry)
     // =========================================================================
 
     /**
@@ -1098,16 +1227,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_pipe(JsonNode arg, JsonNode fn)
             throws JsonataEvaluationException {
-        if (!isLambdaToken(fn)) {
-            throw new JsonataEvaluationException(
-                    "Right-hand side of ~> is not a function; got: " + fn);
-        }
-        if (isLambdaToken(arg)) {
-            final JsonataLambda f = lookupLambda(arg);
-            final JsonataLambda g = lookupLambda(fn);
-            return lambdaNode(x -> g.apply(f.apply(x)));
-        }
-        return lookupLambda(fn).apply(arg);
+        return LambdaRegistry.fn_pipe(arg, fn);
     }
 
     /**
@@ -1117,11 +1237,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode fn_apply(JsonNode fn, JsonNode arg)
             throws JsonataEvaluationException {
-        if (isLambdaToken(fn)) {
-            return lookupLambda(fn).apply(arg);
-        }
-        throw new JsonataEvaluationException(
-                "Right-hand side of ~> is not a function; got: " + fn);
+        return LambdaRegistry.fn_apply(fn, arg);
     }
 
     /**
@@ -1130,13 +1246,81 @@ public final class JsonataRuntime {
      * later resolved by {@link #fn_apply}.
      */
     public static JsonNode lambdaNode(JsonataLambda fn) {
-        String key = String.valueOf(LAMBDA_COUNTER.incrementAndGet());
-        LAMBDA_REGISTRY.put(key, fn);
-        return NF.textNode(LAMBDA_PREFIX + key);
+        return LambdaRegistry.lambdaNode(fn);
     }
 
     // =========================================================================
-    // Internal helpers
+    // Regex node (thin delegation to RegexRegistry)
+    // =========================================================================
+
+    /**
+     * Compiles a JSONata regex literal and stores it in the registry.
+     * Returns a sentinel {@link TextNode} with prefix {@code "__rx:"} that
+     * can be passed through the Jackson type system and later resolved by
+     * the regex runtime.
+     *
+     * @param pattern the regex pattern string (without delimiters)
+     * @param flags   flags string: {@code "i"} for case-insensitive,
+     *                {@code "m"} for multiline, or {@code ""} for none
+     */
+    public static JsonNode regexNode(String pattern, String flags)
+            throws JsonataEvaluationException {
+        return RegexRegistry.regexNode(pattern, flags);
+    }
+
+    // =========================================================================
+    // Bindings support (thin delegations to EvaluationContext)
+    // =========================================================================
+
+    /**
+     * Merges permanent bindings from the generated class with per-evaluation
+     * bindings and installs the result as the active bindings for this thread.
+     *
+     * <p>Must be paired with a {@link #endEvaluation()} call in a finally block.
+     *
+     * @param permanentValues    permanent named values registered on the expression instance
+     * @param permanentFunctions permanent named functions registered on the expression instance
+     * @param perEval            per-evaluation bindings, or {@code null}
+     */
+    public static void beginEvaluation(Map<String, JsonNode> permanentValues,
+                                       Map<String, JsonataBoundFunction> permanentFunctions,
+                                       JsonataBindings perEval) {
+        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval);
+    }
+
+    /**
+     * Clears the active bindings for the current thread.
+     * Always call this in a {@code finally} block after {@link #beginEvaluation}.
+     */
+    public static void endEvaluation() {
+        EvaluationContext.endEvaluation();
+    }
+
+    /**
+     * Resolves a named value from the active bindings.
+     *
+     * @param name the variable name (without the leading {@code $})
+     * @return the bound {@link JsonNode}, or {@link #MISSING} if not bound
+     */
+    public static JsonNode resolveBinding(String name) {
+        return EvaluationContext.resolveBinding(name);
+    }
+
+    /**
+     * Calls a named function from the active bindings.
+     *
+     * @param name the function name (without the leading {@code $})
+     * @param args the arguments to pass
+     * @return the function result, or {@link #MISSING} if no function is bound to {@code name}
+     * @throws JsonataEvaluationException if the function throws
+     */
+    public static JsonNode callBoundFunction(String name, JsonNode[] args)
+            throws JsonataEvaluationException {
+        return EvaluationContext.callBoundFunction(name, args);
+    }
+
+    // =========================================================================
+    // Internal helpers (package-private so helper classes can call them)
     // =========================================================================
 
     /** Public variant used by generated coalesce expressions ({@code ??}). */
@@ -1144,7 +1328,7 @@ public final class JsonataRuntime {
         return n == null || n.isMissingNode();
     }
 
-    private static boolean missing(JsonNode n) {
+    static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
     }
 
@@ -1179,7 +1363,7 @@ public final class JsonataRuntime {
     }
 
     /** Handles negative indices (count from end). */
-    private static int clampIndex(int i, int len) {
+    static int clampIndex(int i, int len) {
         if (i < 0) i = Math.max(0, len + i);
         return Math.min(i, len);
     }
@@ -1188,7 +1372,7 @@ public final class JsonataRuntime {
      * Adds {@code val} to {@code acc}, flattening one level of arrays
      * (JSONata sequence flattening rule).
      */
-    private static void appendToSequence(ArrayNode acc, JsonNode val) {
+    static void appendToSequence(ArrayNode acc, JsonNode val) {
         if (val.isArray()) val.forEach(acc::add);
         else if (!val.isMissingNode()) acc.add(val);
     }
@@ -1197,178 +1381,11 @@ public final class JsonataRuntime {
      * Returns the single element if the array has exactly one item, otherwise
      * returns the array as-is. Empty arrays return {@link #MISSING}.
      */
-    private static JsonNode unwrap(ArrayNode arr) {
+    static JsonNode unwrap(ArrayNode arr) {
         return switch (arr.size()) {
             case 0 -> MISSING;
             case 1 -> arr.get(0);
             default -> arr;
         };
-    }
-
-    // =========================================================================
-    // Internal — lambda registry for the ~> chain operator
-    // =========================================================================
-
-    /**
-     * Maps lambda token keys to their {@link JsonataLambda} implementations.
-     * Lambdas are represented as plain {@link TextNode}s with the sentinel prefix
-     * {@code "__\u03bb:"} followed by the registry key, so they flow through
-     * the Jackson type system without requiring a custom {@code JsonNode} subclass.
-     */
-    private static final java.util.concurrent.ConcurrentHashMap<String, JsonataLambda>
-            LAMBDA_REGISTRY = new java.util.concurrent.ConcurrentHashMap<>();
-
-    private static final String LAMBDA_PREFIX = "__\u03bb:";
-    private static final java.util.concurrent.atomic.AtomicLong LAMBDA_COUNTER =
-            new java.util.concurrent.atomic.AtomicLong();
-
-    private static boolean isLambdaToken(JsonNode n) {
-        return n != null && n.isTextual() && n.textValue().startsWith(LAMBDA_PREFIX);
-    }
-
-    private static JsonataLambda lookupLambda(JsonNode n) throws JsonataEvaluationException {
-        String key = n.textValue().substring(LAMBDA_PREFIX.length());
-        JsonataLambda fn = LAMBDA_REGISTRY.get(key);
-        if (fn == null) throw new JsonataEvaluationException("Lambda expired or not found: " + key);
-        return fn;
-    }
-
-    // =========================================================================
-    // Internal — regex registry
-    // =========================================================================
-
-    /**
-     * Compiles a JSONata regex literal and stores it in the registry.
-     * Returns a sentinel {@link TextNode} with prefix {@code "__rx:"} that
-     * can be passed through the Jackson type system and later resolved by
-     * {@link #lookupRegex}.
-     *
-     * @param pattern the regex pattern string (without delimiters)
-     * @param flags   flags string: {@code "i"} for case-insensitive,
-     *                {@code "m"} for multiline, or {@code ""} for none
-     */
-    public static JsonNode regexNode(String pattern, String flags)
-            throws JsonataEvaluationException {
-        int opts = org.joni.Option.NONE;
-        if (flags.contains("i")) opts |= org.joni.Option.IGNORECASE;
-        if (flags.contains("m")) opts |= org.joni.Option.MULTILINE;
-        byte[] pat = pattern.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        org.joni.Regex rx = new org.joni.Regex(pat, 0, pat.length, opts,
-                org.jcodings.specific.UTF8Encoding.INSTANCE,
-                org.joni.Syntax.ECMAScript,
-                org.joni.WarnCallback.DEFAULT);
-        String key = String.valueOf(REGEX_COUNTER.incrementAndGet());
-        REGEX_REGISTRY.put(key, rx);
-        return NF.textNode(REGEX_PREFIX + key);
-    }
-
-    /** Builds a regex that matches the literal string {@code s} (no special regex chars). */
-    private static org.joni.Regex buildLiteralRegex(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            // Escape ECMAScript metacharacters
-            if ("\\^$.|?*+()[]{}/".indexOf(c) >= 0) sb.append('\\');
-            sb.append(c);
-        }
-        byte[] pat = sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        return new org.joni.Regex(pat, 0, pat.length, org.joni.Option.NONE,
-                org.jcodings.specific.UTF8Encoding.INSTANCE,
-                org.joni.Syntax.ECMAScript,
-                org.joni.WarnCallback.DEFAULT);
-    }
-
-    private static final java.util.concurrent.ConcurrentHashMap<String, org.joni.Regex>
-            REGEX_REGISTRY = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final String REGEX_PREFIX = "__rx:";
-    private static final java.util.concurrent.atomic.AtomicLong REGEX_COUNTER =
-            new java.util.concurrent.atomic.AtomicLong();
-
-    private static boolean isRegexToken(JsonNode n) {
-        return n != null && n.isTextual() && n.textValue().startsWith(REGEX_PREFIX);
-    }
-
-    private static org.joni.Regex lookupRegex(JsonNode n) throws JsonataEvaluationException {
-        String key = n.textValue().substring(REGEX_PREFIX.length());
-        org.joni.Regex rx = REGEX_REGISTRY.get(key);
-        if (rx == null) throw new JsonataEvaluationException("Regex token expired: " + key);
-        return rx;
-    }
-
-    // =========================================================================
-    // Bindings support
-    // =========================================================================
-
-    /**
-     * Holds the active {@link JsonataBindings} for the current evaluation thread.
-     * Set by {@link #beginEvaluation} and cleared by {@link #endEvaluation}.
-     */
-    private static final ThreadLocal<JsonataBindings> CURRENT_BINDINGS = new ThreadLocal<>();
-
-    /**
-     * Merges permanent bindings from the generated class with per-evaluation
-     * bindings and installs the result as the active bindings for this thread.
-     *
-     * <p>Must be paired with a {@link #endEvaluation()} call in a finally block.
-     *
-     * @param permanentValues    permanent named values registered on the expression instance
-     * @param permanentFunctions permanent named functions registered on the expression instance
-     * @param perEval            per-evaluation bindings, or {@code null}
-     */
-    public static void beginEvaluation(Map<String, JsonNode> permanentValues,
-                                       Map<String, JsonataBoundFunction> permanentFunctions,
-                                       JsonataBindings perEval) {
-        JsonataBindings merged = new JsonataBindings();
-        permanentValues.forEach(merged::bindValue);
-        permanentFunctions.forEach(merged::bindFunction);
-        if (perEval != null) {
-            // Per-evaluation bindings override permanent ones.
-            perEval.getValues().forEach(merged::bindValue);
-            perEval.getFunctions().forEach(merged::bindFunction);
-        }
-        CURRENT_BINDINGS.set(merged);
-    }
-
-    /**
-     * Clears the active bindings for the current thread.
-     * Always call this in a {@code finally} block after {@link #beginEvaluation}.
-     */
-    public static void endEvaluation() {
-        CURRENT_BINDINGS.remove();
-    }
-
-    /**
-     * Resolves a named value from the active bindings.
-     *
-     * @param name the variable name (without the leading {@code $})
-     * @return the bound {@link JsonNode}, or {@link #MISSING} if not bound
-     */
-    public static JsonNode resolveBinding(String name) {
-        JsonataBindings b = CURRENT_BINDINGS.get();
-        if (b == null) return MISSING;
-        JsonNode v = b.getValue(name);
-        return v != null ? v : MISSING;
-    }
-
-    /**
-     * Calls a named function from the active bindings.
-     *
-     * @param name the function name (without the leading {@code $})
-     * @param args the arguments to pass
-     * @return the function result, or {@link #MISSING} if no function is bound to {@code name}
-     * @throws JsonataEvaluationException if the function throws
-     */
-    public static JsonNode callBoundFunction(String name, JsonNode[] args)
-            throws JsonataEvaluationException {
-        JsonataBindings b = CURRENT_BINDINGS.get();
-        if (b != null) {
-            JsonataBoundFunction fn = b.getFunction(name);
-            if (fn != null) {
-                List<JsonNode> coerced = FunctionSignature.coerce(
-                        fn.getFunctionSignature(), Arrays.asList(args));
-                return fn.apply(new JsonataFunctionArguments(coerced));
-            }
-        }
-        return MISSING;
     }
 }
