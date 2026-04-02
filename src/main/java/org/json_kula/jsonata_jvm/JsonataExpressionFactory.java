@@ -1,11 +1,13 @@
 package org.json_kula.jsonata_jvm;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.json_kula.jsonata_jvm.loader.JsonataExpressionLoader;
 import org.json_kula.jsonata_jvm.loader.JsonataLoadException;
 import org.json_kula.jsonata_jvm.optimizer.Optimizer;
 import org.json_kula.jsonata_jvm.parser.ParseException;
 import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
+import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 import org.json_kula.jsonata_jvm.translator.Translator;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,8 +38,23 @@ public class JsonataExpressionFactory {
 
     private static final AtomicInteger CLASS_COUNTER = new AtomicInteger();
     private static final String GEN_PACKAGE = "org.json_kula.jsonata_jvm.gen";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final JsonataExpressionLoader loader = new JsonataExpressionLoader();
+
+    public JsonataExpressionFactory() {
+        JsonataRuntime.registerEvalDelegate((expr, ctx) -> {
+            try {
+                JsonataExpression compiled = compile(expr);
+                if (!ctx.isMissingNode()) {
+                    return compiled.evaluate(MAPPER.writeValueAsString(ctx));
+                }
+                return compiled.evaluate("{}");
+            } catch (JsonataCompilationException | com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new JsonataEvaluationException("$eval: " + e.getMessage());
+            }
+        });
+    }
 
     /**
      * Compiles {@code expression} and returns a ready-to-evaluate

@@ -258,9 +258,11 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_xAndTrue_simplifiedToX() throws ParseException {
-        // $x and true  →  $x
-        assertEquals(new VariableRef("x"), opt("$x and true"));
+    void optimize_xAndTrue_notSimplified() throws ParseException {
+        // $x and true cannot be simplified to $x: $x may be non-boolean at runtime,
+        // but and_ always returns bool(...). Returning $x raw would change the result type.
+        assertEquals(new BinaryOp("and", new VariableRef("x"), new BooleanLiteral(true)),
+                opt("$x and true"));
     }
 
     @Test
@@ -270,9 +272,10 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_xOrFalse_simplifiedToX() throws ParseException {
-        // $x or false  →  $x
-        assertEquals(new VariableRef("x"), opt("$x or false"));
+    void optimize_xOrFalse_notSimplified() throws ParseException {
+        // $x or false cannot be simplified to $x: same reason as $x and true.
+        assertEquals(new BinaryOp("or", new VariableRef("x"), new BooleanLiteral(false)),
+                opt("$x or false"));
     }
 
     @Test

@@ -40,6 +40,12 @@ public final class Parser {
 
     private final List<Token> tokens;
     private int cursor;
+    /**
+     * When {@code > 0}, the postfix {@code |} (transform-as-postfix-operator) is suppressed.
+     * This prevents the separator {@code |} between pattern and update inside a transform
+     * literal from being greedily consumed as a nested transform postfix operator.
+     */
+    private int transformPatternDepth = 0;
 
     private Parser(List<Token> tokens) {
         this.tokens = tokens;
@@ -245,13 +251,23 @@ public final class Parser {
         while (true) {
             if (peek().type() == DOT) {
                 node = parseDotStep(node);
+            } else if (peek().type() == AT && peekAt(1).type() == VARIABLE) {
+                // Context variable binding: node@$var
+                String varName = peekAt(1).value();
+                cursor += 2; // consume AT and VARIABLE
+                node = appendToPath(node, new ContextBinding(varName));
+            } else if (peek().type() == HASH && peekAt(1).type() == VARIABLE) {
+                // Positional variable binding: node#$var
+                String varName = peekAt(1).value();
+                cursor += 2; // consume HASH and VARIABLE
+                node = appendToPath(node, new PositionBinding(varName));
             } else if (peek().type() == LBRACKET) {
                 node = parseSubscriptOrPredicate(node);
             } else if (peek().type() == CARET) {
                 node = parseSortExpr(node);
             } else if (peek().type() == LBRACE) {
                 node = parseGroupBy(node);
-            } else if (peek().type() == PIPE) {
+            } else if (peek().type() == PIPE && transformPatternDepth == 0) {
                 node = parseTransform(node);
             } else {
                 break;
@@ -260,13 +276,36 @@ public final class Parser {
         return node;
     }
 
+    /**
+     * Appends {@code step} to {@code node} by extending or creating a {@link PathExpr}.
+     * If {@code node} is already a {@link PathExpr}, the step is added to its list.
+     * Otherwise, a new two-element {@link PathExpr} is created.
+     */
+    private static AstNode appendToPath(AstNode node, AstNode step) {
+        List<AstNode> steps = new ArrayList<>();
+        if (node instanceof PathExpr pe) {
+            steps.addAll(pe.steps());
+        } else {
+            steps.add(node);
+        }
+        steps.add(step);
+        return new PathExpr(steps);
+    }
+
     // =========================================================================
     // Postfix helpers
     // =========================================================================
 
     private AstNode parseDotStep(AstNode left) throws ParseException {
         consume(DOT);
-        AstNode right = parsePrimary();
+        // % after a dot means "parent step"
+        AstNode right;
+        if (peek().type() == PERCENT) {
+            cursor++;
+            right = new ParentStep();
+        } else {
+            right = parsePrimary();
+        }
         // Flatten consecutive dot-steps into a single PathExpr
         List<AstNode> steps = new ArrayList<>();
         if (left instanceof PathExpr pe) {
@@ -307,6 +346,19 @@ public final class Parser {
             }
             return new ArraySubscript(source, inner);
         }
+        // Non-numeric predicate: for positional-binding or context-binding paths
+        // (ending in #$var or @$var), fold the predicate as a path step so that
+        // $i / $var is in scope during filtering.
+        if (source instanceof PathExpr pe) {
+            List<AstNode> pathSteps = pe.steps();
+            AstNode lastStep = pathSteps.get(pathSteps.size() - 1);
+            if (lastStep instanceof PositionBinding || lastStep instanceof ContextBinding) {
+                // Fold as a PredicateExpr path step so the binding is traversed first
+                List<AstNode> steps = new ArrayList<>(pathSteps);
+                steps.add(new PredicateExpr(new ContextRef(), inner));
+                return new PathExpr(steps);
+            }
+        }
         return new PredicateExpr(source, inner);
     }
 
@@ -336,11 +388,37 @@ public final class Parser {
 
     private AstNode parseTransform(AstNode source) throws ParseException {
         consume(PIPE);
+        // Suppress postfix-| inside the transform body so that the separator '|'
+        // is not greedily consumed as a nested transform postfix operator.
+        transformPatternDepth++;
         AstNode pattern = parseExpression();
         consume(PIPE);
         AstNode update = parseObjectConstructorNode();
+        AstNode delete = null;
+        if (tryConsume(COMMA)) {
+            delete = parseExpression();
+        }
+        transformPatternDepth--;
         consume(PIPE);
-        return new TransformExpr(source, pattern, update);
+        return new TransformExpr(source, pattern, update, delete);
+    }
+
+    /** Standalone transform literal: {@code | pattern | update [, delete] |}. */
+    private AstNode parseTransformLambda() throws ParseException {
+        consume(PIPE);
+        // Suppress postfix-| inside the transform body so that the separator '|'
+        // is not greedily consumed as a nested transform postfix operator.
+        transformPatternDepth++;
+        AstNode pattern = parseExpression();
+        consume(PIPE);
+        AstNode update = parseObjectConstructorNode();
+        AstNode delete = null;
+        if (tryConsume(COMMA)) {
+            delete = parseExpression();
+        }
+        transformPatternDepth--;
+        consume(PIPE);
+        return new TransformLambda(pattern, update, delete);
     }
 
     // =========================================================================
@@ -367,9 +445,11 @@ public final class Parser {
             case IDENTIFIER     -> parseIdentifierOrFunctionCall();
             case STAR           -> { cursor++; yield new WildcardStep(); }
             case STAR_STAR      -> { cursor++; yield new DescendantStep(); }
+            case PERCENT        -> { cursor++; yield new ParentStep(); }
             case LPAREN         -> parseParenthesised();
             case LBRACKET       -> parseArrayConstructor();
             case LBRACE         -> parseObjectConstructorNode();
+            case PIPE           -> parseTransformLambda();
             case QUESTION       -> { cursor++; yield new PartialPlaceholder(); }
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
@@ -442,25 +522,36 @@ public final class Parser {
         return new Parenthesized(inner);
     }
 
-    // [elem, elem, ...] — range is handled inside parsePrimary via LBRACKET
+    // [elem, elem, ...] — supports ranges and multi-range like [1..3, 7..9]
     private AstNode parseArrayConstructor() throws ParseException {
         consume(LBRACKET);
         List<AstNode> elements = new ArrayList<>();
         if (peek().type() != RBRACKET) {
             AstNode first = parseExpression();
-            // Range [from..to]
+            // Range element: from..to
             if (peek().type() == DOT_DOT) {
                 consume(DOT_DOT);
                 AstNode to = parseExpression();
-                consume(RBRACKET);
-                return new RangeExpr(first, to);
+                elements.add(new RangeExpr(first, to));
+            } else {
+                elements.add(first);
             }
-            elements.add(first);
             while (tryConsume(COMMA)) {
-                elements.add(parseExpression());
+                AstNode elem = parseExpression();
+                if (peek().type() == DOT_DOT) {
+                    consume(DOT_DOT);
+                    AstNode to = parseExpression();
+                    elements.add(new RangeExpr(elem, to));
+                } else {
+                    elements.add(elem);
+                }
             }
         }
         consume(RBRACKET);
+        // Unwrap single range to preserve backward-compatible RangeExpr node
+        if (elements.size() == 1 && elements.get(0) instanceof RangeExpr r) {
+            return r;
+        }
         return new ArrayConstructor(elements);
     }
 
