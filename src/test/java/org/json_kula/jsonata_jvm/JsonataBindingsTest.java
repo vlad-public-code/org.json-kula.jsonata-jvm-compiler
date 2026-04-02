@@ -11,12 +11,13 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for the bindings API:
  * <ul>
- *   <li>Per-evaluation bindings via {@link JsonataExpression#evaluate(String, JsonataBindings)}</li>
+ *   <li>Per-evaluation bindings via {@link JsonataExpression#evaluate(JsonNode, JsonataBindings)}</li>
  *   <li>Permanent value bindings via {@link JsonataExpression#assign}</li>
  *   <li>Permanent function bindings via {@link JsonataExpression#registerFunction}</li>
  *   <li>{@link JsonataBoundFunction} invocation and signature</li>
@@ -50,6 +51,10 @@ class JsonataBindingsTest {
         return FACTORY.compile(expr);
     }
 
+    private static JsonNode parseJson(String json) {
+        return JsonNodeTestHelper.parseJson(json);
+    }
+
     // =========================================================================
     // Per-evaluation value bindings
     // =========================================================================
@@ -58,7 +63,7 @@ class JsonataBindingsTest {
     void perEval_singleValue_resolvedInExpression() throws Exception {
         JsonataExpression expr = compile("$rate * price");
         JsonataBindings b = new JsonataBindings().bindValue("rate", num(1.2));
-        JsonNode result = expr.evaluate("{\"price\": 100}", b);
+        JsonNode result = expr.evaluate(parseJson("{\"price\": 100}"), b);
         assertEquals(120.0, result.doubleValue(), 1e-9);
     }
 
@@ -69,14 +74,14 @@ class JsonataBindingsTest {
                 .bindValue("a", num(1))
                 .bindValue("b", num(2))
                 .bindValue("c", num(3));
-        assertEquals(6.0, expr.evaluate("{}", b).doubleValue(), 1e-9);
+        assertEquals(6.0, expr.evaluate(EMPTY_OBJECT, b).doubleValue(), 1e-9);
     }
 
     @Test
     void perEval_stringValue_resolvedInConcat() throws Exception {
         JsonataExpression expr = compile("$greeting & \", \" & name");
         JsonataBindings b = new JsonataBindings().bindValue("greeting", str("Hello"));
-        JsonNode result = expr.evaluate("{\"name\": \"World\"}", b);
+        JsonNode result = expr.evaluate(parseJson("{\"name\": \"World\"}"), b);
         assertEquals("Hello, World", result.asText());
     }
 
@@ -84,14 +89,14 @@ class JsonataBindingsTest {
     void perEval_unboundVariable_returnsNull() throws Exception {
         // $missing is never bound — JSONata undefined propagates to null result
         JsonataExpression expr = compile("$missing");
-        JsonNode result = expr.evaluate("{}", new JsonataBindings());
+        JsonNode result = expr.evaluate(EMPTY_OBJECT, new JsonataBindings());
         assertTrue(result.isNull(), "Expected null for unbound variable");
     }
 
     @Test
     void perEval_nullBindings_behavesLikeNoBindings() throws Exception {
         JsonataExpression expr = compile("1 + 1");
-        assertEquals(2.0, expr.evaluate("{}", null).doubleValue(), 1e-9);
+        assertEquals(2.0, expr.evaluate(EMPTY_OBJECT, null).doubleValue(), 1e-9);
     }
 
     @Test
@@ -100,8 +105,8 @@ class JsonataBindingsTest {
         JsonataBindings b10 = new JsonataBindings().bindValue("discount", num(0.10));
         JsonataBindings b0  = new JsonataBindings().bindValue("discount", num(0));
         String json = "{\"price\": 200}";
-        assertEquals(180.0, expr.evaluate(json, b10).doubleValue(), 1e-9);
-        assertEquals(200.0, expr.evaluate(json, b0).doubleValue(), 1e-9);
+        assertEquals(180.0, expr.evaluate(parseJson(json), b10).doubleValue(), 1e-9);
+        assertEquals(200.0, expr.evaluate(parseJson(json), b0).doubleValue(), 1e-9);
     }
 
     @Test
@@ -109,7 +114,7 @@ class JsonataBindingsTest {
         JsonataExpression expr = compile("items[price < $maxPrice].name");
         JsonataBindings b = new JsonataBindings().bindValue("maxPrice", num(15));
         String json = "{\"items\":[{\"name\":\"A\",\"price\":10},{\"name\":\"B\",\"price\":20}]}";
-        JsonNode result = expr.evaluate(json, b);
+        JsonNode result = expr.evaluate(parseJson(json), b);
         assertEquals("A", result.asText());
     }
 
@@ -121,8 +126,8 @@ class JsonataBindingsTest {
     void assign_valueAvailableOnAllSubsequentEvals() throws Exception {
         JsonataExpression expr = compile("$taxRate * amount");
         expr.assign("taxRate", num(0.2));
-        assertEquals(20.0, expr.evaluate("{\"amount\": 100}").doubleValue(), 1e-9);
-        assertEquals(40.0, expr.evaluate("{\"amount\": 200}").doubleValue(), 1e-9);
+        assertEquals(20.0, expr.evaluate(parseJson("{\"amount\": 100}")).doubleValue(), 1e-9);
+        assertEquals(40.0, expr.evaluate(parseJson("{\"amount\": 200}")).doubleValue(), 1e-9);
     }
 
     @Test
@@ -130,16 +135,16 @@ class JsonataBindingsTest {
         JsonataExpression expr = compile("$x + $y");
         expr.assign("x", num(7));
         expr.assign("y", num(3));
-        assertEquals(10.0, expr.evaluate("{}").doubleValue(), 1e-9);
+        assertEquals(10.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
     }
 
     @Test
     void assign_overwriteExistingAssignment() throws Exception {
         JsonataExpression expr = compile("$factor * 10");
         expr.assign("factor", num(2));
-        assertEquals(20.0, expr.evaluate("{}").doubleValue(), 1e-9);
+        assertEquals(20.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
         expr.assign("factor", num(5));
-        assertEquals(50.0, expr.evaluate("{}").doubleValue(), 1e-9);
+        assertEquals(50.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
     }
 
     @Test
@@ -147,7 +152,7 @@ class JsonataBindingsTest {
         JsonataExpression e1 = compile("$x");
         JsonataExpression e2 = compile("$x");
         e1.assign("x", num(42));
-        assertTrue(e2.evaluate("{}").isNull(),
+        assertTrue(e2.evaluate(EMPTY_OBJECT).isNull(),
                 "Binding on e1 must not leak to e2");
     }
 
@@ -164,7 +169,7 @@ class JsonataBindingsTest {
                 return MAPPER.convertValue(args.get(0).doubleValue() * 2, JsonNode.class);
             }
         });
-        JsonNode result = expr.evaluate("{\"value\": 21}", b);
+        JsonNode result = expr.evaluate(parseJson("{\"value\": 21}"), b);
         assertEquals(42.0, result.doubleValue(), 1e-9);
     }
 
@@ -182,13 +187,13 @@ class JsonataBindingsTest {
                                 JsonNode.class);
                     }
                 });
-        assertEquals(7.0, expr.evaluate("{}", b).doubleValue(), 1e-9);
+        assertEquals(7.0, expr.evaluate(EMPTY_OBJECT, b).doubleValue(), 1e-9);
     }
 
     @Test
     void perEval_unboundFunction_returnsNull() throws Exception {
         JsonataExpression expr = compile("$notRegistered(1)");
-        JsonNode result = expr.evaluate("{}", new JsonataBindings());
+        JsonNode result = expr.evaluate(EMPTY_OBJECT, new JsonataBindings());
         assertTrue(result.isNull(), "Calling an unregistered function should yield null");
     }
 
@@ -201,7 +206,7 @@ class JsonataBindingsTest {
                 throw new JsonataEvaluationException("intentional error");
             }
         });
-        assertThrows(JsonataEvaluationException.class, () -> expr.evaluate("{}", b));
+        assertThrows(JsonataEvaluationException.class, () -> expr.evaluate(EMPTY_OBJECT, b));
     }
 
     // =========================================================================
@@ -218,8 +223,8 @@ class JsonataBindingsTest {
                 return MAPPER.convertValue(v * v, JsonNode.class);
             }
         });
-        assertEquals(9.0,  expr.evaluate("{\"n\":3}").doubleValue(), 1e-9);
-        assertEquals(25.0, expr.evaluate("{\"n\":5}").doubleValue(), 1e-9);
+        assertEquals(9.0,  expr.evaluate(parseJson("{\"n\":3}")).doubleValue(), 1e-9);
+        assertEquals(25.0, expr.evaluate(parseJson("{\"n\":5}")).doubleValue(), 1e-9);
     }
 
     @Test
@@ -230,7 +235,7 @@ class JsonataBindingsTest {
             @Override public String getFunctionSignature() { return "<:n>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) { return IntNode.valueOf(1); }
         });
-        assertTrue(e2.evaluate("{}").isNull(),
+        assertTrue(e2.evaluate(EMPTY_OBJECT).isNull(),
                 "Function registered on e1 must not be visible in e2");
     }
 
@@ -244,9 +249,9 @@ class JsonataBindingsTest {
         expr.assign("x", num(10));
         // Per-evaluation binding should win.
         JsonataBindings b = new JsonataBindings().bindValue("x", num(99));
-        assertEquals(99.0, expr.evaluate("{}", b).doubleValue(), 1e-9);
+        assertEquals(99.0, expr.evaluate(EMPTY_OBJECT, b).doubleValue(), 1e-9);
         // Without per-eval binding, permanent value is still there.
-        assertEquals(10.0, expr.evaluate("{}").doubleValue(), 1e-9);
+        assertEquals(10.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
     }
 
     @Test
@@ -260,8 +265,8 @@ class JsonataBindingsTest {
             @Override public String getFunctionSignature() { return "<:n>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) { return IntNode.valueOf(2); }
         });
-        assertEquals(2.0, expr.evaluate("{}", b).doubleValue(), 1e-9);
-        assertEquals(1.0, expr.evaluate("{}").doubleValue(), 1e-9);
+        assertEquals(2.0, expr.evaluate(EMPTY_OBJECT, b).doubleValue(), 1e-9);
+        assertEquals(1.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
     }
 
     // =========================================================================
@@ -310,13 +315,13 @@ class JsonataBindingsTest {
     @Test
     void evaluate_withoutBindings_stillWorks() throws Exception {
         JsonataExpression expr = compile("a + b");
-        assertEquals(7.0, expr.evaluate("{\"a\":3,\"b\":4}").doubleValue(), 1e-9);
+        assertEquals(7.0, expr.evaluate(JsonNodeTestHelper.parseJson("{\"a\":3,\"b\":4}")).doubleValue(), 1e-9);
     }
 
     @Test
     void evaluate_withEmptyBindings_stillWorks() throws Exception {
         JsonataExpression expr = compile("a * 2");
-        assertEquals(10.0, expr.evaluate("{\"a\":5}", new JsonataBindings()).doubleValue(), 1e-9);
+        assertEquals(10.0, expr.evaluate(JsonNodeTestHelper.parseJson("{\"a\":5}"), new JsonataBindings()).doubleValue(), 1e-9);
     }
 
     // =========================================================================
@@ -343,7 +348,7 @@ class JsonataBindingsTest {
                 go.await();
                 for (int i = 0; i < iterations; i++) {
                     JsonataBindings b = new JsonataBindings().bindValue("rate", num(rate));
-                    double result = expr.evaluate("{\"amount\":10}", b).doubleValue();
+                    double result = expr.evaluate(JsonNodeTestHelper.parseJson("{\"amount\":10}"), b).doubleValue();
                     if (Math.abs(result - rate * 10) > 1e-9) errors.incrementAndGet();
                 }
                 return null;
@@ -377,7 +382,7 @@ class JsonataBindingsTest {
                 ready.countDown();
                 go.await();
                 int x = counter.getAndIncrement();
-                double result = expr.evaluate("{\"x\":" + x + "}").doubleValue();
+                double result = expr.evaluate(JsonNodeTestHelper.parseJson("{\"x\":" + x + "}")).doubleValue();
                 return new double[]{x, result};
             }));
         }

@@ -19,33 +19,40 @@ final class GenCtx {
      */
     final List<String> parentVars;
 
+    /** True if we're inside an array constructor used as a step (e.g. Email.[address]). */
+    final boolean inArrayConstructorStep;
+
     GenCtx(String ctxVar, String rootVar, GenState state) {
-        this.ctxVar     = ctxVar;
-        this.rootVar    = rootVar;
-        this.state      = state;
-        this.parentVars = List.of();
+        this(ctxVar, rootVar, state, List.of(), false);
     }
 
-    private GenCtx(String ctxVar, String rootVar, GenState state, List<String> parentVars) {
+    private GenCtx(String ctxVar, String rootVar, GenState state, List<String> parentVars, 
+                   boolean inArrayConstructorStep) {
         this.ctxVar     = ctxVar;
         this.rootVar    = rootVar;
         this.state      = state;
         this.parentVars = parentVars;
+        this.inArrayConstructorStep = inArrayConstructorStep;
     }
 
     GenCtx withCtx(String newCtx) {
-        return new GenCtx(newCtx, rootVar, state, parentVars);
+        return new GenCtx(newCtx, rootVar, state, parentVars, inArrayConstructorStep);
     }
 
     /** Returns a new context with {@code newCtx} as context and the current ctxVar pushed as parent. */
     GenCtx withCtxAndParent(String newCtx) {
         List<String> newParents = new java.util.ArrayList<>(parentVars);
         newParents.add(ctxVar);
-        return new GenCtx(newCtx, rootVar, state, newParents);
+        return new GenCtx(newCtx, rootVar, state, newParents, inArrayConstructorStep);
     }
 
     /** Returns a new context with the given parent vars list. */
     GenCtx withParents(List<String> newParentVars) {
-        return new GenCtx(ctxVar, rootVar, state, newParentVars);
+        return new GenCtx(ctxVar, rootVar, state, newParentVars, inArrayConstructorStep);
+    }
+
+    /** Returns a new context with inArrayConstructorStep flag set. */
+    GenCtx withInArrayConstructorStep() {
+        return new GenCtx(ctxVar, rootVar, state, parentVars, true);
     }
 }

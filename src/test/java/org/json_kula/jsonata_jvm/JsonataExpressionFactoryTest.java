@@ -8,6 +8,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -19,11 +20,11 @@ class JsonataExpressionFactoryTest {
     private static final JsonataExpressionFactory FACTORY = new JsonataExpressionFactory();
 
     private static JsonNode eval(String expr, String json) throws Exception {
-        return FACTORY.compile(expr).evaluate(json);
+        return FACTORY.compile(expr).evaluate(JsonNodeTestHelper.parseJson(json));
     }
 
     private static JsonNode eval(String expr) throws Exception {
-        return eval(expr, "{}");
+        return FACTORY.compile(expr).evaluate(EMPTY_OBJECT);
     }
 
     private static JsonNode json(String raw) throws Exception {
@@ -313,20 +314,24 @@ class JsonataExpressionFactoryTest {
     // Reuse — same factory instance, multiple compiles
     // =========================================================================
 
+    private JsonNode parseJson(String json) throws Exception {
+        return MAPPER.readTree(json);
+    }
+
     @Test
     void compile_factoryIsReusable() throws Exception {
         JsonataExpression sum  = FACTORY.compile("a + b");
         JsonataExpression prod = FACTORY.compile("a * b");
-        assertEquals(5.0,  sum.evaluate("{\"a\":2,\"b\":3}").doubleValue(), 1e-9);
-        assertEquals(6.0, prod.evaluate("{\"a\":2,\"b\":3}").doubleValue(), 1e-9);
+        assertEquals(5.0,  sum.evaluate(parseJson("{\"a\":2,\"b\":3}")).doubleValue(), 1e-9);
+        assertEquals(6.0, prod.evaluate(parseJson("{\"a\":2,\"b\":3}")).doubleValue(), 1e-9);
     }
 
     @Test
     void compile_expressionIsReusableAcrossInputs() throws Exception {
         JsonataExpression expr = FACTORY.compile("x * 2");
-        assertEquals(4.0,  expr.evaluate("{\"x\":2}").doubleValue(), 1e-9);
-        assertEquals(10.0, expr.evaluate("{\"x\":5}").doubleValue(), 1e-9);
-        assertEquals(20.0, expr.evaluate("{\"x\":10}").doubleValue(), 1e-9);
+        assertEquals(4.0,  expr.evaluate(parseJson("{\"x\":2}")).doubleValue(), 1e-9);
+        assertEquals(10.0, expr.evaluate(parseJson("{\"x\":5}")).doubleValue(), 1e-9);
+        assertEquals(20.0, expr.evaluate(parseJson("{\"x\":10}")).doubleValue(), 1e-9);
     }
 
     // =========================================================================

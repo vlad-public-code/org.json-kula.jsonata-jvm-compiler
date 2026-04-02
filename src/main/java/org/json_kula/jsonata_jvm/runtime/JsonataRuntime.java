@@ -94,6 +94,27 @@ public final class JsonataRuntime {
         return MISSING;
     }
 
+    /**
+     * Like {@link #field} but does NOT flatten array results. Used for array/object
+     * constructor steps where we need to preserve each element's result as-is.
+     */
+    public static JsonNode fieldPreserve(JsonNode node, String name) {
+        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
+        if (node.isArray()) {
+            ArrayNode result = NF.arrayNode();
+            for (JsonNode elem : node) {
+                JsonNode val = fieldPreserve(elem, name);
+                if (!val.isMissingNode()) result.add(val);
+            }
+            return unwrap(result);
+        }
+        if (node.isObject()) {
+            JsonNode val = node.get(name);
+            return val != null ? val : MISSING;
+        }
+        return MISSING;
+    }
+
     /** Returns all field values of an object, or maps over an array. */
     public static JsonNode wildcard(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
@@ -232,6 +253,9 @@ public final class JsonataRuntime {
      * inside path expressions (e.g. the {@code [addr]} or {@code {key:val}} step
      * in {@code Email.[address]} / {@code Phone.{type: number}}) where each
      * constructed value must be kept as a single element of the output sequence.
+     * 
+     * Unlike {@link #mapStep}, this does NOT add each result directly - it keeps
+     * the result as-is, allowing array constructors to produce nested arrays.
      */
     public static JsonNode mapConstructorStep(JsonNode node, JsonataLambda fn)
             throws JsonataEvaluationException {
@@ -240,7 +264,16 @@ public final class JsonataRuntime {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (!val.isMissingNode()) result.add(val); // direct add — no flattening
+                if (!val.isMissingNode()) {
+                    // Don't flatten - keep the result as-is (especially important for array constructors)
+                    if (val.isArray()) {
+                        // For array constructors like [address], the inner result is already an array
+                        // that we want to keep as a single element, not flatten
+                        result.add(val);
+                    } else {
+                        result.add(val);
+                    }
+                }
             }
             return unwrap(result);
         }
@@ -459,6 +492,38 @@ public final class JsonataRuntime {
             else result.add(e);
         }
         return result;
+    }
+
+    /** Marker to indicate an array element should be flattened (from range expression). */
+    public record RangeHolder(int from, int to) {}
+
+    /**
+     * Creates a JSON array from the given elements, handling RangeHolder markers
+     * to flatten range expressions while preserving nested literal arrays.
+     */
+    public static JsonNode arrayOf(Object... elements) {
+        ArrayNode result = NF.arrayNode();
+        for (Object e : elements) {
+            if (e == null) continue;
+            if (e instanceof RangeHolder rh) {
+                for (int i = rh.from(); i <= rh.to(); i++) {
+                    result.add(IntNode.valueOf(i));
+                }
+            } else if (e instanceof JsonNode jn) {
+                if (!missing(jn)) result.add(jn);
+            }
+        }
+        return result;
+    }
+
+    /** Creates a RangeHolder to signal that the range should be flattened. */
+    public static RangeHolder rangeFlatten(int from, int to) {
+        return new RangeHolder(from, to);
+    }
+
+    /** Legacy method for backward compatibility. */
+    public static JsonNode arrayOf(JsonNode... elements) {
+        return arrayOf((Object[]) elements);
     }
 
     /**
@@ -1360,6 +1425,13 @@ public final class JsonataRuntime {
         if (n.isBoolean()) return String.valueOf(n.booleanValue());
         if (n.isNull()) return "null";
         return n.toString();  // array/object: JSON representation
+    }
+
+    /** Converts an Object (JsonNode or RangeHolder) to a String representation. */
+    static String toText(Object o) throws JsonataEvaluationException {
+        if (o instanceof JsonNode jn) return toText(jn);
+        if (o instanceof RangeHolder rh) return rh.from() + ".." + rh.to();
+        return String.valueOf(o);
     }
 
     /** Handles negative indices (count from end). */

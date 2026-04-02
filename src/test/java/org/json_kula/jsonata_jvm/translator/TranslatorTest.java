@@ -2,6 +2,7 @@ package org.json_kula.jsonata_jvm.translator;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.json_kula.jsonata_jvm.JsonNodeTestHelper;
 import org.junit.jupiter.api.Test;
 import org.json_kula.jsonata_jvm.JsonataExpression;
 import org.json_kula.jsonata_jvm.loader.JsonataExpressionLoader;
@@ -46,7 +47,7 @@ class TranslatorTest {
         AstNode ast = Optimizer.optimize(Parser.parse(expr));
         String src  = Translator.translate(ast, "test.gen", nextClass());
         JsonataExpression compiled = LOADER.load(src);
-        return compiled.evaluate(json);
+        return compiled.evaluate(JsonNodeTestHelper.parseJson(json));
     }
 
     /**
@@ -99,8 +100,8 @@ class TranslatorTest {
     @Test
     void translate_generatedSource_hasEvaluateMethod() throws Exception {
         String src = source("42");
-        assertTrue(src.contains("public JsonNode evaluate(String __json)"),
-                "Generated class must have evaluate(String) method");
+        assertTrue(src.contains("public JsonNode evaluate(JsonNode __input)"),
+                "Generated class must have evaluate(JsonNode) method");
     }
 
     @Test
@@ -550,8 +551,8 @@ class TranslatorTest {
     void getSourceJsonata_preserved_afterMultipleEvaluations() throws Exception {
         String expr = "x + y";
         JsonataExpression compiled = compile(expr);
-        compiled.evaluate("{\"x\":1,\"y\":2}");
-        compiled.evaluate("{\"x\":10,\"y\":20}");
+        compiled.evaluate(JsonNodeTestHelper.parseJson("{\"x\":1,\"y\":2}"));
+        compiled.evaluate(JsonNodeTestHelper.parseJson("{\"x\":10,\"y\":20}"));
         assertEquals(expr, compiled.getSourceJsonata(),
                 "getSourceJsonata() must return the same value regardless of how many times evaluate() is called");
     }

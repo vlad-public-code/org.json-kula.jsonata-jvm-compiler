@@ -8,6 +8,8 @@ import org.json_kula.jsonata_jvm.JsonataExpression;
 
 import java.util.stream.Stream;
 
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.parseJson;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
@@ -21,7 +23,7 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 class JsonataExpressionLoaderTest {
 
     /** Minimal valid JSON used as a neutral input where the expression ignores it. */
-    private static final String EMPTY_OBJ = "{}";
+    private static final JsonNode EMPTY_OBJ = EMPTY_OBJECT;
 
     // -----------------------------------------------------------------------
     // 30 valid sources
@@ -31,7 +33,7 @@ class JsonataExpressionLoaderTest {
     @MethodSource("validSources")
     void load_validSource_returnsExpectedResult(String description,
                                                 String source,
-                                                String inputJson,
+                                                JsonNode inputJson,
                                                 String expectedJson) throws Exception {
         JsonataExpression expr = new JsonataExpressionLoader().load(source);
         assertNotNull(expr, description);
@@ -50,7 +52,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr01 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -63,7 +65,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr02 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode("hello");
                     }
                 }
@@ -76,7 +78,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr03 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new IntNode(42);
                     }
                 }
@@ -89,7 +91,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.DoubleNode;
                 public class Expr04 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new DoubleNode(3.14);
                     }
                 }
@@ -102,7 +104,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.BooleanNode;
                 public class Expr05 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return BooleanNode.TRUE;
                     }
                 }
@@ -115,97 +117,81 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.BooleanNode;
                 public class Expr06 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return BooleanNode.FALSE;
                     }
                 }
                 """, EMPTY_OBJ, "false"),
 
-            // 7. Passthrough — parses JSON and returns the tree unchanged
-            arguments("passthrough: parses and returns JSON as-is", """
+            // 7. Passthrough — returns the input tree unchanged
+            arguments("passthrough: returns JSON as-is", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr07 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Invalid JSON", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return input;
                     }
                 }
-                """, "42", "42"),
+                """, parseJson("42"), "42"),
 
             // 8. Extracts a text field
             arguments("extracts text field 'name'", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr08 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json).get("name"); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Parse error", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return input.get("name");
                     }
                 }
-                """, "{\"name\":\"Alice\"}", "\"Alice\""),
+                """, parseJson("{\"name\":\"Alice\"}"), "\"Alice\""),
 
             // 9. Extracts an integer field
             arguments("extracts int field 'age'", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr09 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json).get("age"); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Parse error", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return input.get("age");
                     }
                 }
-                """, "{\"age\":30}", "30"),
+                """, parseJson("{\"age\":30}"), "30"),
 
             // 10. Extracts a boolean field
             arguments("extracts boolean field 'active'", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr10 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json).get("active"); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Parse error", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return input.get("active");
                     }
                 }
-                """, "{\"active\":true}", "true"),
+                """, parseJson("{\"active\":true}"), "true"),
 
             // 11. Extracts a nested field via JSON Pointer
             arguments("extracts nested field /a/b via JSON Pointer", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr11 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json).at("/a/b"); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Parse error", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return input.at("/a/b");
                     }
                 }
-                """, "{\"a\":{\"b\":\"deep\"}}", "\"deep\""),
+                """, parseJson("{\"a\":{\"b\":\"deep\"}}"), "\"deep\""),
 
             // 12. Returns empty ArrayNode
             arguments("returns empty ArrayNode []", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
+                import com.fasterxml.jackson.databind.node.ArrayNode;
                 public class Expr12 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        return mapper.createArrayNode();
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return new com.fasterxml.jackson.databind.ObjectMapper().createArrayNode();
                     }
                 }
                 """, EMPTY_OBJ, "[]"),
@@ -215,12 +201,10 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 import com.fasterxml.jackson.databind.node.ArrayNode;
                 public class Expr13 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        ArrayNode arr = mapper.createArrayNode();
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        ArrayNode arr = new com.fasterxml.jackson.databind.ObjectMapper().createArrayNode();
                         arr.add(1); arr.add(2); arr.add(3);
                         return arr;
                     }
@@ -232,12 +216,10 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 import com.fasterxml.jackson.databind.node.ObjectNode;
                 public class Expr14 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        ObjectNode obj = mapper.createObjectNode();
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        ObjectNode obj = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
                         obj.put("result", true);
                         return obj;
                     }
@@ -249,16 +231,13 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr15 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return new IntNode(mapper.readTree(json).size()); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Parse error", e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return new IntNode(input.size());
                     }
                 }
-                """, "[1,2,3]", "3"),
+                """, parseJson("[1,2,3]"), "3"),
 
             // 16. Uses a private helper method
             arguments("delegates to private helper method", """
@@ -267,7 +246,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr16 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode(compute());
                     }
                     private String compute() { return "computed"; }
@@ -281,7 +260,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr17 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new IntNode(square(5));
                     }
                     private static int square(int n) { return n * n; }
@@ -296,7 +275,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr18 implements JsonataExpression {
                     private static final String VERSION = "1.0";
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode(VERSION);
                     }
                 }
@@ -309,7 +288,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr19 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         int x = 7;
                         int y = 6;
                         return new IntNode(x * y);
@@ -324,7 +303,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr20 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         StringBuilder sb = new StringBuilder();
                         sb.append("foo").append("-").append("bar");
                         return new TextNode(sb.toString());
@@ -333,17 +312,17 @@ class JsonataExpressionLoaderTest {
                 """, EMPTY_OBJ, "\"foo-bar\""),
 
             // 21. Uses String.format
-            arguments("uses String.format to embed input length", """
+            arguments("uses String.format to embed input", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr21 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        return new TextNode(String.format("len=%d", json.length()));
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return new TextNode(String.format("type=%s", input.getNodeType().name()));
                     }
                 }
-                """, EMPTY_OBJ, "\"len=2\""),
+                """, EMPTY_OBJ, "\"type=OBJECT\""),
 
             // 22. if-else conditional
             arguments("if-else based on input being non-blank", """
@@ -352,8 +331,8 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.BooleanNode;
                 public class Expr22 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        if (json != null && !json.isBlank()) return BooleanNode.TRUE;
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        if (input != null && !input.isNull()) return BooleanNode.TRUE;
                         else return BooleanNode.FALSE;
                     }
                 }
@@ -366,7 +345,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr23 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         int sum = 0;
                         for (int i = 1; i <= 5; i++) sum += i;
                         return new IntNode(sum);
@@ -381,7 +360,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr24 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         int n = 100, steps = 0;
                         while (n > 1) { n /= 2; steps++; }
                         return new IntNode(steps);
@@ -389,20 +368,20 @@ class JsonataExpressionLoaderTest {
                 }
                 """, EMPTY_OBJ, "6"),
 
-            // 25. try-catch wraps Jackson parse error into JsonataEvaluationException
-            arguments("try-catch wraps parse error as JsonataEvaluationException", """
+            // 25. Input validation
+            arguments("validates input and throws JsonataEvaluationException", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
                 public class Expr25 implements JsonataExpression {
-                    private final ObjectMapper mapper = new ObjectMapper();
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        try { return mapper.readTree(json); }
-                        catch (Exception e) { throw new JsonataEvaluationException("Bad input: " + e.getMessage(), e); }
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        if (input == null || input.isNull()) {
+                            throw new JsonataEvaluationException("Input cannot be null");
+                        }
+                        return input;
                     }
                 }
-                """, "true", "true"),
+                """, parseJson("true"), "true"),
 
             // 26. Inner static utility class
             arguments("has inner static utility class", """
@@ -411,7 +390,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr26 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode(Util.tag());
                     }
                     private static class Util {
@@ -428,7 +407,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr27 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode("packaged");
                     }
                 }
@@ -441,7 +420,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr28 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new IntNode(0);
                     }
                 }
@@ -455,7 +434,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.node.BooleanNode;
                 public class CompiledJsonataExpressionForAccountOrderProductPriceTotal
                         implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return BooleanNode.TRUE;
                     }
                 }
@@ -466,22 +445,19 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
-                import com.fasterxml.jackson.databind.ObjectMapper;
-                import com.fasterxml.jackson.databind.node.ObjectNode;
+                import com.fasterxml.jackson.databind.node.IntNode;
+                import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr30 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        ObjectMapper m = new ObjectMapper();
-                        try {
-                            ObjectNode out = m.createObjectNode();
-                            out.put("input_length", json.length());
-                            out.put("parsed_type", m.readTree(json).getNodeType().name());
-                            return out;
-                        } catch (Exception e) {
-                            throw new JsonataEvaluationException("Parse error", e);
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        if (input.isObject()) {
+                            return new IntNode(input.size());
+                        } else if (input.isArray()) {
+                            return new TextNode("array:" + input.size());
                         }
+                        return new IntNode(0);
                     }
                 }
-                """, "{\"x\":1}", "{\"input_length\":7,\"parsed_type\":\"OBJECT\"}")
+                """, parseJson("{\"x\":1}"), "1")
         );
     }
 
@@ -533,9 +509,9 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
                 public abstract class AbstractExpr implements JsonataExpression {
-                    protected abstract JsonNode doEvaluate(String json) throws JsonataEvaluationException;
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        return doEvaluate(json);
+                    protected abstract JsonNode doEvaluate(JsonNode input) throws JsonataEvaluationException;
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return doEvaluate(input);
                     }
                 }
                 """),
@@ -547,7 +523,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr37 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 // class closing brace intentionally missing
@@ -560,7 +536,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr38 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance()
                     }
                 }
@@ -573,7 +549,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.TextNode;
                 public class Expr39 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return new TextNode(undeclaredVariable);
                     }
                 }
@@ -586,8 +562,8 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.example.nonexistent.MagicEvaluator;
                 public class Expr40 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        return MagicEvaluator.run(json);
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return MagicEvaluator.run(input);
                     }
                 }
                 """),
@@ -598,20 +574,20 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
                 public class Expr41 implements JsonataExpression {
-                    public String evaluate(String json) throws JsonataEvaluationException {
+                    public String evaluate(JsonNode input) throws JsonataEvaluationException {
                         return "hello";
                     }
                 }
                 """),
 
-            // 42. evaluate() takes int instead of String — wrong interface override
-            arguments("evaluate() takes int instead of String", """
+            // 42. evaluate() takes int instead of JsonNode — wrong interface override
+            arguments("evaluate() takes int instead of JsonNode", """
                 import org.json_kula.jsonata_jvm.JsonataExpression;
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr42 implements JsonataExpression {
-                    public JsonNode evaluate(int json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(int input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -626,7 +602,7 @@ class JsonataExpressionLoaderTest {
                 public class Expr43 implements JsonataExpression {
                     private final String prefix;
                     public Expr43(String prefix) { this.prefix = prefix; }
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -640,7 +616,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public enum Expr44 implements JsonataExpression {
                     INSTANCE;
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -654,7 +630,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr45 implements JsonataExpression {
                     private Expr45() {}
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -666,8 +642,8 @@ class JsonataExpressionLoaderTest {
                 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
                 import com.fasterxml.jackson.databind.JsonNode;
                 public class Expr46 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
-                        return undefinedMethod(json);
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                        return undefinedMethod(input);
                     }
                 }
                 """),
@@ -679,7 +655,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.IntNode;
                 public class Expr47 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         int x = "not an int";
                         return new IntNode(x);
                     }
@@ -690,7 +666,7 @@ class JsonataExpressionLoaderTest {
             arguments("two classes, neither implements JsonataExpression", """
                 import com.fasterxml.jackson.databind.JsonNode;
                 public class Expr48 {
-                    public JsonNode evaluate(String json) { return null; }
+                    public JsonNode evaluate(JsonNode input) { return null; }
                 }
                 class Expr48Helper {
                     public String process(String s) { return s; }
@@ -704,10 +680,10 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr49 implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }
@@ -720,7 +696,7 @@ class JsonataExpressionLoaderTest {
                 import com.fasterxml.jackson.databind.JsonNode;
                 import com.fasterxml.jackson.databind.node.NullNode;
                 public class Expr50 extends NonExistentBaseClass implements JsonataExpression {
-                    public JsonNode evaluate(String json) throws JsonataEvaluationException {
+                    public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         return NullNode.getInstance();
                     }
                 }

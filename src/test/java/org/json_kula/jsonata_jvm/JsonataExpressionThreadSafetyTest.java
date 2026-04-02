@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.parseJson;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -83,7 +84,7 @@ class JsonataExpressionThreadSafetyTest {
 
         List<double[]> results = runConcurrently(() -> {
             int n = counter.getAndIncrement();
-            JsonNode result = expr.evaluate("{\"value\":" + n + "}");
+            JsonNode result = expr.evaluate(parseJson("{\"value\":" + n + "}"));
             return new double[]{n, result.doubleValue()};
         });
 
@@ -105,7 +106,7 @@ class JsonataExpressionThreadSafetyTest {
         List<String> results = runConcurrently(() -> {
             int n = counter.getAndIncrement();
             String json = "{\"first\":\"Alice" + n + "\",\"last\":\"Smith" + n + "\"}";
-            return expr.evaluate(json).asText();
+            return expr.evaluate(parseJson(json)).asText();
         });
 
         AtomicInteger verifyIdx = new AtomicInteger(1);
@@ -126,7 +127,7 @@ class JsonataExpressionThreadSafetyTest {
 
         List<String[]> results = runConcurrently(() -> {
             int n = counter.getAndIncrement();
-            String result = expr.evaluate("{\"n\":" + n + "}").asText();
+            String result = expr.evaluate(parseJson("{\"n\":" + n + "}")).asText();
             return new String[]{String.valueOf(n), result};
         });
 
@@ -156,7 +157,7 @@ class JsonataExpressionThreadSafetyTest {
                 sb.append(i);
             }
             sb.append("]}");
-            double sum = expr.evaluate(sb.toString()).doubleValue();
+            double sum = expr.evaluate(parseJson(sb.toString())).doubleValue();
             return new double[]{n, sum};
         });
 
@@ -180,7 +181,7 @@ class JsonataExpressionThreadSafetyTest {
         List<Boolean> results = runConcurrently(() -> {
             int base = counter.getAndIncrement() % 5 + 1; // 1..5
             String json = "{\"nums\":[" + base + "," + (base + 1) + "," + (base + 2) + "]}";
-            JsonNode arr = expr.evaluate(json);
+            JsonNode arr = expr.evaluate(parseJson(json));
             boolean ok = arr.isArray()
                     && arr.size() == 3
                     && Math.abs(arr.get(0).doubleValue() - (double) base * base)         < 1e-9
@@ -221,7 +222,7 @@ class JsonataExpressionThreadSafetyTest {
             int idx = counter.getAndIncrement();
             if (idx % 2 == 0) {
                 // evaluate branch
-                JsonNode r = expr.evaluate("{\"x\":" + idx + "}");
+                JsonNode r = expr.evaluate(parseJson("{\"x\":" + idx + "}"));
                 return Math.abs(r.doubleValue() - (idx + 1)) < 1e-9;
             } else {
                 // getSourceJsonata branch
@@ -247,7 +248,7 @@ class JsonataExpressionThreadSafetyTest {
                 int n = counter.getAndIncrement();
                 // a=n, b=2, c=n  →  n*2+n = 3n
                 String json = "{\"a\":" + n + ",\"b\":2,\"c\":" + n + "}";
-                double result = expr.evaluate(json).doubleValue();
+                double result = expr.evaluate(parseJson(json)).doubleValue();
                 return new double[]{n, result};
             });
 

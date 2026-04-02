@@ -42,7 +42,8 @@ JsonataExpression expr = factory.compile("Account.Order.Product.Price * 1.2");
 ### 3. Evaluate against JSON
 
 ```java
-String json = """
+ObjectMapper mapper = new ObjectMapper();
+JsonNode input = mapper.readTree("""
     {
       "Account": {
         "Order": {
@@ -50,12 +51,12 @@ String json = """
         }
       }
     }
-    """;
+    """);
 
-JsonNode result = expr.evaluate(json);  // → 60.0
+JsonNode result = expr.evaluate(input);  // → 60.0
 ```
 
-`evaluate()` accepts any JSON document as a string and returns a Jackson `JsonNode`. The same `JsonataExpression` instance can be evaluated concurrently from multiple threads.
+`evaluate()` accepts a Jackson `JsonNode` and returns a `JsonNode`. The same `JsonataExpression` instance can be evaluated concurrently from multiple threads.
 
 ## Exception types
 
@@ -92,10 +93,14 @@ Pass a `JsonataBindings` instance as the second argument to `evaluate()` to supp
 ```java
 JsonataExpression expr = factory.compile("$taxRate * subtotal");
 
-JsonataBindings bindings = new JsonataBindings()
-        .bindValue("taxRate", mapper.convertValue(0.2, JsonNode.class));
+ObjectMapper mapper = new ObjectMapper();
+JsonNode input = mapper.readTree("{\"subtotal\": 500}");
+JsonNode taxRate = mapper.readTree("0.2");
 
-JsonNode result = expr.evaluate("{\"subtotal\": 500}", bindings);  // → 100.0
+JsonataBindings bindings = new JsonataBindings()
+        .bindValue("taxRate", taxRate);
+
+JsonNode result = expr.evaluate(input, bindings);  // → 100.0
 ```
 
 Per-evaluation bindings are not stored on the expression instance and do not affect other calls.
@@ -108,7 +113,8 @@ Use `assign()` and `registerFunction()` to attach bindings permanently to an exp
 JsonataExpression expr = factory.compile("$round2($taxRate * subtotal)");
 
 // Permanent value
-expr.assign("taxRate", mapper.convertValue(0.2, JsonNode.class));
+ObjectMapper mapper = new ObjectMapper();
+expr.assign("taxRate", mapper.readTree("0.2"));
 
 // Permanent function
 expr.registerFunction("round2", new JsonataBoundFunction() {
@@ -118,12 +124,12 @@ expr.registerFunction("round2", new JsonataBoundFunction() {
     @Override
     public JsonNode apply(JsonataFunctionArguments args) {
         double v = args.get(0).doubleValue();
-        return mapper.convertValue(Math.round(v * 100.0) / 100.0, JsonNode.class);
+        return mapper.readTree(Math.round(v * 100.0) / 100.0);
     }
 });
 
-JsonNode r1 = expr.evaluate("{\"subtotal\": 100}");  // → 20.0
-JsonNode r2 = expr.evaluate("{\"subtotal\": 333}");  // → 66.6
+JsonNode r1 = expr.evaluate(mapper.readTree("{\"subtotal\": 100}"));  // → 20.0
+JsonNode r2 = expr.evaluate(mapper.readTree("{\"subtotal\": 333}"));  // → 66.6
 ```
 
 Permanent bindings are isolated per instance — assigning to one `JsonataExpression` does not affect any other.
@@ -225,10 +231,10 @@ Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
 
 | Metric | jsonata-jvm-compiler | JSONata4Java  |
 |---|----------------------|---------------|
-| Compilation | 807 ms               | 147 ms        |
-| 100 000 evaluations | 4 079 ms             | 32 627 ms     |
-| Throughput | **~24 500 eval/s**   | ~3 100 eval/s |
-| **Speedup** | **7.9× faster**      | baseline      |
+| Compilation | 1,519 ms            | 292 ms        |
+| 100 000 evaluations | 4 514 ms            | 84 246 ms     |
+| Throughput | **~22 150 eval/s** | ~1 190 eval/s |
+| **Speedup** | **18.7× faster**   | baseline      |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates.
 
