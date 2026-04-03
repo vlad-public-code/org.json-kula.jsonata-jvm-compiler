@@ -37,9 +37,6 @@ class PerformanceComparisonTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // Resources loaded once
-    private static String expressionSource;
-    private static String inputJsonString;
     private static JsonNode inputJsonNode;   // pre-parsed — shared across all evaluations
 
     // Compiled expressions
@@ -48,8 +45,9 @@ class PerformanceComparisonTest {
 
     @BeforeAll
     static void compile() throws Exception {
-        expressionSource = resource("benchmark_expression.jsonata");
-        inputJsonString  = resource("benchmark_input.json");
+        // Resources loaded once
+        String expressionSource = resource("benchmark/benchmark_expression.jsonata");
+        String inputJsonString = resource("benchmark/benchmark_input.json");
         inputJsonNode    = MAPPER.readTree(inputJsonString);
 
         // ---- jsonata-jvm-compiler ----
@@ -77,7 +75,7 @@ class PerformanceComparisonTest {
      */
     @Test
     void bothLibraries_produceCorrectResults() throws Exception {
-        JsonNode jsjResult = jsj.evaluate(inputJsonString);
+        JsonNode jsjResult = jsj.evaluate(inputJsonNode);
         JsonNode j4jResult = j4j.evaluate(inputJsonNode);
 
         // Company name  (field key is "company" in the output object)
@@ -139,12 +137,12 @@ class PerformanceComparisonTest {
     void benchmark_jsonata_jvm_compiler_100k_evaluations() throws Exception {
         // Warmup
         for (int i = 0; i < WARMUP_ROUNDS; i++) {
-            jsj.evaluate(inputJsonString);
+            jsj.evaluate(inputJsonNode);
         }
 
         long start = System.nanoTime();
         for (int i = 0; i < EVALUATIONS; i++) {
-            jsj.evaluate(inputJsonString);
+            jsj.evaluate(inputJsonNode);
         }
         long elapsed = System.nanoTime() - start;
 
@@ -182,14 +180,14 @@ class PerformanceComparisonTest {
     void benchmark_comparison_sideBy_side() throws Exception {
         // Warmup both
         for (int i = 0; i < WARMUP_ROUNDS; i++) {
-            jsj.evaluate(inputJsonString);
+            jsj.evaluate(inputJsonNode);
             j4j.evaluate(inputJsonNode);
         }
 
         // jsonata-jvm-compiler
         long jsjStart = System.nanoTime();
         for (int i = 0; i < EVALUATIONS; i++) {
-            jsj.evaluate(inputJsonString);
+            jsj.evaluate(inputJsonNode);
         }
         long jsjElapsed = System.nanoTime() - jsjStart;
 

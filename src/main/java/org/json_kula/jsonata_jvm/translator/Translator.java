@@ -6,7 +6,6 @@ import org.json_kula.jsonata_jvm.parser.ast.AstNode.*;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 
@@ -370,7 +369,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     /** Generates an expression for the FIRST step in a path (uses {@code ctx.ctxVar}). */
     private String stepExpr(AstNode step, GenCtx ctx) {
         return switch (step) {
-            case FieldRef fr      -> "field(" + ctx.ctxVar + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            case FieldRef fr -> {
+                yield "field(" + ctx.ctxVar + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            }
             case WildcardStep ws  -> "wildcard(" + ctx.ctxVar + ")";
             case DescendantStep ds-> "descendant(" + ctx.ctxVar + ")";
             case ContextRef cr    -> ctx.ctxVar;
@@ -385,7 +386,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      */
     private String applyStep(String prevExpr, AstNode step, GenCtx ctx) {
         return switch (step) {
-            case FieldRef fr       -> "field(" + prevExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            case FieldRef fr -> {
+                yield "field(" + prevExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            }
             case WildcardStep ws   -> "wildcard(" + prevExpr + ")";
             case DescendantStep ds -> "descendant(" + prevExpr + ")";
             case ContextRef cr     -> prevExpr;
@@ -411,10 +414,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
             }
             case ArrayConstructor ac -> {
-                // e.g. Email.[address] — map per element, collect without flattening
-                // so each constructed array stays as a single element of the result.
+                // e.g. Email.[address] — map per element, each result becomes a separate sequence element.
+                // The inArrayConstructorStep flag tells the inner array constructor not to wrap
                 String tmpCtx  = "__c" + ctx.state.nextId();
-                String stepExpr = ac.accept(this, ctx.withCtx(tmpCtx));
+                String stepExpr = ac.accept(this, ctx.withCtx(tmpCtx).withInArrayConstructorStep());
                 yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
             case ObjectConstructor oc -> {
@@ -735,8 +738,28 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitArrayConstructor(ArrayConstructor n, GenCtx ctx) {
         if (n.elements().isEmpty()) return "array()";
-        List<String> elems = n.elements().stream().map(e -> e.accept(this, ctx)).toList();
-        return "array(" + String.join(", ", elems) + ")";
+        if (n.elements().size() == 1) {
+            // Single element: wrap in array to preserve it (e.g., [1] -> [1])
+            // But don't wrap if this is inside a step (like Email.[address]) - mapConstructorStep handles that
+            String elem = n.elements().get(0).accept(this, ctx);
+            if (ctx.inArrayConstructorStep) {
+                return elem; // Don't wrap - mapConstructorStep keeps results separate
+            }
+            return "arrayOf(" + elem + ")";
+        }
+        List<String> elems = n.elements().stream()
+            .map(e -> wrapArrayElement(e, ctx))
+            .toList();
+        return "arrayOf(" + String.join(", ", elems) + ")";
+    }
+
+    private String wrapArrayElement(AstNode e, GenCtx ctx) {
+        if (e instanceof RangeExpr re) {
+            int from = (int) ((NumberLiteral) re.from()).value();
+            int to = (int) ((NumberLiteral) re.to()).value();
+            return "rangeFlatten(" + from + ", " + to + ")";
+        }
+        return e.accept(this, ctx);
     }
 
     @Override

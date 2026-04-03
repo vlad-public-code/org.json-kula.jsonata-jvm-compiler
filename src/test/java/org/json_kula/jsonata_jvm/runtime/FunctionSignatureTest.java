@@ -3,12 +3,16 @@ package org.json_kula.jsonata_jvm.runtime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
+import org.json_kula.jsonata_jvm.JsonataExpression;
+import org.json_kula.jsonata_jvm.JsonataExpressionFactory;
+import org.json_kula.jsonata_jvm.JsonNodeTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
+import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -328,7 +332,7 @@ class FunctionSignatureTest {
                     }
                 });
 
-        JsonNode result = expr.evaluate("{\"val\": \"7\"}", b);
+        JsonNode result = expr.evaluate(JsonNodeTestHelper.parseJson("{\"val\": \"7\"}"), b);
         assertEquals(14.0, result.doubleValue(), 1e-9);
     }
 
@@ -348,6 +352,6 @@ class FunctionSignatureTest {
                     }
                 });
         assertThrows(org.json_kula.jsonata_jvm.JsonataEvaluationException.class,
-                () -> expr.evaluate("{}", b));
+                () -> expr.evaluate(EMPTY_OBJECT, b));
     }
 }
