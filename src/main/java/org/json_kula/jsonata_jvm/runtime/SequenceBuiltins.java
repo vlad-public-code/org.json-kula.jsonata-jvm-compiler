@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,11 +24,11 @@ final class SequenceBuiltins {
 
     private static final JsonNodeFactory NF = JsonNodeFactory.instance;
 
-    static JsonNode fn_sort(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_sort(JsonNode arg) throws RuntimeEvaluationException {
         return fn_sort(arg, null);
     }
 
-    static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn) throws JsonataEvaluationException {
+    static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isArray()) return arg;
         List<JsonNode> list = new ArrayList<>();
@@ -43,13 +42,13 @@ final class SequenceBuiltins {
                 if (ka.isTextual() && kb.isTextual())
                     return ka.textValue().compareTo(kb.textValue());
                 return 0;
-            } catch (JsonataEvaluationException ex) {
+            } catch (RuntimeEvaluationException ex) {
                 throw new RuntimeException(ex);
             }
         };
         try { list.sort(cmp); }
         catch (RuntimeException e) {
-            if (e.getCause() instanceof JsonataEvaluationException jee) throw jee;
+            if (e.getCause() instanceof RuntimeEvaluationException jee) throw jee;
             throw e;
         }
         ArrayNode result = NF.arrayNode();
@@ -68,7 +67,7 @@ final class SequenceBuiltins {
         return result;
     }
 
-    static JsonNode fn_map(JsonNode arr, JsonataLambda fn) throws JsonataEvaluationException {
+    static JsonNode fn_map(JsonNode arr, JsonataLambda fn) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         ArrayNode result = NF.arrayNode();
         if (arr.isArray()) {
@@ -80,12 +79,12 @@ final class SequenceBuiltins {
     }
 
     static JsonNode fn_filter(JsonNode arr, JsonataLambda predicate)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         return JsonataRuntime.filter(arr, predicate);
     }
 
     static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr)) return init;
         // fn receives a pair array [acc, elem]; the translator unpacks this for
         // multi-param lambdas via genUnpackLambda.
@@ -115,7 +114,7 @@ final class SequenceBuiltins {
      * Passes {@code [value, index, array]} to the lambda so that the
      * {@code $i} and {@code $a} parameters are available.
      */
-    static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn) throws JsonataEvaluationException {
+    static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -131,7 +130,7 @@ final class SequenceBuiltins {
      * Passes {@code [value, index, array]} to the predicate.
      */
     static JsonNode fn_filter_indexed(JsonNode arr, JsonataLambda predicate)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -149,21 +148,21 @@ final class SequenceBuiltins {
      * returns truthy. Throws if zero or more than one element matches.
      */
     static JsonNode fn_single(JsonNode arr, JsonataLambda predicate)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr))
-            throw new JsonataEvaluationException("$single: no match found");
+            throw new RuntimeEvaluationException("$single: no match found");
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
         JsonNode found = null;
         for (JsonNode item : items) {
             if (JsonataRuntime.isTruthy(predicate.apply(item))) {
                 if (found != null)
-                    throw new JsonataEvaluationException("$single: more than one match found");
+                    throw new RuntimeEvaluationException("$single: more than one match found");
                 found = item;
             }
         }
         if (found == null)
-            throw new JsonataEvaluationException("$single: no match found");
+            throw new RuntimeEvaluationException("$single: no match found");
         return found;
     }
 
@@ -173,7 +172,7 @@ final class SequenceBuiltins {
      * Passes {@code [value, key, object]} to the lambda so both
      * {@code $v} and {@code $k} parameters are available.
      */
-    static JsonNode fn_sift(JsonNode obj, JsonataLambda fn) throws JsonataEvaluationException {
+    static JsonNode fn_sift(JsonNode obj, JsonataLambda fn) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(obj) || !obj.isObject()) return JsonataRuntime.MISSING;
         ObjectNode result = NF.objectNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {

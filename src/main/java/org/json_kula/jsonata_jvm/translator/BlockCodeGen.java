@@ -20,6 +20,9 @@ final class BlockCodeGen {
     static String visitBlock(Translator t, Block n, GenCtx ctx) {
         List<AstNode> exprs = n.expressions();
 
+        // Empty block: return MISSING (undefined)
+        if (exprs.isEmpty()) return "MISSING";
+
         // Single expression: skip the helper method overhead.
         if (exprs.size() == 1) return exprs.get(0).accept(t, ctx);
 
@@ -76,7 +79,7 @@ final class BlockCodeGen {
             sb.append("\nprivate JsonNode ").append(methodName)
               .append("(JsonNode __root, JsonNode __ctx")
               .append(extraParamDecls)
-              .append(") throws JsonataEvaluationException {\n");
+              .append(") throws RuntimeEvaluationException {\n");
 
             // Pre-declare all holder arrays at the very top so lambdas defined
             // earlier in the block can capture them before assignment.

@@ -113,7 +113,7 @@ class HigherOrderFunctionsTest {
     void filter_singleParam_noMatchReturnsMissing() throws Exception {
         JsonNode result = eval("$filter([1, 2, 3], function($v){ $v > 10 })");
         // JSONata: empty result → undefined → null at top level
-        assertTrue(result.isNull(), "filter with no matches should return null/undefined");
+        assertTrue(result.isMissingNode(), "filter with no matches should return null/undefined");
     }
 
     @Test

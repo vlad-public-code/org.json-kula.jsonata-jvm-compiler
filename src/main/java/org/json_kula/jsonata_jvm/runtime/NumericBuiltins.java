@@ -2,7 +2,6 @@ package org.json_kula.jsonata_jvm.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -30,12 +29,12 @@ final class NumericBuiltins {
     // $number — with 0x / 0o / 0b radix-literal support
     // =========================================================================
 
-    static JsonNode fn_number(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_number(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isNumber())  return arg;
         if (arg.isBoolean()) return JsonataRuntime.numNode(arg.booleanValue() ? 1 : 0);
         if (arg.isNull())
-            throw new JsonataEvaluationException("$number: cannot convert null to a number");
+            throw new RuntimeEvaluationException("$number: cannot convert null to a number");
         if (arg.isTextual()) {
             String s = arg.textValue().trim();
             try {
@@ -47,18 +46,18 @@ final class NumericBuiltins {
                     return JsonataRuntime.numNode(Long.parseLong(s.substring(2), 2));
                 return JsonataRuntime.numNode(Double.parseDouble(s));
             } catch (NumberFormatException e) {
-                throw new JsonataEvaluationException(
-                        "$number: unable to cast value to a number: " + s);
+                throw new RuntimeEvaluationException(
+                        "D3030: $number: unable to cast value to a number: " + s);
             }
         }
-        throw new JsonataEvaluationException("$number: unable to cast value to a number");
+        throw new RuntimeEvaluationException("D3030: $number: unable to cast value to a number");
     }
 
     // =========================================================================
     // $round — precision + half-to-even (banker's rounding)
     // =========================================================================
 
-    static JsonNode fn_round(JsonNode number, JsonNode precision) throws JsonataEvaluationException {
+    static JsonNode fn_round(JsonNode number, JsonNode precision) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(number)) return JsonataRuntime.MISSING;
         double v = JsonataRuntime.toNumber(number);
         if (Double.isNaN(v) || Double.isInfinite(v)) return NF.numberNode(v);
@@ -80,12 +79,12 @@ final class NumericBuiltins {
     // $formatBase
     // =========================================================================
 
-    static JsonNode fn_formatBase(JsonNode number, JsonNode radix) throws JsonataEvaluationException {
+    static JsonNode fn_formatBase(JsonNode number, JsonNode radix) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(number)) return JsonataRuntime.MISSING;
         long n = (long) JsonataRuntime.toNumber(number);
         int r = JsonataRuntime.missing(radix) ? 10 : (int) JsonataRuntime.toNumber(radix);
         if (r < 2 || r > 36)
-            throw new JsonataEvaluationException("$formatBase: radix must be between 2 and 36");
+            throw new RuntimeEvaluationException("$formatBase: radix must be between 2 and 36");
         return NF.textNode(Long.toString(n, r));
     }
 
@@ -94,7 +93,7 @@ final class NumericBuiltins {
     // =========================================================================
 
     static JsonNode fn_formatNumber(JsonNode number, JsonNode picture, JsonNode options)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(number) || JsonataRuntime.missing(picture))
             return JsonataRuntime.MISSING;
 
@@ -143,7 +142,7 @@ final class NumericBuiltins {
     private static String formatPicture(double v, String pic,
             char decimalSep, char groupSep, char exponentSep,
             String percent, String perMille,
-            char zeroDigit, char digitChar) throws JsonataEvaluationException {
+            char zeroDigit, char digitChar) throws RuntimeEvaluationException {
 
         // --- Walk the picture: separate prefix, core specs, suffix --------
         StringBuilder prefix  = new StringBuilder();
@@ -271,7 +270,7 @@ final class NumericBuiltins {
     // =========================================================================
 
     static JsonNode fn_formatInteger(JsonNode number, JsonNode picture)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(number) || JsonataRuntime.missing(picture))
             return JsonataRuntime.MISSING;
         long n = (long) JsonataRuntime.toNumber(number);
@@ -279,7 +278,7 @@ final class NumericBuiltins {
         return NF.textNode(formatInteger(n, pic));
     }
 
-    private static String formatInteger(long n, String pic) throws JsonataEvaluationException {
+    private static String formatInteger(long n, String pic) throws RuntimeEvaluationException {
         return switch (pic) {
             case "w"  -> toWords(n, false, false);
             case "W"  -> toWords(n, false, false).toUpperCase();
@@ -293,7 +292,7 @@ final class NumericBuiltins {
     }
 
     /** Format an integer using a decimal-picture pattern (e.g. {@code #,##0}). */
-    private static String formatIntegerDecimal(long n, String pic) throws JsonataEvaluationException {
+    private static String formatIntegerDecimal(long n, String pic) throws RuntimeEvaluationException {
         // Build a DecimalFormat pattern from the picture (integer-only)
         // Detect grouping separator (',') and digit placeholders
         StringBuilder javaPat = new StringBuilder();
@@ -313,7 +312,7 @@ final class NumericBuiltins {
     // =========================================================================
 
     static JsonNode fn_parseInteger(JsonNode string, JsonNode picture)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(string) || JsonataRuntime.missing(picture))
             return JsonataRuntime.MISSING;
         String s   = JsonataRuntime.toText(string);
@@ -321,7 +320,7 @@ final class NumericBuiltins {
         return JsonataRuntime.numNode(parseInteger(s, pic));
     }
 
-    private static long parseInteger(String s, String pic) throws JsonataEvaluationException {
+    private static long parseInteger(String s, String pic) throws RuntimeEvaluationException {
         return switch (pic) {
             case "w", "W", "Ww" -> parseWords(s);
             case "I", "i"       -> parseRoman(s);
@@ -331,7 +330,7 @@ final class NumericBuiltins {
     }
 
     /** Strip grouping separators from {@code s} and parse as a long. */
-    private static long parseIntegerDecimal(String s, String pic) throws JsonataEvaluationException {
+    private static long parseIntegerDecimal(String s, String pic) throws RuntimeEvaluationException {
         // Determine grouping separator used in the picture (default ',')
         char grpSep = ',';
         for (char c : pic.toCharArray()) {
@@ -341,7 +340,7 @@ final class NumericBuiltins {
         try {
             return Long.parseLong(stripped.trim());
         } catch (NumberFormatException e) {
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "$parseInteger: cannot parse \"" + s + "\" with picture \"" + pic + "\"");
         }
     }
@@ -362,7 +361,7 @@ final class NumericBuiltins {
     private static final String[] MAG_WORDS  = { "billion", "million", "thousand" };
 
     private static String toWords(long n, boolean unused1, boolean unused2)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (n == 0) return "zero";
         if (n < 0)  return "minus " + toWords(-n, false, false);
         return wordsBelow(n);
@@ -423,7 +422,7 @@ final class NumericBuiltins {
         WORD_VALUES = Collections.unmodifiableMap(m);
     }
 
-    private static long parseWords(String s) throws JsonataEvaluationException {
+    private static long parseWords(String s) throws RuntimeEvaluationException {
         s = s.toLowerCase().replaceAll("[,\\-]", " ").trim();
         String[] tokens = s.split("\\s+");
 
@@ -436,7 +435,7 @@ final class NumericBuiltins {
             if (tok.equals("minus")) { negative = true; continue; }
 
             if (!WORD_VALUES.containsKey(tok))
-                throw new JsonataEvaluationException(
+                throw new RuntimeEvaluationException(
                         "$parseInteger: unrecognised word token \"" + tok + "\"");
             long val = WORD_VALUES.get(tok);
 
@@ -463,9 +462,9 @@ final class NumericBuiltins {
     private static final int[]    ROMAN_VALS  = {1000,900,500,400,100,90,50,40,10,9,5,4,1};
     private static final String[] ROMAN_SYMS  = {"M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"};
 
-    private static String toRoman(long n) throws JsonataEvaluationException {
+    private static String toRoman(long n) throws RuntimeEvaluationException {
         if (n <= 0 || n > 3_999_999)
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "$formatInteger: Roman numerals are only supported for 1–3,999,999");
         StringBuilder sb = new StringBuilder();
         for (int k = 0; k < ROMAN_VALS.length; k++) {
@@ -474,14 +473,14 @@ final class NumericBuiltins {
         return sb.toString();
     }
 
-    private static long parseRoman(String s) throws JsonataEvaluationException {
+    private static long parseRoman(String s) throws RuntimeEvaluationException {
         s = s.toUpperCase().trim();
         Map<Character, Integer> v = Map.of(
                 'I', 1, 'V', 5, 'X', 10, 'L', 50, 'C', 100, 'D', 500, 'M', 1000);
         long result = 0; int prev = 0;
         for (int k = s.length() - 1; k >= 0; k--) {
             int cv = v.getOrDefault(s.charAt(k), -1);
-            if (cv < 0) throw new JsonataEvaluationException(
+            if (cv < 0) throw new RuntimeEvaluationException(
                     "$parseInteger: invalid Roman numeral character '" + s.charAt(k) + "'");
             result += (cv < prev) ? -cv : cv;
             prev = cv;
@@ -493,9 +492,9 @@ final class NumericBuiltins {
     // Alphabetic (A, B … Z, AA, AB …)
     // =========================================================================
 
-    private static String toAlpha(long n, boolean upper) throws JsonataEvaluationException {
+    private static String toAlpha(long n, boolean upper) throws RuntimeEvaluationException {
         if (n <= 0)
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "$formatInteger: alphabetic format requires a positive integer");
         char base = upper ? 'A' : 'a';
         StringBuilder sb = new StringBuilder();
@@ -507,12 +506,12 @@ final class NumericBuiltins {
         return sb.toString();
     }
 
-    private static long parseAlpha(String s) throws JsonataEvaluationException {
+    private static long parseAlpha(String s) throws RuntimeEvaluationException {
         s = s.toUpperCase().trim();
         long result = 0;
         for (char c : s.toCharArray()) {
             if (c < 'A' || c > 'Z')
-                throw new JsonataEvaluationException(
+                throw new RuntimeEvaluationException(
                         "$parseInteger: invalid alphabetic character '" + c + "'");
             result = result * 26 + (c - 'A' + 1);
         }

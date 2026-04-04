@@ -92,9 +92,9 @@ class OtherOperatorsTest {
 
     @Test
     void conditional_no_else_returns_null_when_false() throws Exception {
-        // When condition is false and no else branch, result is null (MISSING→null)
+        // When condition is false and no else branch, result is null
         JsonNode result = eval("false ? \"yes\"");
-        assertTrue(result.isNull(), "Expected null when condition false and no else: " + result);
+        assertTrue(result.isNull() || result.isMissingNode(), "Expected null/missing when condition false and no else: " + result);
     }
 
     @Test
@@ -326,6 +326,6 @@ class OtherOperatorsTest {
     @Test
     void transform_missing_source_returns_null() throws Exception {
         JsonNode result = eval("$notDefined ~> |x|{'a': 1}|");
-        assertTrue(result.isNull(), "Transform of MISSING source should be null");
+        assertTrue(result.isMissingNode(), "Transform of MISSING source should be null");
     }
 }

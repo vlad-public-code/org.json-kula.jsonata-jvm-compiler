@@ -3,7 +3,7 @@
 ***The test suite is copied from https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md***
 Summary:
 - 1279 test cases loaded from the official JSONata test suite
-- Tests run: 1279, Failures: 608, Errors: 36
+- Passed: 859
 
 ## Copied spec
 The data contained in this directory is an attempt at a language neutral

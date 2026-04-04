@@ -33,6 +33,14 @@ public class JsonNodeTestHelper {
     }
 
     /**
+     * Prints generated Java code, compiles and evaluates a JSONata expression against a JSON string.
+     */
+    public static JsonNode printJavaAndEvaluate(String expression, String json) throws Exception {
+        System.out.println(FACTORY.translate(expression));
+        return FACTORY.compile(expression).evaluate(parseJson(json));
+    }
+
+    /**
      * Compiles and evaluates a JSONata expression against a JsonNode.
      */
     public static JsonNode evaluate(String expression, JsonNode json) throws Exception {

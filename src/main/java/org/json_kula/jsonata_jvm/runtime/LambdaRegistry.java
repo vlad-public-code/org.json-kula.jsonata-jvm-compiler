@@ -2,7 +2,6 @@ package org.json_kula.jsonata_jvm.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -40,10 +39,10 @@ final class LambdaRegistry {
     }
 
     /** Resolves the lambda sentinel token to the registered {@link JsonataLambda}. */
-    static JsonataLambda lookupLambda(JsonNode n) throws JsonataEvaluationException {
+    static JsonataLambda lookupLambda(JsonNode n) throws RuntimeEvaluationException {
         String key = n.textValue().substring(LAMBDA_PREFIX.length());
         JsonataLambda fn = LAMBDA_REGISTRY.get(key);
-        if (fn == null) throw new JsonataEvaluationException("Lambda expired or not found: " + key);
+        if (fn == null) throw new RuntimeEvaluationException("Lambda expired or not found: " + key);
         return fn;
     }
 
@@ -58,9 +57,9 @@ final class LambdaRegistry {
      *       (standard value-piping: {@code value ~> $fn}).</li>
      * </ul>
      */
-    static JsonNode fn_pipe(JsonNode arg, JsonNode fn) throws JsonataEvaluationException {
+    static JsonNode fn_pipe(JsonNode arg, JsonNode fn) throws RuntimeEvaluationException {
         if (!isLambdaToken(fn)) {
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "Right-hand side of ~> is not a function; got: " + fn);
         }
         if (isLambdaToken(arg)) {
@@ -76,11 +75,11 @@ final class LambdaRegistry {
      * lambda stored in a local variable.
      * {@code fn} must be a lambda token produced by {@link #lambdaNode}.
      */
-    static JsonNode fn_apply(JsonNode fn, JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_apply(JsonNode fn, JsonNode arg) throws RuntimeEvaluationException {
         if (isLambdaToken(fn)) {
             return lookupLambda(fn).apply(arg);
         }
-        throw new JsonataEvaluationException(
-                "Right-hand side of ~> is not a function; got: " + fn);
+        throw new RuntimeEvaluationException(
+                "T1006: The expression is not a function; got: " + fn);
     }
 }

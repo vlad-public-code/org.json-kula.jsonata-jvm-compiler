@@ -2,7 +2,6 @@ package org.json_kula.jsonata_jvm.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -53,11 +52,11 @@ final class FunctionSignature {
      * returned unchanged so that bound functions that don't care about strict
      * typing continue to work.
      *
-     * @throws JsonataEvaluationException if a required argument is missing or
+     * @throws RuntimeEvaluationException if a required argument is missing or
      *                                    a value cannot be coerced to the declared type
      */
     static List<JsonNode> coerce(String signature, List<JsonNode> supplied)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         List<ParamSpec> params = parseParams(signature);
         if (params == null) return supplied;
 
@@ -69,7 +68,7 @@ final class FunctionSignature {
                 // Consume all remaining args (at least one required unless marked optional).
                 if (argIdx >= supplied.size()) {
                     if (!p.acceptsMissing()) {
-                        throw new JsonataEvaluationException(
+                        throw new RuntimeEvaluationException(
                                 "Expected at least one argument of type \"" + p.type() + "\"");
                     }
                     break;
@@ -85,7 +84,7 @@ final class FunctionSignature {
                     if (p.acceptsMissing()) {
                         result.add(JsonataRuntime.MISSING);
                     } else {
-                        throw new JsonataEvaluationException(
+                        throw new RuntimeEvaluationException(
                                 "Missing required argument of type \"" + p.type() + "\"");
                     }
                 } else {
@@ -102,7 +101,7 @@ final class FunctionSignature {
     // =========================================================================
 
     private static JsonNode coerceOne(String type, JsonNode value)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (value.isMissingNode()) return value;
         return switch (type) {
             case "n" -> NF.numberNode(JsonataRuntime.toNumber(value));
@@ -110,14 +109,14 @@ final class FunctionSignature {
             case "b" -> NF.booleanNode(JsonataRuntime.isTruthy(value));
             case "l" -> {
                 if (!value.isNull())
-                    throw new JsonataEvaluationException(
+                    throw new RuntimeEvaluationException(
                             "Expected null argument, got " + value.getNodeType());
                 yield value;
             }
             case "a" -> value.isArray() ? value : NF.arrayNode().add(value);
             case "o" -> {
                 if (!value.isObject())
-                    throw new JsonataEvaluationException(
+                    throw new RuntimeEvaluationException(
                             "Expected object argument, got " + value.getNodeType());
                 yield value;
             }

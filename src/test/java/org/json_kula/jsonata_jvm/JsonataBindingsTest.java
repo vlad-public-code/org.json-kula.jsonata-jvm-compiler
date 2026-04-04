@@ -87,10 +87,10 @@ class JsonataBindingsTest {
 
     @Test
     void perEval_unboundVariable_returnsNull() throws Exception {
-        // $missing is never bound — JSONata undefined propagates to null result
+        // $missing is never bound — JSONata undefined propagates as MISSING
         JsonataExpression expr = compile("$missing");
         JsonNode result = expr.evaluate(EMPTY_OBJECT, new JsonataBindings());
-        assertTrue(result.isNull(), "Expected null for unbound variable");
+        assertTrue(result.isMissingNode(), "Expected MISSING for unbound variable");
     }
 
     @Test
@@ -152,7 +152,7 @@ class JsonataBindingsTest {
         JsonataExpression e1 = compile("$x");
         JsonataExpression e2 = compile("$x");
         e1.assign("x", num(42));
-        assertTrue(e2.evaluate(EMPTY_OBJECT).isNull(),
+        assertTrue(e2.evaluate(EMPTY_OBJECT).isMissingNode(),
                 "Binding on e1 must not leak to e2");
     }
 
@@ -194,7 +194,7 @@ class JsonataBindingsTest {
     void perEval_unboundFunction_returnsNull() throws Exception {
         JsonataExpression expr = compile("$notRegistered(1)");
         JsonNode result = expr.evaluate(EMPTY_OBJECT, new JsonataBindings());
-        assertTrue(result.isNull(), "Calling an unregistered function should yield null");
+        assertTrue(result.isMissingNode(), "Calling an unregistered function should yield MISSING");
     }
 
     @Test
@@ -235,7 +235,7 @@ class JsonataBindingsTest {
             @Override public String getFunctionSignature() { return "<:n>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) { return IntNode.valueOf(1); }
         });
-        assertTrue(e2.evaluate(EMPTY_OBJECT).isNull(),
+        assertTrue(e2.evaluate(EMPTY_OBJECT).isMissingNode(),
                 "Function registered on e1 must not be visible in e2");
     }
 

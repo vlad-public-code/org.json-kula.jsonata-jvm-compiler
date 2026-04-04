@@ -37,12 +37,12 @@ class ObjectFunctionsTest {
     @Test
     void keys_empty_object() throws Exception {
         JsonNode result = eval("$keys({})");
-        assertTrue(result.isNull(), "keys of empty object should be null/missing");
+        assertTrue(result.isMissingNode(), "keys of empty object should be null/missing");
     }
 
     @Test
     void keys_missing_returns_null() throws Exception {
-        assertTrue(eval("$keys($notDefined)").isNull());
+        assertTrue(eval("$keys($notDefined)").isMissingNode());
     }
 
     @Test
@@ -72,12 +72,12 @@ class ObjectFunctionsTest {
     @Test
     void values_empty_object() throws Exception {
         JsonNode result = eval("$values({})");
-        assertTrue(result.isNull(), "values of empty object should be null/missing");
+        assertTrue(result.isMissingNode(), "values of empty object should be null/missing");
     }
 
     @Test
     void values_missing_returns_null() throws Exception {
-        assertTrue(eval("$values($notDefined)").isNull());
+        assertTrue(eval("$values($notDefined)").isMissingNode());
     }
 
     @Test
@@ -100,7 +100,7 @@ class ObjectFunctionsTest {
     @Test
     void lookup_missing_key_returns_null() throws Exception {
         String json = "{\"name\": \"Alice\"}";
-        assertTrue(eval("$lookup($, \"age\")", json).isNull());
+        assertTrue(eval("$lookup($, \"age\")", json).isMissingNode());
     }
 
     @Test
@@ -175,7 +175,7 @@ class ObjectFunctionsTest {
 
     @Test
     void spread_missing_returns_null() throws Exception {
-        assertTrue(eval("$spread($notDefined)").isNull());
+        assertTrue(eval("$spread($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -211,7 +211,7 @@ class ObjectFunctionsTest {
 
     @Test
     void merge_missing_returns_null() throws Exception {
-        assertTrue(eval("$merge($notDefined)").isNull());
+        assertTrue(eval("$merge($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -237,7 +237,7 @@ class ObjectFunctionsTest {
 
     @Test
     void each_missing_returns_null() throws Exception {
-        assertTrue(eval("$each($notDefined, function($v){$v})").isNull());
+        assertTrue(eval("$each($notDefined, function($v){$v})").isMissingNode());
     }
 
     // =========================================================================
@@ -315,7 +315,7 @@ class ObjectFunctionsTest {
 
     @Test
     void type_undefined_returns_null() throws Exception {
-        assertTrue(eval("$type($notDefined)").isNull());
+        assertTrue(eval("$type($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -325,7 +325,7 @@ class ObjectFunctionsTest {
     @Test
     void assert_true_condition_returns_undefined() throws Exception {
         // $assert(true) returns undefined (null at evaluate() boundary)
-        assertTrue(eval("$assert(true, \"msg\")").isNull());
+        assertTrue(eval("$assert(true, \"msg\")").isMissingNode());
     }
 
     @Test
@@ -342,8 +342,8 @@ class ObjectFunctionsTest {
 
     @Test
     void assert_truthy_value_passes() throws Exception {
-        assertTrue(eval("$assert(1, \"msg\")").isNull());
-        assertTrue(eval("$assert(\"non-empty\", \"msg\")").isNull());
+        assertTrue(eval("$assert(1, \"msg\")").isMissingNode());
+        assertTrue(eval("$assert(\"non-empty\", \"msg\")").isMissingNode());
     }
 
     @Test

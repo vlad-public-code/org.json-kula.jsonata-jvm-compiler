@@ -1,7 +1,5 @@
 package org.json_kula.jsonata_jvm.runtime;
 
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
-
 import java.time.*;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
@@ -66,7 +64,7 @@ final class DateTimeUtils {
      * @param timezone optional timezone offset in {@code ±HHMM} notation, or {@code null} for UTC
      */
     static String millisToPicture(long millis, String picture, String timezone)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         ZoneOffset offset = (timezone != null && !timezone.isEmpty())
                 ? parseZoneOffset(timezone) : ZoneOffset.UTC;
         ZonedDateTime dt = Instant.ofEpochMilli(millis).atZone(offset);
@@ -80,7 +78,7 @@ final class DateTimeUtils {
     /**
      * Parses an ISO 8601 timestamp string and returns milliseconds since the Unix epoch.
      */
-    static long isoToMillis(String timestamp) throws JsonataEvaluationException {
+    static long isoToMillis(String timestamp) throws RuntimeEvaluationException {
         try {
             return Instant.parse(timestamp).toEpochMilli();
         } catch (DateTimeParseException e) {
@@ -89,7 +87,7 @@ final class DateTimeUtils {
                 return LocalDate.parse(timestamp).atStartOfDay(ZoneOffset.UTC)
                         .toInstant().toEpochMilli();
             } catch (DateTimeParseException e2) {
-                throw new JsonataEvaluationException(
+                throw new RuntimeEvaluationException(
                         "$toMillis: invalid ISO 8601 timestamp: " + timestamp);
             }
         }
@@ -100,7 +98,7 @@ final class DateTimeUtils {
      * milliseconds since the Unix epoch.
      */
     static long pictureToMillis(String timestamp, String picture)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         java.time.format.DateTimeFormatter formatter = pictureToFormatter(picture);
         try {
             TemporalAccessor ta = formatter.parse(timestamp);
@@ -111,7 +109,7 @@ final class DateTimeUtils {
                 return LocalDateTime.from(ta).toInstant(ZoneOffset.UTC).toEpochMilli();
             }
         } catch (DateTimeParseException e) {
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "$toMillis: cannot parse '" + timestamp + "' with picture '" + picture + "': "
                             + e.getMessage());
         }
@@ -122,7 +120,7 @@ final class DateTimeUtils {
     // =========================================================================
 
     private static String applyPicture(ZonedDateTime dt, String picture)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         StringBuilder sb = new StringBuilder();
         int i = 0;
         int len = picture.length();
@@ -135,7 +133,7 @@ final class DateTimeUtils {
                 } else {
                     int j = picture.indexOf(']', i + 1);
                     if (j < 0) {
-                        throw new JsonataEvaluationException(
+                        throw new RuntimeEvaluationException(
                                 "Unclosed '[' in picture string at position " + i);
                     }
                     sb.append(formatComponent(dt, picture.substring(i + 1, j)));
@@ -153,7 +151,7 @@ final class DateTimeUtils {
     }
 
     private static String formatComponent(ZonedDateTime dt, String spec)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (spec.isEmpty()) return "";
         char d = spec.charAt(0);
         String mod = spec.length() > 1 ? spec.substring(1) : "";
@@ -178,7 +176,7 @@ final class DateTimeUtils {
             case 'P' -> dt.getHour() < 12 ? "am" : "pm";
             case 'Z' -> formatOffsetZ(dt.getOffset());
             case 'z' -> formatOffsetName(dt.getOffset());
-            default  -> throw new JsonataEvaluationException(
+            default  -> throw new RuntimeEvaluationException(
                     "Unknown picture-string component: [" + spec + "]");
         };
     }
@@ -244,7 +242,7 @@ final class DateTimeUtils {
     // =========================================================================
 
     private static java.time.format.DateTimeFormatter pictureToFormatter(String picture)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         DateTimeFormatterBuilder b = new DateTimeFormatterBuilder().parseCaseInsensitive();
         int i = 0;
         int len = picture.length();
@@ -256,7 +254,7 @@ final class DateTimeUtils {
                     i += 2;
                 } else {
                     int j = picture.indexOf(']', i + 1);
-                    if (j < 0) throw new JsonataEvaluationException(
+                    if (j < 0) throw new RuntimeEvaluationException(
                             "Unclosed '[' in picture string at position " + i);
                     appendFormatterComponent(b, picture.substring(i + 1, j));
                     i = j + 1;
@@ -277,7 +275,7 @@ final class DateTimeUtils {
     }
 
     private static void appendFormatterComponent(DateTimeFormatterBuilder b, String spec)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (spec.isEmpty()) return;
         char d = spec.charAt(0);
         String mod = spec.length() > 1 ? spec.substring(1) : "";
@@ -301,7 +299,7 @@ final class DateTimeUtils {
             case 'f' -> b.appendValue(ChronoField.MILLI_OF_SECOND, width > 0 ? width : 3);
             case 'P' -> b.appendText(ChronoField.AMPM_OF_DAY, Map.of(0L, "am", 1L, "pm"));
             case 'Z', 'z' -> b.appendOffsetId();
-            default -> throw new JsonataEvaluationException(
+            default -> throw new RuntimeEvaluationException(
                     "Unknown picture-string component: [" + spec + "]");
         }
     }
@@ -314,20 +312,20 @@ final class DateTimeUtils {
      * Parses a timezone string in {@code ±HHMM} notation (e.g. {@code "-0500"},
      * {@code "+0530"}) into a {@link ZoneOffset}.
      */
-    static ZoneOffset parseZoneOffset(String tz) throws JsonataEvaluationException {
+    static ZoneOffset parseZoneOffset(String tz) throws RuntimeEvaluationException {
         if (tz == null || tz.isEmpty() || tz.equals("Z")) return ZoneOffset.UTC;
         try {
             char sign = tz.charAt(0);
             if (sign != '+' && sign != '-')
-                throw new JsonataEvaluationException("Invalid timezone: " + tz);
+                throw new RuntimeEvaluationException("Invalid timezone: " + tz);
             int h = Integer.parseInt(tz.substring(1, 3));
             int m = Integer.parseInt(tz.substring(3, 5));
             int totalSeconds = (h * 60 + m) * 60;
             return ZoneOffset.ofTotalSeconds(sign == '-' ? -totalSeconds : totalSeconds);
-        } catch (JsonataEvaluationException e) {
+        } catch (RuntimeEvaluationException e) {
             throw e;
         } catch (Exception e) {
-            throw new JsonataEvaluationException("Invalid timezone: " + tz);
+            throw new RuntimeEvaluationException("Invalid timezone: " + tz);
         }
     }
 }

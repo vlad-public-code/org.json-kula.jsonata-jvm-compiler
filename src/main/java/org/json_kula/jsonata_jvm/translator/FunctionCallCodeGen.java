@@ -182,7 +182,7 @@ final class FunctionCallCodeGen {
         try {
             StringBuilder sb = new StringBuilder();
             sb.append("\nprivate JsonNode ").append(methodName)
-              .append("(JsonNode __el) throws JsonataEvaluationException {\n");
+              .append("(JsonNode __el) throws RuntimeEvaluationException {\n");
             for (int i = 0; i < lam.params().size(); i++) {
                 if (i < tupleLen) {
                     sb.append("    JsonNode $").append(lam.params().get(i))
@@ -304,7 +304,7 @@ final class FunctionCallCodeGen {
         try {
             StringBuilder sb = new StringBuilder();
             sb.append("\nprivate JsonNode ").append(methodName)
-              .append("(JsonNode __el) throws JsonataEvaluationException {\n");
+              .append("(JsonNode __el) throws RuntimeEvaluationException {\n");
             for (int i = 0; i < lam.params().size(); i++) {
                 if (i == 0) {
                     sb.append("    JsonNode $").append(lam.params().get(i)).append(" = __el;\n");

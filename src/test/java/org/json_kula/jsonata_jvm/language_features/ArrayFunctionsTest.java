@@ -161,7 +161,7 @@ class ArrayFunctionsTest {
 
     @Test
     void sort_missing_returns_null() throws Exception {
-        assertTrue(eval("$sort($notDefined)").isNull());
+        assertTrue(eval("$sort($notDefined)").isMissingNode());
     }
 
     @Test
@@ -208,7 +208,7 @@ class ArrayFunctionsTest {
 
     @Test
     void reverse_missing_returns_null() throws Exception {
-        assertTrue(eval("$reverse($notDefined)").isNull());
+        assertTrue(eval("$reverse($notDefined)").isMissingNode());
     }
 
     @Test
@@ -254,7 +254,7 @@ class ArrayFunctionsTest {
 
     @Test
     void shuffle_missing_returns_null() throws Exception {
-        assertTrue(eval("$shuffle($notDefined)").isNull());
+        assertTrue(eval("$shuffle($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -302,7 +302,7 @@ class ArrayFunctionsTest {
 
     @Test
     void distinct_missing_returns_null() throws Exception {
-        assertTrue(eval("$distinct($notDefined)").isNull());
+        assertTrue(eval("$distinct($notDefined)").isMissingNode());
     }
 
     @Test

@@ -52,7 +52,7 @@ class StringFunctionsTest {
 
     @Test
     void string_missing_returns_null() throws Exception {
-        assertTrue(eval("$string($notDefined)").isNull());
+        assertTrue(eval("$string($notDefined)").isMissingNode());
     }
 
     @Test
@@ -236,7 +236,7 @@ class StringFunctionsTest {
 
     @Test
     void match_no_result() throws Exception {
-        assertTrue(eval("$match(\"hello\", /xyz/)").isNull());
+        assertTrue(eval("$match(\"hello\", /xyz/)").isMissingNode());
     }
 
     @Test
@@ -326,7 +326,7 @@ class StringFunctionsTest {
 
     @Test
     void eval_missing_returns_null() throws Exception {
-        assertTrue(eval("$eval($notDefined)").isNull());
+        assertTrue(eval("$eval($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -352,7 +352,7 @@ class StringFunctionsTest {
 
     @Test
     void base64encode_missing_returns_null() throws Exception {
-        assertTrue(eval("$base64encode($notDefined)").isNull());
+        assertTrue(eval("$base64encode($notDefined)").isMissingNode());
     }
 
     // =========================================================================

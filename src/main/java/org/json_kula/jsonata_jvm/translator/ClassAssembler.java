@@ -23,6 +23,7 @@ final class ClassAssembler {
                 + "import org.json_kula.jsonata_jvm.JsonataEvaluationException;\n"
                 + "import org.json_kula.jsonata_jvm.JsonataExpression;\n"
                 + "import org.json_kula.jsonata_jvm.runtime.JsonataLambda;\n"
+                + "import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;\n"
                 + "import static org.json_kula.jsonata_jvm.runtime.JsonataRuntime.*;\n"
                 + "import java.util.concurrent.ConcurrentHashMap;\n"
                 + "\n"
@@ -55,7 +56,7 @@ final class ClassAssembler {
                 + "            final JsonNode __root = __input;\n"
                 + "            final JsonNode __ctx = __root;\n"
                 + "            JsonNode __result = " + bodyExpr + ";\n"
-                + "            return __result.isMissingNode() ? NULL : __result;\n"
+                + "            return __result;\n"
                 + "        } catch (JsonataEvaluationException __e) {\n"
                 + "            throw __e;\n"
                 + "        } catch (Exception __e) {\n"
@@ -87,5 +88,14 @@ final class ClassAssembler {
 
     static String oneArg(List<String> args) {
         return args.isEmpty() ? "NULL" : args.get(0);
+    }
+
+    /**
+     * Returns the first argument expression, or {@code ctxVar} when the argument
+     * list is empty.  Use this for built-in functions whose JSONata signature carries
+     * the {@code -} modifier, meaning "use the context value as the default argument".
+     */
+    static String ctxArg(List<String> args, String ctxVar) {
+        return args.isEmpty() ? ctxVar : args.get(0);
     }
 }

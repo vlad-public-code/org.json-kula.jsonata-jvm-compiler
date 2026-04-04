@@ -175,7 +175,7 @@ public final class Lexer {
             pos++;
             return Token.of(TokenType.NOT_EQUAL, start);
         }
-        throw new ParseException("Expected '=' after '!'", start);
+        throw new ParseException("S0204: Unexpected '!' character", start);
     }
 
     private Token lexTilde(int start) throws ParseException {
@@ -327,7 +327,7 @@ public final class Lexer {
                 pos++;
             }
         }
-        throw new ParseException("Unterminated string literal", start);
+        throw new ParseException("S0101: Unterminated string literal", start);
     }
 
     private char readUnicodeEscape(int errorPos) throws ParseException {
@@ -354,7 +354,7 @@ public final class Lexer {
             pos++;
         }
         if (pos >= src.length()) {
-            throw new ParseException("Unterminated backtick identifier", start);
+            throw new ParseException("S0105: Unterminated backtick identifier", start);
         }
         String name = src.substring(nameStart, pos);
         pos++; // consume closing backtick
@@ -429,7 +429,7 @@ public final class Lexer {
             }
             pos++;
         }
-        throw new ParseException("Unterminated block comment", start);
+        throw new ParseException("S0106: Unterminated block comment", start);
     }
 
     // -------------------------------------------------------------------------
