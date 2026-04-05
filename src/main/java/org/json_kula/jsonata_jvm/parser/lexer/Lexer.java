@@ -320,26 +320,28 @@ public final class Lexer {
                     case 't'  -> '\t';
                     case 'u'  -> readUnicodeEscape(pos - 2);
                     default   -> throw new ParseException(
-                            "Unknown escape sequence: \\" + esc, pos - 2);
+                            "S0103: Unsupported escape sequence: \\" + esc, pos - 2);
                 });
             } else {
                 sb.append(c);
                 pos++;
             }
         }
-        throw new ParseException("S0101: Unterminated string literal", start);
+        // Emit a deferred-error token so the parser can produce a higher-level error
+        // (e.g. S0202) if it encounters an unexpected token before this position.
+        return Token.of(TokenType.ERROR, "S0101: Unterminated string literal", start);
     }
 
     private char readUnicodeEscape(int errorPos) throws ParseException {
         if (pos + 4 > src.length()) {
-            throw new ParseException("Incomplete \\uXXXX escape", errorPos);
+            throw new ParseException("S0104: The escape sequence \\u must be followed by 4 hex digits", errorPos);
         }
         String hex = src.substring(pos, pos + 4);
         pos += 4;
         try {
             return (char) Integer.parseInt(hex, 16);
         } catch (NumberFormatException e) {
-            throw new ParseException("Invalid \\uXXXX escape: " + hex, errorPos);
+            throw new ParseException("S0104: The escape sequence \\u must be followed by 4 hex digits: " + hex, errorPos);
         }
     }
 
@@ -384,7 +386,19 @@ public final class Lexer {
             }
             while (pos < src.length() && Character.isDigit(src.charAt(pos))) pos++;
         }
-        return Token.of(TokenType.NUMBER, src.substring(begin, pos), start);
+        String numStr = src.substring(begin, pos);
+        // A number immediately followed by a letter/underscore is a syntax error (e.g. 7a)
+        if (pos < src.length() && isIdentStart(src.charAt(pos))) {
+            throw new ParseException("S0201: Syntax error: malformed number '" + numStr + src.charAt(pos) + "'", start);
+        }
+        try {
+            double val = Double.parseDouble(numStr);
+            if (Double.isInfinite(val))
+                throw new ParseException("S0102: Number out of range: " + numStr, start);
+        } catch (NumberFormatException e) {
+            throw new ParseException("S0102: Number out of range: " + numStr, start);
+        }
+        return Token.of(TokenType.NUMBER, numStr, start);
     }
 
     // -------------------------------------------------------------------------

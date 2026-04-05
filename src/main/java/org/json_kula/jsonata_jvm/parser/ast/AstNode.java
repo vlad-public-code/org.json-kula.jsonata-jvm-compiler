@@ -51,7 +51,8 @@ public sealed interface AstNode permits
         AstNode.ElvisExpr,
         AstNode.CoalesceExpr,
         AstNode.PartialPlaceholder,
-        AstNode.PartialApplication {
+        AstNode.PartialApplication,
+        AstNode.LambdaCall {
 
     // =========================================================================
     // Literals
@@ -230,7 +231,18 @@ public sealed interface AstNode permits
      * @param params parameter names without the leading {@code $}
      * @param body   the function body
      */
-    record Lambda(List<String> params, AstNode body) implements AstNode {}
+    record Lambda(List<String> params, AstNode body, String signature) implements AstNode {
+        /** Convenience constructor for lambdas without a signature. */
+        public Lambda(List<String> params, AstNode body) { this(params, body, null); }
+    }
+
+    /**
+     * An immediate lambda invocation with signature awareness:
+     * {@code function($x,$y)<sig>{body}(args)}.
+     * Used when the lambda has a signature — the translator uses this to emit
+     * type-checking and context-binding code.
+     */
+    record LambdaCall(Lambda lambda, List<AstNode> args) implements AstNode {}
 
     // =========================================================================
     // Variable binding
@@ -451,6 +463,7 @@ public sealed interface AstNode permits
         R visitCoalesceExpr(CoalesceExpr node, C ctx);
         R visitPartialPlaceholder(PartialPlaceholder node, C ctx);
         R visitPartialApplication(PartialApplication node, C ctx);
+        R visitLambdaCall(LambdaCall node, C ctx);
     }
 
     /**
@@ -502,6 +515,7 @@ public sealed interface AstNode permits
             case CoalesceExpr       n -> visitor.visitCoalesceExpr(n, ctx);
             case PartialPlaceholder n -> visitor.visitPartialPlaceholder(n, ctx);
             case PartialApplication n -> visitor.visitPartialApplication(n, ctx);
+            case LambdaCall         n -> visitor.visitLambdaCall(n, ctx);
         };
     }
 }

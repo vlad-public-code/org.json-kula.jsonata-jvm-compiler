@@ -59,6 +59,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             Map.entry("boolean",    "fn_boolean"),
             Map.entry("not",        "fn_not"),
             Map.entry("length",     "fn_length"),
+            Map.entry("exists",     "fn_exists"),
             Map.entry("keys",       "fn_keys"),
             Map.entry("values",     "fn_values"),
             Map.entry("count",      "fn_count"),
@@ -196,7 +197,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // immediate parent expression. This is set up by compilePathSteps when
         // generating nested mapStep lambdas with parent tracking.
         if (ctx.parentVars.isEmpty()) {
-            throw new IllegalStateException("Parent operator % used with no parent context");
+            throw new IllegalStateException("S0217: Parent operator % used with no parent context");
         }
         return ctx.parentVars.get(ctx.parentVars.size() - 1);
     }
@@ -226,13 +227,19 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         AstNode firstStep = steps.get(0);
         boolean forceArr = firstStep instanceof ForceArray;
         if (forceArr) firstStep = ((ForceArray) firstStep).source();
+        // Also check if the first step is a predicate whose source is a ForceArray:
+        // e.g. Phone[][type="mobile"].number — the predicate source is ForceArray(Phone)
+        // and the final path result must be kept as an array.
+        if (!forceArr && firstStep instanceof PredicateExpr pe && pe.source() instanceof ForceArray) {
+            forceArr = true;
+        }
         // Handle ParentStep as first step: navigate up via parentVars and
         // adjust the parentVars for subsequent steps.
         String expr;
         int startFrom = 1;
         if (firstStep instanceof ParentStep) {
             if (ctx.parentVars.isEmpty()) {
-                throw new IllegalStateException("Parent operator % used with no parent context");
+                throw new IllegalStateException("S0217: Parent operator % used with no parent context");
             }
             expr = ctx.parentVars.get(ctx.parentVars.size() - 1);
             List<String> newParents = ctx.parentVars.size() > 1
@@ -310,7 +317,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             // Navigate up one level in the parent vars stack.
             List<String> parents = ctx.parentVars;
             if (parents.isEmpty()) {
-                throw new IllegalStateException("Parent operator % used with no parent context in path");
+                throw new IllegalStateException("S0217: Parent operator % used with no parent context in path");
             }
             String parentExpr = parents.get(parents.size() - 1);
             List<String> newParents = parents.size() > 1
@@ -363,7 +370,22 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitForceArray(ForceArray n, GenCtx ctx) {
+        // If the source path ends with an ArrayConstructor step, mapConstructorStep
+        // (preserve mode) will already return the right [[...]] structure — no
+        // forceArray wrapper needed.
+        if (pathEndsWithArrayConstructor(n.source())) {
+            return n.source().accept(this, ctx.withArrayConstructorPreserve());
+        }
         return "forceArray(" + n.source().accept(this, ctx) + ")";
+    }
+
+    /** Returns true if {@code node} is a PathExpr whose last step is an ArrayConstructor. */
+    private static boolean pathEndsWithArrayConstructor(AstNode node) {
+        if (node instanceof AstNode.PathExpr pe) {
+            List<AstNode> steps = pe.steps();
+            return !steps.isEmpty() && steps.get(steps.size() - 1) instanceof AstNode.ArrayConstructor;
+        }
+        return false;
     }
 
     /** Generates an expression for the FIRST step in a path (uses {@code ctx.ctxVar}). */
@@ -406,7 +428,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 // source is prevExpr; predicate uses a fresh element variable
                 String elemVar = "__el" + ctx.state.nextId();
                 String predExpr = pe.predicate().accept(this, ctx.withCtx(elemVar));
-                yield "filter(" + prevExpr + ", " + elemVar + " -> " + predExpr + ")";
+                yield "dynamicFilter(" + prevExpr + ", " + elemVar + " -> " + predExpr + ")";
             }
             case ArraySubscript as -> {
                 // Path-step subscript — apply per-element via mapStep so that
@@ -417,18 +439,20 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
             }
             case ArrayConstructor ac -> {
-                // e.g. Email.[address] — map per element, each result becomes a separate sequence element.
-                // The inArrayConstructorStep flag tells the inner array constructor not to wrap
+                // e.g. Email.[address] — map per element.
+                // In preserve mode ($.[arr][] pattern): keep each result array as a single item.
+                // In default mode ($.[arr]): unwrap collapses a single-element outer array.
                 String tmpCtx  = "__c" + ctx.state.nextId();
                 String stepExpr = ac.accept(this, ctx.withCtx(tmpCtx).withInArrayConstructorStep());
-                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+                String call = "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+                yield ctx.arrayConstructorPreserve ? call : "unwrap(" + call + ")";
             }
             case ObjectConstructor oc -> {
                 // e.g. Phone.{type: number} — map per element, collect without flattening
                 // so each constructed object stays as a single element of the result.
                 String tmpCtx  = "__c" + ctx.state.nextId();
                 String stepExpr = oc.accept(this, ctx.withCtx(tmpCtx));
-                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
+                yield "unwrap(mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + "))";
             }
             default -> {
                 // For any other step type: rebind __ctx to prevExpr inside a lambda.
@@ -441,16 +465,23 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitPredicateExpr(PredicateExpr n, GenCtx ctx) {
-        String srcExpr = n.source().accept(this, ctx);
+        // If source is a ForceArray (expr[]) the result must remain an array
+        // even when only one element passes the predicate.
+        AstNode sourceNode = n.source();
+        boolean forceArr = sourceNode instanceof ForceArray;
+        if (forceArr) sourceNode = ((ForceArray) sourceNode).source();
+        String srcExpr = sourceNode.accept(this, ctx);
         // Range subscript: arr[[from..to]] — select elements by index range
         if (n.predicate() instanceof RangeExpr re) {
             String fromExpr = re.from().accept(this, ctx);
             String toExpr   = re.to().accept(this, ctx);
-            return "rangeSubscript(" + srcExpr + ", " + fromExpr + ", " + toExpr + ")";
+            String r = "rangeSubscript(" + srcExpr + ", " + fromExpr + ", " + toExpr + ")";
+            return forceArr ? "forceArray(" + r + ")" : r;
         }
         String elemVar  = "__el" + ctx.state.nextId();
         String predExpr = n.predicate().accept(this, ctx.withCtx(elemVar));
-        return "filter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
+        String r = "dynamicFilter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
+        return forceArr ? "forceArray(" + r + ")" : r;
     }
 
     @Override
@@ -585,11 +616,17 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "string"          -> args.size() <= 1
                     ? "fn_string(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")"
                     : "fn_string(" + args.get(0) + ", " + args.get(1) + ")";
-            case "number"          -> "fn_number("  + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "boolean"         -> "fn_boolean(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "number"          -> args.size() > 1
+                    ? "fn_arity_error(\"number\", 1, " + args.size() + ")"
+                    : "fn_number(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "boolean"         -> args.size() > 1
+                    ? "fn_arity_error(\"boolean\", 1, " + args.size() + ")"
+                    : "fn_boolean(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
             case "not"             -> "fn_not("     + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
             case "type"            -> "fn_type("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "exists"          -> "fn_exists("  + ClassAssembler.oneArg(args) + ")";
+            case "exists"          -> args.size() != 1
+                    ? "fn_arity_error(\"exists\", 1, " + args.size() + ")"
+                    : "fn_exists("  + args.get(0) + ")";
             // Numeric  (floor/ceil/round/abs/sqrt all have the '-' modifier)
             case "floor"         -> "fn_floor("  + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
             case "ceil"          -> "fn_ceil("   + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
@@ -609,18 +646,28 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "formatInteger" -> "fn_formatInteger(" + args.get(0) + ", " + args.get(1) + ")";
             case "parseInteger"  -> "fn_parseInteger(" + args.get(0) + ", " + args.get(1) + ")";
             // String
-            case "uppercase"       -> "fn_uppercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "lowercase"       -> "fn_lowercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "uppercase"       -> args.size() > 1
+                    ? "fn_arity_error(\"uppercase\", 1, " + args.size() + ")"
+                    : "fn_uppercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "lowercase"       -> args.size() > 1
+                    ? "fn_arity_error(\"lowercase\", 1, " + args.size() + ")"
+                    : "fn_lowercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
             case "trim"            -> "fn_trim("           + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "length"          -> "fn_length("         + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "substring"       -> args.size() == 2
+            case "length"          -> args.size() > 1
+                    ? "fn_arity_error(\"length\", 1, " + args.size() + ")"
+                    : args.isEmpty()
+                    ? "fn_length_ctx(" + ctx.ctxVar + ")"
+                    : "fn_length(" + args.get(0) + ")";
+            case "substring"       -> args.size() > 3
+                    ? "fn_arity_error(\"substring\", 3, " + args.size() + ")"
+                    : args.size() == 2
                     ? "fn_substring(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_substring(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
             case "substringBefore" -> args.size() == 1
-                    ? "fn_substringBefore(" + ctx.ctxVar + ", " + args.get(0) + ")"
+                    ? "fn_substringBefore_ctx(" + ctx.ctxVar + ", " + args.get(0) + ")"
                     : "fn_substringBefore(" + args.get(0) + ", " + args.get(1) + ")";
             case "substringAfter"  -> args.size() == 1
-                    ? "fn_substringAfter(" + ctx.ctxVar + ", " + args.get(0) + ")"
+                    ? "fn_substringAfter_ctx(" + ctx.ctxVar + ", " + args.get(0) + ")"
                     : "fn_substringAfter(" + args.get(0) + ", " + args.get(1) + ")";
             case "contains"        -> args.size() == 1
                     ? "fn_contains(" + ctx.ctxVar + ", " + args.get(0) + ")"
@@ -635,19 +682,23 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     : args.size() == 2
                     ? "fn_match(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_match(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "replace" -> args.size() == 2
+            case "replace" -> args.size() < 2
+                    ? "fn_arity_error(\"replace\", 3, " + args.size() + ")"
+                    : args.size() == 2
                     ? "fn_replace(" + ctx.ctxVar + ", " + args.get(0) + ", " + args.get(1) + ")"
                     : args.size() == 3
                     ? "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")"
                     : "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ", " + args.get(3) + ")";
-            case "join"            -> args.size() == 1
+            case "join"            -> args.isEmpty()
+                    ? "fn_arity_error(\"join\", 1, 0)"
+                    : args.size() == 1
                     ? "fn_join(" + args.get(0) + ", MISSING)"
                     : "fn_join(" + args.get(0) + ", " + args.get(1) + ")";
             case "pad"             -> args.size() == 2
                     ? "fn_pad(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_pad(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
             case "eval"            -> args.size() == 1
-                    ? "fn_eval(" + args.get(0) + ")"
+                    ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ")"
                     : "fn_eval(" + args.get(0) + ", " + args.get(1) + ")";
             case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
             case "base64decode"    -> "fn_base64decode("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
@@ -656,9 +707,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "encodeUrl"       -> "fn_encodeUrl("       + ClassAssembler.oneArg(args) + ")";
             case "decodeUrl"       -> "fn_decodeUrl("       + ClassAssembler.oneArg(args) + ")";
             // Sequence / array
-            case "count"    -> "fn_count("   + ClassAssembler.oneArg(args) + ")";
+            case "count"    -> args.size() > 1 ? "fn_arity_error(\"count\", 1, " + args.size() + ")"
+                    : "fn_count("   + ClassAssembler.oneArg(args) + ")";
             case "sum"      -> args.size() > 1 ? "fn_arity_error(\"sum\", 1, " + args.size() + ")"
-                    : "fn_sum("     + ClassAssembler.oneArg(args) + ")";
+                    : args.isEmpty() ? "fn_arity_error(\"sum\", 1, 0)"
+                    : "fn_sum("     + args.get(0) + ")";
             case "max"      -> args.size() > 1 ? "fn_arity_error(\"max\", 1, " + args.size() + ")"
                     : "fn_max("     + ClassAssembler.oneArg(args) + ")";
             case "min"      -> args.size() > 1 ? "fn_arity_error(\"min\", 1, " + args.size() + ")"
@@ -672,11 +725,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "shuffle"  -> "fn_shuffle(" + ClassAssembler.oneArg(args) + ")";
             case "zip"      -> "fn_zip(" + String.join(", ", args) + ")";
             case "sort"     -> FunctionCallCodeGen.genSort(this, n, args, ctx);
-            case "map"      -> FunctionCallCodeGen.genHigherOrder(this, "fn_map",    n, args, ctx, 0, 1);
+            case "map"      -> n.args().size() < 2
+                    ? "fn_arity_error(\"map\", 2, " + n.args().size() + ")"
+                    : FunctionCallCodeGen.genHigherOrder(this, "fn_map", n, args, ctx, 0, 1);
             case "filter"   -> FunctionCallCodeGen.genHigherOrder(this, "fn_filter", n, args, ctx, 0, 1);
             case "each"     -> FunctionCallCodeGen.genEach(this, n, args, ctx);
             case "reduce"   -> FunctionCallCodeGen.genReduce(this, n, args, ctx);
-            case "single"   -> FunctionCallCodeGen.genHigherOrder(this, "fn_single", n, args, ctx, 0, 1);
+            case "single"   -> FunctionCallCodeGen.genSingle(this, n, args, ctx);
             case "sift"     -> FunctionCallCodeGen.genSift(this, n, args, ctx);
             // Object
             case "keys"     -> "fn_keys("   + ClassAssembler.oneArg(args) + ")";
@@ -693,6 +748,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             };
             case "millis"    -> "fn_millis()";
             case "fromMillis" -> switch (args.size()) {
+                case 0  -> "fn_fromMillis(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
                 case 1  -> "fn_fromMillis(" + args.get(0) + ")";
                 case 2  -> "fn_fromMillis(" + args.get(0) + ", " + args.get(1) + ")";
                 default -> "fn_fromMillis(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
@@ -701,7 +757,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     ? "fn_toMillis(" + args.get(0) + ")"
                     : "fn_toMillis(" + args.get(0) + ", " + args.get(1) + ")";
             // Error
-            case "error"    -> "fn_error("  + ClassAssembler.oneArg(args) + ")";
+            case "error"    -> "fn_error("  + (args.isEmpty() ? "MISSING" : args.get(0)) + ")";
             default         -> FunctionCallCodeGen.genUserFunctionCall(this, n, args, ctx);
         };
     }
@@ -732,7 +788,12 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // Generate as an inline Java lambda so enclosing block-local variables
         // are captured as closures — fixing the "cannot find symbol" errors that
         // arise when lambdas are emitted as separate private methods.
-        return "lambdaNode(" + FunctionCallCodeGen.buildInlineLambda(this, n, ctx) + ")";
+        return "lambdaNode(" + FunctionCallCodeGen.buildInlineLambdaWithSig(this, n, ctx) + ")";
+    }
+
+    @Override
+    public String visitLambdaCall(LambdaCall n, GenCtx ctx) {
+        return FunctionCallCodeGen.genLambdaCall(this, n, ctx);
     }
 
     // =========================================================================
@@ -760,7 +821,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         if (n.elements().size() == 1) {
             AstNode elem = n.elements().get(0);
             if (ctx.inArrayConstructorStep && !(elem instanceof ArrayConstructor)) {
-                return elem.accept(this, ctx);
+                return "forceArray(" + elem.accept(this, ctx) + ")";
             }
             String elemCode = elem.accept(this, ctx);
             if (elem instanceof ArrayConstructor) {
@@ -778,9 +839,12 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     private String wrapArrayElement(AstNode e, GenCtx ctx) {
         if (e instanceof RangeExpr re) {
-            int from = (int) ((NumberLiteral) re.from()).value();
-            int to = (int) ((NumberLiteral) re.to()).value();
-            return "rangeFlatten(" + from + ", " + to + ")";
+            if (re.from() instanceof NumberLiteral nFrom && re.to() instanceof NumberLiteral nTo) {
+                // Constant range: use the fast RangeHolder path
+                return "rangeFlatten(" + (int) nFrom.value() + ", " + (int) nTo.value() + ")";
+            }
+            // Non-constant range: generate runtime range() call; arrayOf flattens the ArrayNode result
+            return re.accept(this, ctx);
         }
         if (e instanceof ArrayConstructor) {
             return "preserveArray(" + e.accept(this, ctx) + ")";
@@ -810,6 +874,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitSortExpr(SortExpr n, GenCtx ctx) {
+        // The source expression should be evaluated using the current context,
+        // not the root. Use ctx (which has the current ctxVar) rather than ctx.withCtx(ctx.rootVar).
         String srcExpr = n.source().accept(this, ctx);
         // Build a composite key-and-direction sort.
         // For simplicity, chain sorts by each key (last applied = highest priority).
@@ -823,7 +889,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ")";
             result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
         }
-        return result;
+        // Unwrap single-element results: $[0]^(age) should return the object, not [object]
+        return "unwrap(" + result + ")";
     }
 
     @Override
@@ -897,7 +964,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("    java.util.LinkedHashMap<String, com.fasterxml.jackson.databind.node.ArrayNode> ").append(grpVar)
               .append(" = new java.util.LinkedHashMap<>();\n");
             sb.append("    for (JsonNode ").append(elemVar).append(" : __items) {\n");
-            sb.append("        String __k = fn_string(").append(kExpr).append(").textValue();\n");
+            sb.append("        JsonNode __kNode").append(pi).append(" = ").append(kExpr).append(";\n");
+            sb.append("        if (!__kNode").append(pi).append(".isMissingNode() && !__kNode").append(pi).append(".isTextual()) ");
+            sb.append("throw new RuntimeEvaluationException(\"T1003: The key of an object constructor must evaluate to a string\");\n");
+            sb.append("        if (__kNode").append(pi).append(".isMissingNode()) continue;\n");
+            sb.append("        String __k = __kNode").append(pi).append(".textValue();\n");
             sb.append("        if (!").append(grpVar).append(".containsKey(__k)) {")
               .append(" ").append(grpVar).append(".put(__k, ")
               .append("com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode()); }\n");
@@ -908,7 +979,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("        com.fasterxml.jackson.databind.node.ArrayNode __grpArr = ").append(entVar).append(".getValue();\n");
             sb.append("        JsonNode ").append(elemVar).append(" = __grpArr.size() == 1 ? __grpArr.get(0) : __grpArr;\n");
             sb.append("        JsonNode __v = ").append(vExpr).append(";\n");
-            sb.append("        if (!__v.isMissingNode()) __result.set(").append(entVar).append(".getKey(), __v);\n");
+            sb.append("        if (!__v.isMissingNode()) {\n");
+            sb.append("            if (__result.has(").append(entVar).append(".getKey())) ");
+            sb.append("throw new RuntimeEvaluationException(\"D1009: Multiple key definitions evaluate to same key: '\" + ").append(entVar).append(".getKey() + \"'\");\n");
+            sb.append("            __result.set(").append(entVar).append(".getKey(), __v);\n");
+            sb.append("        }\n");
             sb.append("    }\n");
         }
         sb.append("    return __result;\n");

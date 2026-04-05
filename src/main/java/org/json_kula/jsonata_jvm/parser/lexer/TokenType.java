@@ -77,5 +77,10 @@ public enum TokenType {
     BACKTICK,       // `   (should never appear as standalone — absorbed into IDENTIFIER)
 
     // End of input
-    EOF
+    EOF,
+
+    // Deferred lexer error — value holds the original error message, position holds the error site.
+    // Emitted instead of throwing so the parser can produce a higher-level error first
+    // (e.g. S0202 for an unexpected token before the unterminated-string position).
+    ERROR
 }

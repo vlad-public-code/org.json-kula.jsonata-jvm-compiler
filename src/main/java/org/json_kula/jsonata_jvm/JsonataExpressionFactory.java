@@ -49,8 +49,14 @@ public class JsonataExpressionFactory {
                     return compiled.evaluate(ctx);
                 }
                 return compiled.evaluate(com.fasterxml.jackson.databind.node.NullNode.instance);
-            } catch (JsonataCompilationException | JsonataEvaluationException e) {
-                throw new RuntimeEvaluationException("$eval: " + e.getMessage());
+            } catch (JsonataCompilationException e) {
+                String msg = e.getMessage();
+                if (msg != null && msg.contains("T1005")) {
+                    throw new RuntimeEvaluationException("D3121: Ev1005: The expression cannot be evaluated");
+                }
+                throw new RuntimeEvaluationException("D3120: Ev1004: The expression cannot be parsed");
+            } catch (JsonataEvaluationException e) {
+                throw new RuntimeEvaluationException("D3121: Ev1005: The expression cannot be evaluated");
             }
         });
     }

@@ -73,18 +73,23 @@ final class ScopeAnalyzer {
     static List<String> collectFreeOuterVars(List<AstNode> exprs,
                                               Set<String> blockLocals,
                                               GenState state) {
-        // Build the set of all outer-scope locals (everything in scope except the
-        // block's own bindings).
+        // Build the set of all outer-scope locals (everything in scope).
+        // We deliberately do NOT remove blockLocals here: a block-local binding
+        // may shadow an outer variable of the same name while still referencing
+        // it in its own RHS (e.g. "$step := ($step ? $step : 1)" where the outer
+        // $step is a lambda parameter).  Such references are only detected when
+        // the outer name is retained in outerLocals.
         Set<String> outerLocals = new LinkedHashSet<>();
         for (Set<String> scope : state.scopeStack) outerLocals.addAll(scope);
-        outerLocals.removeAll(blockLocals);
 
         if (outerLocals.isEmpty()) return List.of();
 
         // Walk the AST of the block body to find which outer locals are actually
-        // referenced.  Lambda parameters shadow outer names, so we track binding.
-        Set<String> used   = new LinkedHashSet<>();
-        Set<String> bound  = new HashSet<>(blockLocals);
+        // referenced.  We start with an empty bound set and add names as their
+        // bindings are encountered so that the RHS of "$x := $x + 1" correctly
+        // detects the outer "$x" as a free variable before "$x" itself is bound.
+        Set<String> used  = new LinkedHashSet<>();
+        Set<String> bound = new HashSet<>();
         for (AstNode expr : exprs) {
             collectFreeVarsInto(expr, used, bound);
             if (expr instanceof VariableBinding vb) bound.add(vb.name());

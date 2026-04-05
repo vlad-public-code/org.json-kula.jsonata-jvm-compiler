@@ -193,8 +193,9 @@ class JsonataBindingsTest {
     @Test
     void perEval_unboundFunction_returnsNull() throws Exception {
         JsonataExpression expr = compile("$notRegistered(1)");
-        JsonNode result = expr.evaluate(EMPTY_OBJECT, new JsonataBindings());
-        assertTrue(result.isMissingNode(), "Calling an unregistered function should yield MISSING");
+        Exception exception = assertThrows(JsonataEvaluationException.class,
+                () -> expr.evaluate(EMPTY_OBJECT, new JsonataBindings()));
+        assertEquals("T1006: The function 'notRegistered' is not defined", exception.getMessage());
     }
 
     @Test
@@ -235,8 +236,9 @@ class JsonataBindingsTest {
             @Override public String getFunctionSignature() { return "<:n>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) { return IntNode.valueOf(1); }
         });
-        assertTrue(e2.evaluate(EMPTY_OBJECT).isMissingNode(),
-                "Function registered on e1 must not be visible in e2");
+        Exception exception = assertThrows(JsonataEvaluationException.class,
+                () -> e2.evaluate(EMPTY_OBJECT).isMissingNode());
+        assertEquals("T1006: The function 'fn' is not defined", exception.getMessage());
     }
 
     // =========================================================================

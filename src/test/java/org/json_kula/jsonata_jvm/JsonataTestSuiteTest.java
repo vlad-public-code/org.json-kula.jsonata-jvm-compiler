@@ -2,6 +2,7 @@ package org.json_kula.jsonata_jvm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DynamicTest;
@@ -18,7 +19,6 @@ import java.util.stream.Stream;
 import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
 import static org.junit.jupiter.api.Assertions.*;
 
-@Disabled("Please start it manually")
 public class JsonataTestSuiteTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -109,21 +109,23 @@ public class JsonataTestSuiteTest {
         
         JsonNode expectedResult = testCase.has("result") ? testCase.get("result") : null;
         boolean undefinedResult = testCase.has("undefinedResult") && testCase.get("undefinedResult").asBoolean();
-        String expectedCode = testCase.has("code") ? testCase.get("code").asText() : null;
+        String expectedCode = testCase.has("code") ? testCase.get("code").asText()
+                           : testCase.has("error") ? testCase.get("error").path("code").asText(null)
+                           : null;
         
         try {
             JsonNode result = evaluate(expression, data, bindings);
             
             if (expectedCode != null) {
-                fail("Expected error code '" + expectedCode + "' but got result: " + result);
+                fail("Expected error code '" + expectedCode + "' but got result: " + result + " for expression: " + expression);
             }
             
             if (undefinedResult) {
-                assertTrue(result.isMissingNode(), "Expected undefined result, got: " + result);
+                assertTrue(result.isMissingNode(), "Expected undefined result, got: " + result +  " for expression: " + expression);
             } else if (expectedResult != null) {
                 JsonNodeTestHelper.assertJsonEquals(expectedResult, result, "Expression: " + expression);
             } else {
-                fail("Expected either result, undefinedResult, or code. Got: " + testCase);
+                fail("Expected either result, undefinedResult, or code. Got: " + testCase + " for expression: " + expression);
             }
             
         } catch (RuntimeException e) {
@@ -131,7 +133,7 @@ public class JsonataTestSuiteTest {
                 String actualCode = extractErrorCode(e.getMessage());
                 assertEquals(expectedCode, actualCode, "Error code mismatch for expression: " + expression);
             } else if (undefinedResult || expectedResult != null) {
-                fail("Expected success but got error: " + e.getMessage());
+                fail("Expected success but got error: " + e.getMessage() +  " for expression: " + expression);
             }
         }
     }
@@ -144,15 +146,15 @@ public class JsonataTestSuiteTest {
         if (testCase.has("dataset")) {
             JsonNode datasetName = testCase.get("dataset");
             if (datasetName.isNull()) {
-                return EMPTY_OBJECT;
+                return MissingNode.getInstance();
             }
             String name = datasetName.asText();
             if (name.equals("employees")) {
-                return DATASETS[27];
+                return DATASETS[25];
             } else if (name.equals("items")) {
-                return DATASETS[28];
+                return DATASETS[26];
             } else if (name.equals("library")) {
-                return DATASETS[29];
+                return DATASETS[27];
             }
             
             int idx = Integer.parseInt(name.replace("dataset", ""));

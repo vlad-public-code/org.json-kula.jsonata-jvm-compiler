@@ -268,7 +268,12 @@ public final class Optimizer {
             // steps, while a parenthesised subscript wraps the PathExpr with a plain
             // ArraySubscript.  The wrapper can therefore be stripped here so that
             // constant-folding and other rewrites see through it normally.
-            return rewrite(n.inner());
+            // Exception: preserve the wrapper when inner is a VariableBinding (or a
+            // Block containing bindings) so that parenthesised assignments do not
+            // inadvertently reassign outer-scope variables of the same name.
+            AstNode inner = rewrite(n.inner());
+            if (inner instanceof VariableBinding) return new Parenthesized(inner);
+            return inner;
         }
 
         @Override
@@ -320,6 +325,13 @@ public final class Optimizer {
             return args.equals(n.args()) ? n : new PartialApplication(n.name(), args);
         }
 
+        public AstNode visitLambdaCall(LambdaCall n, Void c) {
+            AstNode lambda = rewrite(n.lambda());
+            List<AstNode> args = rewriteList(n.args());
+            if (lambda == n.lambda() && args.equals(n.args())) return n;
+            return new LambdaCall((Lambda) lambda, args);
+        }
+
         // =====================================================================
         // Constant-folding logic
         // =====================================================================
@@ -359,11 +371,22 @@ public final class Optimizer {
         }
 
         private static AstNode foldNumNum(String op, double l, double r) {
+            // Guard: do not fold division/modulo by zero — leave for runtime
+            if (op.equals("/") || op.equals("%")) {
+                if (r == 0) return null;
+            }
+            // Guard: do not fold multiplication where result would be infinity
+            // This is needed for proper error reporting in cases like 1/(10e300 * 10e100)
+            if (op.equals("*")) {
+                double result = l * r;
+                if (Double.isInfinite(result)) {
+                    return null;
+                }
+            }
             return switch (op) {
                 case "+"  -> new NumberLiteral(l + r);
                 case "-"  -> new NumberLiteral(l - r);
                 case "*"  -> new NumberLiteral(l * r);
-                // Guard: do not fold division/modulo by zero — leave for runtime
                 case "/"  -> r != 0 ? new NumberLiteral(l / r) : null;
                 case "%"  -> r != 0 ? new NumberLiteral(l % r) : null;
                 case "="  -> new BooleanLiteral(l == r);
