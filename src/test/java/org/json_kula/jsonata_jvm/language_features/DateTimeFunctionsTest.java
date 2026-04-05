@@ -144,7 +144,7 @@ class DateTimeFunctionsTest {
         // MISSING propagates — expression result is NULL (the evaluate boundary converts MISSING→NULL)
         JsonNode result = JsonNodeTestHelper.evaluate("$fromMillis($notDefined)");
         // $notDefined is MISSING, so result should be NULL (the evaluate() boundary)
-        assertTrue(result.isNull(), "Expected null but got: " + result);
+        assertTrue(result.isMissingNode(), "Expected null but got: " + result);
     }
 
     @Test
@@ -183,6 +183,6 @@ class DateTimeFunctionsTest {
     @Test
     void toMillis_missingReturnsNull() throws Exception {
         JsonNode result = JsonNodeTestHelper.evaluate("$toMillis($notDefined)");
-        assertTrue(result.isNull(), "Expected null but got: " + result);
+        assertTrue(result.isMissingNode(), "Expected null but got: " + result);
     }
 }

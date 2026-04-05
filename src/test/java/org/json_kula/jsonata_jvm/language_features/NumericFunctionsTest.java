@@ -63,7 +63,7 @@ class NumericFunctionsTest {
 
     @Test
     void number_missing_returns_null() throws Exception {
-        assertTrue(eval("$number($notDefined)").isNull());
+        assertTrue(eval("$number($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -264,7 +264,7 @@ class NumericFunctionsTest {
 
     @Test
     void formatNumber_missing_returns_null() throws Exception {
-        assertTrue(eval("$formatNumber($notDefined, \"0\")").isNull());
+        assertTrue(eval("$formatNumber($notDefined, \"0\")").isMissingNode());
     }
 
     // =========================================================================

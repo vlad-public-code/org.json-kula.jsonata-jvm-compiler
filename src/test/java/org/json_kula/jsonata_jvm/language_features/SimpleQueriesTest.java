@@ -91,6 +91,7 @@ class SimpleQueriesTest {
 
     @Test
     void object_nullField_returnsNull() throws Exception {
+        // Other.Misc exists but is null → NullNode
         assertTrue(eval("Other.Misc", FRED).isNull());
     }
 
@@ -98,7 +99,7 @@ class SimpleQueriesTest {
     void object_missingPath_returnsNull() throws Exception {
         // Other.Nothing does not exist — JSONata returns "nothing" (undefined).
         // evaluate() converts the internal MISSING sentinel to JSON null at the boundary.
-        assertTrue(eval("Other.Nothing", FRED).isNull());
+        assertTrue(eval("Other.Nothing", FRED).isMissingNode());
     }
 
     @Test
@@ -139,7 +140,7 @@ class SimpleQueriesTest {
     void array_subscript_outOfBounds_returnsNull() throws Exception {
         // Phone[8] — index beyond array length → nothing.
         // evaluate() converts the internal MISSING sentinel to JSON null at the boundary.
-        assertTrue(eval("Phone[8]", FRED).isNull());
+        assertTrue(eval("Phone[8]", FRED).isMissingNode());
     }
 
     @Test

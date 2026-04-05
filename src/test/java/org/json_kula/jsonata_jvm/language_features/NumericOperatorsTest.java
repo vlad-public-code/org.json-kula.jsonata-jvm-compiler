@@ -149,13 +149,13 @@ class NumericOperatorsTest {
     void add_missing_yields_missing() throws Exception {
         // $notDefined is MISSING → MISSING propagates → evaluate() returns null
         JsonNode result = JsonNodeTestHelper.evaluate("$notDefined + 1");
-        assertTrue(result.isNull(), "Expected null (from MISSING) but got: " + result);
+        assertTrue(result.isMissingNode(), "Expected null (from MISSING) but got: " + result);
     }
 
     @Test
     void subtract_missing_yields_missing() throws Exception {
         JsonNode result = JsonNodeTestHelper.evaluate("$notDefined - 1");
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     // =========================================================================
@@ -174,7 +174,7 @@ class NumericOperatorsTest {
     void range_single_element() throws Exception {
         JsonNode result = JsonNodeTestHelper.evaluate("[3..3]");
         // Single-element array — JSONata unwraps singletons, but array constructor keeps it
-        assertFalse(result.isNull());
+        assertFalse(result.isMissingNode());
     }
 
     @Test
@@ -229,7 +229,7 @@ class NumericOperatorsTest {
         // $notDefined..5 → MISSING
         JsonNode result = JsonNodeTestHelper.evaluate("[$notDefined..5]");
         // MISSING from range → array constructor with no elements → empty or null
-        assertTrue(result.isNull() || (result.isArray() && result.size() == 0));
+        assertTrue(result.isMissingNode() || (result.isArray() && result.size() == 0));
     }
 
     @Test

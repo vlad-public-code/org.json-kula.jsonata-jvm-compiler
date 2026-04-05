@@ -121,7 +121,7 @@ class BooleanFunctionsTest {
     // missing input
     @Test
     void boolean_missing_returns_null() throws Exception {
-        assertTrue(eval("$boolean($notDefined)").isNull());
+        assertTrue(eval("$boolean($notDefined)").isMissingNode());
     }
 
     // =========================================================================
@@ -185,7 +185,7 @@ class BooleanFunctionsTest {
 
     @Test
     void not_missing_returns_null() throws Exception {
-        assertTrue(eval("$not($notDefined)").isNull());
+        assertTrue(eval("$not($notDefined)").isMissingNode());
     }
 
     // =========================================================================

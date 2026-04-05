@@ -111,12 +111,12 @@ class AggregationFunctionsTest {
 
     @Test
     void max_empty_array_returns_null() throws Exception {
-        assertTrue(eval("$max([])").isNull(), "max of empty array should be null");
+        assertTrue(eval("$max([])").isMissingNode(), "max of empty array should be null");
     }
 
     @Test
     void max_missing_returns_null() throws Exception {
-        assertTrue(eval("$max($notDefined)").isNull());
+        assertTrue(eval("$max($notDefined)").isMissingNode());
     }
 
     @Test
@@ -166,12 +166,12 @@ class AggregationFunctionsTest {
 
     @Test
     void min_empty_array_returns_null() throws Exception {
-        assertTrue(eval("$min([])").isNull(), "min of empty array should be null");
+        assertTrue(eval("$min([])").isMissingNode(), "min of empty array should be null");
     }
 
     @Test
     void min_missing_returns_null() throws Exception {
-        assertTrue(eval("$min($notDefined)").isNull());
+        assertTrue(eval("$min($notDefined)").isMissingNode());
     }
 
     @Test
@@ -221,12 +221,12 @@ class AggregationFunctionsTest {
 
     @Test
     void average_empty_array_returns_null() throws Exception {
-        assertTrue(eval("$average([])").isNull(), "average of empty array should be null");
+        assertTrue(eval("$average([])").isMissingNode(), "average of empty array should be null");
     }
 
     @Test
     void average_missing_returns_null() throws Exception {
-        assertTrue(eval("$average($notDefined)").isNull());
+        assertTrue(eval("$average($notDefined)").isMissingNode());
     }
 
     @Test

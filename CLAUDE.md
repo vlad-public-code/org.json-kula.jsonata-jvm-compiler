@@ -71,23 +71,20 @@ o - object
 Type "f" which is for "function" is not supported in this library.
 
 Union types:
-(sao) - string, array or object
-(o) - same as o
-u - equivalent to (bnsl) i.e. Boolean, number, string or null
-j - any JSON type. Equivalent to (bnsloa) i.e. Boolean, number, string, null, object or array, but not function
+`(sao)` - string, array or object
+`(o)` - same as `o`
+`u` - equivalent to `(bnsl)` i.e. Boolean, number, string or null
+`j` - any JSON type. Equivalent to `(bnsloa)` i.e. Boolean, number, string, null, object or array, but not function
 
 Type "x" which is for "bnsloaf" is not supported in this library.
 
 Parametrised types:
-a<s> - array of strings
-a<x> - array of values of any type
+* `a<s>` - array of strings
+* `a<x>` - array of values of any type
 
 Each type symbol may also have options applied.
-+ - one or more arguments of this type
-    E.g. $zip has signature <a+>; it accepts one array, or two arrays, or three arrays, or...
-    ? - optional argument
-    E.g. $join has signature <a<s>s?:s>; it accepts an array of strings and an optional joiner string which defaults to the empty string. It returns a string.
-- - if this argument is missing, use the context value ("focus").
-    E.g. $length has signature <s-:n>; it can be called as $length(OrderID) (one argument) but equivalently as OrderID.$length().
+`+` - one or more arguments of this type. E.g. $zip has signature `<a+>`; it accepts one array, or two arrays, or three arrays, or...
+`?` - optional argument. E.g. $join has signature `<a<s>s?:s>`; it accepts an array of strings and an optional joiner string which defaults to the empty string. It returns a string.
+`-` - if this argument is missing, use the context value ("focus"). E.g. $length has signature `<s-:n>`; it can be called as $length(OrderID) (one argument) but equivalently as OrderID.$length().
 
 Class JsonataFunctionArguments represents a list of JsonNode.

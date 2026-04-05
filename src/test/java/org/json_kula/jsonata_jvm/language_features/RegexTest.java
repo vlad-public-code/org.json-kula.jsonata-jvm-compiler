@@ -151,7 +151,7 @@ class RegexTest {
         // $match returns MISSING (undefined) when no match — evaluate returns NULL at boundary
         JsonNode result = FACTORY.compile("$match(\"hello\", /[0-9]/)").evaluate(EMPTY_OBJECT);
         // MISSING is converted to NULL at evaluate() boundary
-        assertTrue(result.isNull());
+        assertTrue(result.isMissingNode());
     }
 
     // =========================================================================

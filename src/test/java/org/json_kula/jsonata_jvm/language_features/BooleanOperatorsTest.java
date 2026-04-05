@@ -114,7 +114,7 @@ class BooleanOperatorsTest {
                 + "{\"title\": \"TAOCP\",  \"authors\": [\"Knuth\"],             \"price\": 60},"
                 + "{\"title\": \"Cheap\",  \"authors\": [\"Aho\"],               \"price\": 10}"
                 + "]}}";
-        JsonNode result = JsonNodeTestHelper.evaluate(
+        JsonNode result = JsonNodeTestHelper.printJavaAndEvaluate(
                 "library.books[\"Aho\" in authors and price < 50].title", json);
         // Dragon (Aho, price=40 <50) and Cheap (Aho, price=10 <50) qualify
         assertTrue(result.isArray());
@@ -251,7 +251,7 @@ class BooleanOperatorsTest {
     void boolean_fn_missing_propagates() throws Exception {
         // $boolean of undefined → MISSING → null at evaluate() boundary
         JsonNode result = JsonNodeTestHelper.evaluate("$boolean($notDefined)");
-        assertTrue(result.isNull(), "Expected null (MISSING) but got: " + result);
+        assertTrue(result.isMissingNode(), "Expected null (MISSING) but got: " + result);
     }
 
     // =========================================================================
@@ -297,7 +297,7 @@ class BooleanOperatorsTest {
     void not_fn_missing_propagates() throws Exception {
         // $not of undefined → MISSING → null at evaluate() boundary
         JsonNode result = JsonNodeTestHelper.evaluate("$not($notDefined)");
-        assertTrue(result.isNull(), "Expected null (MISSING) but got: " + result);
+        assertTrue(result.isMissingNode(), "Expected null (MISSING) but got: " + result);
     }
 
     // =========================================================================

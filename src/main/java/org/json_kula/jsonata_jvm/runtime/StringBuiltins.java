@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
@@ -25,17 +24,17 @@ final class StringBuiltins {
     private static final ObjectWriter PRETTY_WRITER =
             new ObjectMapper().writerWithDefaultPrettyPrinter();
 
-    static JsonNode fn_uppercase(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_uppercase(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         return NF.textNode(JsonataRuntime.toText(arg).toUpperCase());
     }
 
-    static JsonNode fn_lowercase(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_lowercase(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         return NF.textNode(JsonataRuntime.toText(arg).toLowerCase());
     }
 
-    static JsonNode fn_trim(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_trim(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         // JSONata $trim normalises whitespace: collapse all internal runs of
         // whitespace (tabs, newlines, multiple spaces) to a single space and
@@ -43,12 +42,12 @@ final class StringBuiltins {
         return NF.textNode(JsonataRuntime.toText(arg).replaceAll("\\s+", " ").strip());
     }
 
-    static JsonNode fn_length(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_length(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         return NF.numberNode(JsonataRuntime.toText(arg).length());
     }
 
-    static JsonNode fn_substring(JsonNode str, JsonNode start) throws JsonataEvaluationException {
+    static JsonNode fn_substring(JsonNode str, JsonNode start) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         int begin = JsonataRuntime.clampIndex((int) JsonataRuntime.toNumber(start), s.length());
@@ -56,7 +55,7 @@ final class StringBuiltins {
     }
 
     static JsonNode fn_substring(JsonNode str, JsonNode start, JsonNode length)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         int len   = s.length();
@@ -66,7 +65,7 @@ final class StringBuiltins {
     }
 
     static JsonNode fn_substringBefore(JsonNode str, JsonNode chars)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         String c = JsonataRuntime.toText(chars);
@@ -75,7 +74,7 @@ final class StringBuiltins {
     }
 
     static JsonNode fn_substringAfter(JsonNode str, JsonNode chars)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         String c = JsonataRuntime.toText(chars);
@@ -83,7 +82,7 @@ final class StringBuiltins {
         return NF.textNode(idx < 0 ? "" : s.substring(idx + c.length()));
     }
 
-    static JsonNode fn_contains(JsonNode str, JsonNode search) throws JsonataEvaluationException {
+    static JsonNode fn_contains(JsonNode str, JsonNode search) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(search)) return JsonataRuntime.MISSING;
         if (RegexRegistry.isRegexToken(search)) {
             byte[] bytes = JsonataRuntime.toText(str).getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -93,12 +92,12 @@ final class StringBuiltins {
         return JsonataRuntime.bool(JsonataRuntime.toText(str).contains(JsonataRuntime.toText(search)));
     }
 
-    static JsonNode fn_split(JsonNode str, JsonNode separator) throws JsonataEvaluationException {
+    static JsonNode fn_split(JsonNode str, JsonNode separator) throws RuntimeEvaluationException {
         return fn_split(str, separator, JsonataRuntime.MISSING);
     }
 
     static JsonNode fn_split(JsonNode str, JsonNode separator, JsonNode limit)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(separator)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         int lim = JsonataRuntime.missing(limit) ? -1 : (int) JsonataRuntime.toNumber(limit);
@@ -143,12 +142,12 @@ final class StringBuiltins {
         return result;
     }
 
-    static JsonNode fn_match(JsonNode str, JsonNode pattern) throws JsonataEvaluationException {
+    static JsonNode fn_match(JsonNode str, JsonNode pattern) throws RuntimeEvaluationException {
         return fn_match(str, pattern, JsonataRuntime.MISSING);
     }
 
     static JsonNode fn_match(JsonNode str, JsonNode pattern, JsonNode limit)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         org.joni.Regex rx = RegexRegistry.isRegexToken(pattern)
@@ -188,13 +187,13 @@ final class StringBuiltins {
     }
 
     static JsonNode fn_replace(JsonNode str, JsonNode pattern, JsonNode replacement)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         return fn_replace(str, pattern, replacement, JsonataRuntime.MISSING);
     }
 
     static JsonNode fn_replace(JsonNode str, JsonNode pattern,
                                 JsonNode replacement, JsonNode limit)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern) || JsonataRuntime.missing(replacement))
             return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
@@ -245,7 +244,7 @@ final class StringBuiltins {
         return NF.textNode(sb.toString());
     }
 
-    static JsonNode fn_join(JsonNode arr, JsonNode separator) throws JsonataEvaluationException {
+    static JsonNode fn_join(JsonNode arr, JsonNode separator) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         String sep = JsonataRuntime.missing(separator) ? "" : JsonataRuntime.toText(separator);
         if (!arr.isArray()) return JsonataRuntime.fn_string(arr);
@@ -254,18 +253,18 @@ final class StringBuiltins {
         return NF.textNode(sj.toString());
     }
 
-    static JsonNode fn_string_prettify(JsonNode arg) throws JsonataEvaluationException {
+    static JsonNode fn_string_prettify(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isTextual()) return arg;
         try {
             return NF.textNode(PRETTY_WRITER.writeValueAsString(arg));
         } catch (Exception e) {
-            throw new JsonataEvaluationException("$string: " + e.getMessage());
+            throw new RuntimeEvaluationException("$string: " + e.getMessage());
         }
     }
 
     static JsonNode fn_pad(JsonNode str, JsonNode width, JsonNode padChar)
-            throws JsonataEvaluationException {
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(width)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
         int w = (int) JsonataRuntime.toNumber(width);
@@ -281,58 +280,58 @@ final class StringBuiltins {
         return NF.textNode(w >= 0 ? s + pad : pad + s);
     }
 
-    static JsonNode fn_eval(JsonNode expr, JsonNode context) throws JsonataEvaluationException {
+    static JsonNode fn_eval(JsonNode expr, JsonNode context) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(expr)) return JsonataRuntime.MISSING;
         JsonataRuntime.EvalDelegate delegate = JsonataRuntime.getEvalDelegate();
         if (delegate == null) {
-            throw new JsonataEvaluationException(
+            throw new RuntimeEvaluationException(
                     "$eval: no eval delegate registered (create a JsonataExpressionFactory first)");
         }
         JsonNode ctx = JsonataRuntime.missing(context) ? JsonataRuntime.MISSING : context;
         return delegate.eval(JsonataRuntime.toText(expr), ctx);
     }
 
-    static JsonNode fn_base64encode(JsonNode str) throws JsonataEvaluationException {
-        if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
-        byte[] bytes = JsonataRuntime.toText(str).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    static JsonNode fn_base64encode(JsonNode str) throws RuntimeEvaluationException {
+        if (JsonataRuntime.missing(str) || !str.isTextual()) return JsonataRuntime.MISSING;
+        byte[] bytes = str.textValue().getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
         return NF.textNode(java.util.Base64.getEncoder().encodeToString(bytes));
     }
 
-    static JsonNode fn_base64decode(JsonNode str) throws JsonataEvaluationException {
-        if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
+    static JsonNode fn_base64decode(JsonNode str) throws RuntimeEvaluationException {
+        if (JsonataRuntime.missing(str) || !str.isTextual()) return JsonataRuntime.MISSING;
         try {
             byte[] decoded = java.util.Base64.getDecoder().decode(JsonataRuntime.toText(str));
             return NF.textNode(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
         } catch (IllegalArgumentException e) {
-            throw new JsonataEvaluationException("$base64decode: invalid base64 input");
+            throw new RuntimeEvaluationException("$base64decode: invalid base64 input");
         }
     }
 
-    static JsonNode fn_encodeUrlComponent(JsonNode str) throws JsonataEvaluationException {
+    static JsonNode fn_encodeUrlComponent(JsonNode str) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         return NF.textNode(percentEncode(JsonataRuntime.toText(str), false));
     }
 
-    static JsonNode fn_decodeUrlComponent(JsonNode str) throws JsonataEvaluationException {
+    static JsonNode fn_decodeUrlComponent(JsonNode str) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         try {
             return NF.textNode(percentDecode(JsonataRuntime.toText(str)));
         } catch (Exception e) {
-            throw new JsonataEvaluationException("$decodeUrlComponent: " + e.getMessage());
+            throw new RuntimeEvaluationException("$decodeUrlComponent: " + e.getMessage());
         }
     }
 
-    static JsonNode fn_encodeUrl(JsonNode str) throws JsonataEvaluationException {
+    static JsonNode fn_encodeUrl(JsonNode str) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         return NF.textNode(percentEncode(JsonataRuntime.toText(str), true));
     }
 
-    static JsonNode fn_decodeUrl(JsonNode str) throws JsonataEvaluationException {
+    static JsonNode fn_decodeUrl(JsonNode str) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         try {
             return NF.textNode(percentDecode(JsonataRuntime.toText(str)));
         } catch (Exception e) {
-            throw new JsonataEvaluationException("$decodeUrl: " + e.getMessage());
+            throw new RuntimeEvaluationException("$decodeUrl: " + e.getMessage());
         }
     }
 

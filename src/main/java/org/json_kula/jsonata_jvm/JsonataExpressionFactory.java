@@ -1,7 +1,5 @@
 package org.json_kula.jsonata_jvm;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.json_kula.jsonata_jvm.loader.JsonataExpressionLoader;
 import org.json_kula.jsonata_jvm.loader.JsonataLoadException;
 import org.json_kula.jsonata_jvm.optimizer.Optimizer;
@@ -9,6 +7,7 @@ import org.json_kula.jsonata_jvm.parser.ParseException;
 import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
+import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
 import org.json_kula.jsonata_jvm.translator.Translator;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,8 +49,8 @@ public class JsonataExpressionFactory {
                     return compiled.evaluate(ctx);
                 }
                 return compiled.evaluate(com.fasterxml.jackson.databind.node.NullNode.instance);
-            } catch (JsonataCompilationException e) {
-                throw new JsonataEvaluationException("$eval: " + e.getMessage());
+            } catch (JsonataCompilationException | JsonataEvaluationException e) {
+                throw new RuntimeEvaluationException("$eval: " + e.getMessage());
             }
         });
     }
@@ -70,16 +69,22 @@ public class JsonataExpressionFactory {
      */
     public JsonataExpression compile(String expression) throws JsonataCompilationException {
         try {
-            AstNode ast = Optimizer.optimize(Parser.parse(expression));
-            String className = "CompiledExpr" + CLASS_COUNTER.incrementAndGet();
-            String src = Translator.translate(ast, GEN_PACKAGE, className, expression);
+            String src = translate(expression);
             return loader.load(src);
-        } catch (ParseException e) {
-            throw new JsonataCompilationException(
-                    "Invalid JSONata expression: " + e.getMessage(), e);
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
                     "Failed to compile generated code for expression: " + e.getMessage(), e);
+        }
+    }
+
+    public String translate(String expression) throws JsonataCompilationException {
+        try {
+            AstNode ast = Optimizer.optimize(Parser.parse(expression));
+            String className = "CompiledExpr" + CLASS_COUNTER.incrementAndGet();
+            return Translator.translate(ast, GEN_PACKAGE, className, expression);
+        } catch (ParseException e) {
+            throw new JsonataCompilationException(
+                    "Invalid JSONata expression: " + e.getMessage(), e);
         }
     }
 }

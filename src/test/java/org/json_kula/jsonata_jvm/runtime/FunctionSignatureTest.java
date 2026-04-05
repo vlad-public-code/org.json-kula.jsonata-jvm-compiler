@@ -3,8 +3,6 @@ package org.json_kula.jsonata_jvm.runtime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
-import org.json_kula.jsonata_jvm.JsonataExpression;
-import org.json_kula.jsonata_jvm.JsonataExpressionFactory;
 import org.json_kula.jsonata_jvm.JsonNodeTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -142,7 +140,7 @@ class FunctionSignatureTest {
 
     @Test
     void coerce_n_nonNumericStringThrows() {
-        assertThrows(JsonataEvaluationException.class,
+        assertThrows(RuntimeEvaluationException.class,
                 () -> FunctionSignature.coerce("<n:n>", List.of(TextNode.valueOf("hello"))));
     }
 
@@ -196,7 +194,7 @@ class FunctionSignatureTest {
 
     @Test
     void coerce_l_nonNullThrows() {
-        assertThrows(JsonataEvaluationException.class,
+        assertThrows(RuntimeEvaluationException.class,
                 () -> FunctionSignature.coerce("<l:l>", List.of(TextNode.valueOf("x"))));
     }
 
@@ -233,7 +231,7 @@ class FunctionSignatureTest {
 
     @Test
     void coerce_o_nonObjectThrows() {
-        assertThrows(JsonataEvaluationException.class,
+        assertThrows(RuntimeEvaluationException.class,
                 () -> FunctionSignature.coerce("<o:o>", List.of(TextNode.valueOf("x"))));
     }
 
@@ -260,7 +258,7 @@ class FunctionSignatureTest {
 
     @Test
     void coerce_missingRequiredArg_throws() {
-        assertThrows(JsonataEvaluationException.class,
+        assertThrows(RuntimeEvaluationException.class,
                 () -> FunctionSignature.coerce("<n:n>", List.of()));
     }
 
@@ -296,7 +294,7 @@ class FunctionSignatureTest {
 
     @Test
     void coerce_variadicNoArgs_throws() {
-        assertThrows(JsonataEvaluationException.class,
+        assertThrows(RuntimeEvaluationException.class,
                 () -> FunctionSignature.coerce("<a+:a>", List.of()));
     }
 

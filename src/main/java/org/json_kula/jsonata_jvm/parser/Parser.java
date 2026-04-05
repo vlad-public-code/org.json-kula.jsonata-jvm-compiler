@@ -65,7 +65,21 @@ public final class Parser {
         AstNode result = parser.parseExpression();
         if (!parser.peek().type().equals(EOF)) {
             Token t = parser.peek();
-            throw new ParseException("Unexpected token: " + t, t.position());
+            if (t.type() == COLON_ASSIGN) {
+                throw new ParseException("S0212: The := operator can only be used to assign to a $variable", t.position());
+            }
+            if (t.type() == SEMICOLON) {
+                throw new ParseException("S0201: Syntax error: unexpected ';'", t.position());
+            }
+            if (t.type() == LPAREN) {
+                // A non-function expression followed by '(...)' — detect partial-application vs call
+                Token inner = parser.peekAt(1);
+                if (inner.type() == QUESTION) {
+                    throw new ParseException("T1008: The expression is not a function", t.position());
+                }
+                throw new ParseException("T1006: The expression is not a function", t.position());
+            }
+            throw new ParseException("S0211: Unexpected token '" + t.value() + "'", t.position());
         }
         return result;
     }
@@ -303,6 +317,10 @@ public final class Parser {
         if (peek().type() == PERCENT) {
             cursor++;
             right = new ParentStep();
+        } else if (peek().type() == STRING) {
+            // Quoted string after dot is a field name (e.g. Other."Alternative.Address")
+            Token t = consume(STRING);
+            right = new FieldRef(t.value());
         } else {
             right = parsePrimary();
         }
@@ -318,6 +336,10 @@ public final class Parser {
     }
 
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
+        if (source instanceof GroupByExpr) {
+            Token t = peek();
+            throw new ParseException("S0209: A predicate cannot be applied to a group-by expression", t.position());
+        }
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
             // Empty [] — force-array operator: wraps the result in an array
@@ -382,6 +404,10 @@ public final class Parser {
     }
 
     private AstNode parseGroupBy(AstNode source) throws ParseException {
+        if (source instanceof GroupByExpr) {
+            Token t = peek();
+            throw new ParseException("S0210: Each group-by clause can only contain one expression", t.position());
+        }
         List<KeyValuePair> pairs = parseObjectBody();
         return new GroupByExpr(source, pairs);
     }
@@ -443,6 +469,8 @@ public final class Parser {
             case DOLLAR         -> { cursor++; yield new ContextRef(); }
             case VARIABLE       -> parseVariableOrFunctionCall();
             case IDENTIFIER     -> parseIdentifierOrFunctionCall();
+            case AND            -> { cursor++; yield new FieldRef(t.value()); }
+            case OR             -> { cursor++; yield new FieldRef(t.value()); }
             case STAR           -> { cursor++; yield new WildcardStep(); }
             case STAR_STAR      -> { cursor++; yield new DescendantStep(); }
             case PERCENT        -> { cursor++; yield new ParentStep(); }
@@ -453,8 +481,10 @@ public final class Parser {
             case QUESTION       -> { cursor++; yield new PartialPlaceholder(); }
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
+            case EOF            -> throw new ParseException(
+                    "S0207: Unexpected end of expression", t.position());
             default             -> throw new ParseException(
-                    "Unexpected token: " + t, t.position());
+                    "S0211: Unexpected token '" + t.value() + "'", t.position());
         };
     }
 
@@ -587,7 +617,12 @@ public final class Parser {
         List<String> params = new ArrayList<>();
         if (peek().type() != RPAREN) {
             do {
-                Token p = consume(VARIABLE);
+                Token p = peek();
+                if (p.type() != VARIABLE) {
+                    throw new ParseException(
+                            "S0208: Lambda parameter '" + p.value() + "' must be a $variable", p.position());
+                }
+                cursor++;
                 params.add(p.value());
             } while (tryConsume(COMMA));
         }
@@ -615,7 +650,7 @@ public final class Parser {
         Token t = tokens.get(cursor);
         if (t.type() != expected) {
             throw new ParseException(
-                    "Expected " + expected + " but found " + t.type() + " ('" + t.value() + "')",
+                    "S0202: Expected " + expected + " but found " + t.type() + " ('" + t.value() + "')",
                     t.position());
         }
         cursor++;

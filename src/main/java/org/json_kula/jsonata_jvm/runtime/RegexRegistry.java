@@ -2,7 +2,6 @@ package org.json_kula.jsonata_jvm.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,7 +32,7 @@ final class RegexRegistry {
      * @param flags   flags string: {@code "i"} for case-insensitive,
      *                {@code "m"} for multiline, or {@code ""} for none
      */
-    static JsonNode regexNode(String pattern, String flags) throws JsonataEvaluationException {
+    static JsonNode regexNode(String pattern, String flags) throws RuntimeEvaluationException {
         int opts = org.joni.Option.NONE;
         if (flags.contains("i")) opts |= org.joni.Option.IGNORECASE;
         if (flags.contains("m")) opts |= org.joni.Option.MULTILINE;
@@ -53,10 +52,10 @@ final class RegexRegistry {
     }
 
     /** Resolves the regex sentinel token to the compiled {@link org.joni.Regex}. */
-    static org.joni.Regex lookupRegex(JsonNode n) throws JsonataEvaluationException {
+    static org.joni.Regex lookupRegex(JsonNode n) throws RuntimeEvaluationException {
         String key = n.textValue().substring(REGEX_PREFIX.length());
         org.joni.Regex rx = REGEX_REGISTRY.get(key);
-        if (rx == null) throw new JsonataEvaluationException("Regex token expired: " + key);
+        if (rx == null) throw new RuntimeEvaluationException("Regex token expired: " + key);
         return rx;
     }
 

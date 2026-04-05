@@ -97,18 +97,22 @@ final class EvaluationContext {
      * @param name the function name (without the leading {@code $})
      * @param args the arguments to pass
      * @return the function result, or {@link JsonataRuntime#MISSING} if no function is bound to {@code name}
-     * @throws JsonataEvaluationException if the function throws
+     * @throws RuntimeEvaluationException if the function throws
      */
-    static JsonNode callBoundFunction(String name, JsonNode[] args) throws JsonataEvaluationException {
+    static JsonNode callBoundFunction(String name, JsonNode[] args) throws RuntimeEvaluationException {
         JsonataBindings b = CURRENT_BINDINGS.get();
         if (b != null) {
             JsonataBoundFunction fn = b.getFunction(name);
             if (fn != null) {
                 List<JsonNode> coerced = FunctionSignature.coerce(
                         fn.getFunctionSignature(), Arrays.asList(args));
-                return fn.apply(new JsonataFunctionArguments(coerced));
+                try {
+                    return fn.apply(new JsonataFunctionArguments(coerced));
+                } catch (JsonataEvaluationException e) {
+                    throw new RuntimeEvaluationException("Error calling bound function", e);
+                }
             }
         }
-        return JsonataRuntime.MISSING;
+        throw new RuntimeEvaluationException("T1006: The function '" + name + "' is not defined");
     }
 }
