@@ -8,6 +8,7 @@ import org.json_kula.jsonata_jvm.parser.lexer.TokenType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.json_kula.jsonata_jvm.parser.lexer.TokenType.*;
 
@@ -46,6 +47,24 @@ public final class Parser {
      * literal from being greedily consumed as a nested transform postfix operator.
      */
     private int transformPatternDepth = 0;
+    /** Counter for generating unique temp variable names in lambda desugaring. */
+    private int lambdaTempCounter = 0;
+
+    /** Names of built-in functions (without $ prefix). Partial application of these via bare
+     *  identifier syntax (no $) throws T1007; unknown names throw T1008. */
+    private static final Set<String> BUILTIN_NAMES = Set.of(
+        "string", "length", "substring", "substringBefore", "substringAfter",
+        "uppercase", "lowercase", "trim", "pad", "contains", "split", "join",
+        "replace", "match", "number", "abs", "floor", "ceil", "round", "sqrt",
+        "power", "random", "boolean", "not", "exists", "count", "sum", "max",
+        "min", "average", "reverse", "sort", "shuffle", "distinct", "append",
+        "keys", "lookup", "spread", "merge", "each", "sift", "type", "map",
+        "filter", "reduce", "single", "zip", "formatNumber", "parseNumber",
+        "formatBase", "formatInteger", "parseInteger", "now", "millis",
+        "fromMillis", "toMillis", "error", "assert", "typeOf", "eval",
+        "encodeUrl", "encodeUrlComponent", "decodeUrl", "decodeUrlComponent",
+        "base64encode", "base64decode"
+    );
 
     private Parser(List<Token> tokens) {
         this.tokens = tokens;
@@ -93,15 +112,20 @@ public final class Parser {
         return parseBinding();
     }
 
-    // Level 1: variable binding  $name := expr
+    // Level 1: variable binding  $name := expr  (right-associative for chained := )
     private AstNode parseBinding() throws ParseException {
         if (peek().type() == VARIABLE && peekAt(1).type() == COLON_ASSIGN) {
             String name = consume(VARIABLE).value();
             consume(COLON_ASSIGN);
-            AstNode value = parseConditional();
+            AstNode value = parseBinding(); // right-associative: $a := $b := 5 → $a := ($b := 5)
             return new VariableBinding(name, value);
         }
-        return parseConditional();
+        AstNode lhs = parseConditional();
+        // Detect invalid assignment target like $a[1]:=3 or foo:=3
+        if (peek().type() == COLON_ASSIGN) {
+            throw new ParseException("S0212: The := operator can only be used to assign to a $variable", peek().position());
+        }
+        return lhs;
     }
 
     // Level 2: conditional  condition ? then : else  /  left ?: right  /  left ?? right
@@ -321,6 +345,10 @@ public final class Parser {
             // Quoted string after dot is a field name (e.g. Other."Alternative.Address")
             Token t = consume(STRING);
             right = new FieldRef(t.value());
+        } else if (peek().type() == NUMBER) {
+            // A number literal after '.' is not a valid path step — S0213
+            Token t = peek();
+            throw new ParseException("S0213: The expression on the right side of the '.' operator must be a name or a wildcard, not a number", t.position());
         } else {
             right = parsePrimary();
         }
@@ -389,13 +417,13 @@ public final class Parser {
         consume(LPAREN);
         List<SortKey> keys = new ArrayList<>();
         do {
-            boolean descending = false;
+            boolean descending = false;  // Default: ascending sort
             if (peek().type() == LESS) {
                 consume(LESS);
-                descending = false;
+                descending = false;   // '<' prefix for ascending sort (descending=false)
             } else if (peek().type() == GREATER) {
                 consume(GREATER);
-                descending = true;
+                descending = true;    // '>' prefix for descending sort
             }
             keys.add(new SortKey(parseExpression(), descending));
         } while (tryConsume(COMMA));
@@ -471,6 +499,7 @@ public final class Parser {
             case IDENTIFIER     -> parseIdentifierOrFunctionCall();
             case AND            -> { cursor++; yield new FieldRef(t.value()); }
             case OR             -> { cursor++; yield new FieldRef(t.value()); }
+            case IN             -> { cursor++; yield new FieldRef(t.value()); }
             case STAR           -> { cursor++; yield new WildcardStep(); }
             case STAR_STAR      -> { cursor++; yield new DescendantStep(); }
             case PERCENT        -> { cursor++; yield new ParentStep(); }
@@ -478,11 +507,23 @@ public final class Parser {
             case LBRACKET       -> parseArrayConstructor();
             case LBRACE         -> parseObjectConstructorNode();
             case PIPE           -> parseTransformLambda();
-            case QUESTION       -> { cursor++; yield new PartialPlaceholder(); }
+            case QUESTION       -> {
+                cursor++;
+                // '?' followed by '(' is a lambda shorthand (same as 'function'/λ)
+                if (peek().type() == LPAREN) {
+                    AstNode lambda = parseLambda();
+                    if (peek().type() == LPAREN) {
+                        yield desugarImmediateLambdaCall(lambda);
+                    }
+                    yield lambda;
+                }
+                yield new PartialPlaceholder();
+            }
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
             case EOF            -> throw new ParseException(
                     "S0207: Unexpected end of expression", t.position());
+            case ERROR          -> throw new ParseException(t.value(), t.position());
             default             -> throw new ParseException(
                     "S0211: Unexpected token '" + t.value() + "'", t.position());
         };
@@ -502,11 +543,30 @@ public final class Parser {
         Token t = consume(IDENTIFIER);
         // 'function' keyword (or Greek λ) introduces a lambda expression
         if (("function".equals(t.value()) || "\u03bb".equals(t.value())) && peek().type() == LPAREN) {
-            return parseLambda();
+            AstNode lambda = parseLambda();
+            // Immediate invocation: function($x){body}(args) — desugar to ($__ln:=lambda; $__ln(args))
+            if (peek().type() == LPAREN) {
+                return desugarImmediateLambdaCall(lambda);
+            }
+            return lambda;
         }
         if (peek().type() == LPAREN) {
-            // Treat as built-in/user-defined function call
-            return parseFunctionArgs(t.value(), t.position());
+            AstNode call = parseFunctionArgs(t.value(), t.position());
+            if (call instanceof PartialApplication) {
+                // Bare identifier partial application is invalid.
+                // T1007 if name matches a known built-in; T1008 otherwise.
+                if (BUILTIN_NAMES.contains(t.value())) {
+                    throw new ParseException("T1007: Attempted to partially apply a built-in function '"
+                            + t.value() + "'", t.position());
+                }
+                throw new ParseException("T1008: The expression is not a function", t.position());
+            }
+            // Regular call of a built-in function without $ prefix - throw T1005
+            if (BUILTIN_NAMES.contains(t.value())) {
+                throw new ParseException("T1005: Attempted to invoke a non-function. Did you mean $" 
+                        + t.value() + "?", t.position());
+            }
+            return call;
         }
         return new FieldRef(t.value());
     }
@@ -627,10 +687,102 @@ public final class Parser {
             } while (tryConsume(COMMA));
         }
         consume(RPAREN);
+        // Parse optional type-signature: <...> — e.g. function($x,$y)<n-n:n>{body}
+        String signature = null;
+        if (peek().type() == LESS) {
+            signature = readTypeSignature();
+        }
+        // Extra '>' after signature is S0402
+        if (peek().type() == GREATER) {
+            throw new ParseException("S0402: Invalid type signature: unexpected '>' after signature", peek().position());
+        }
         consume(LBRACE);
         AstNode body = parseExpression();
         consume(RBRACE);
-        return new Lambda(params, body);
+        return new Lambda(params, body, signature);
+    }
+
+    /**
+     * Desugars an immediately-invoked lambda literal {@code function($x){body}(args)} to
+     * {@code ($__ln_N := function($x){body}; $__ln_N(args))}.
+     */
+    private AstNode desugarImmediateLambdaCall(AstNode lambda) throws ParseException {
+        consume(LPAREN);
+        List<AstNode> args = new ArrayList<>();
+        if (peek().type() != RPAREN) {
+            do {
+                args.add(parseExpression());
+            } while (tryConsume(COMMA));
+        }
+        consume(RPAREN);
+        // If lambda has a signature, use LambdaCall so translator can apply
+        // type-checking and context binding. Otherwise use the old desugared form.
+        if (lambda instanceof Lambda lam && lam.signature() != null) {
+            return new LambdaCall(lam, args);
+        }
+        String tmpName = "__ln_" + lambdaTempCounter++;
+        return new Parenthesized(new Block(List.of(
+                new VariableBinding(tmpName, lambda),
+                new FunctionCall(tmpName, args)
+        )));
+    }
+
+    /** Skips a type-signature {@code <...>} (possibly nested, e.g. {@code <a<n>>}). */
+    private void skipTypeSignature() {
+        cursor++; // consume '<'
+        int depth = 1;
+        while (cursor < tokens.size() && depth > 0) {
+            TokenType tt = tokens.get(cursor).type();
+            if (tt == LESS) depth++;
+            else if (tt == GREATER) depth--;
+            cursor++;
+        }
+    }
+
+    /**
+     * Reads and returns a type-signature string {@code <...>}, validating basic rules.
+     * Throws S0401 for invalid type specs (e.g. {@code n<n>}) and S0402 for invalid
+     * union types (e.g. {@code (sa<n>)} which has a typed array in a union without
+     * the outer close {@code >} in the right place).
+     */
+    private String readTypeSignature() throws ParseException {
+        int startCursor = cursor;
+        int startPos = peek().position();
+        cursor++; // consume '<'
+        StringBuilder sb = new StringBuilder("<");
+        int depth = 1;
+        while (cursor < tokens.size() && depth > 0) {
+            Token tok = tokens.get(cursor);
+            TokenType tt = tok.type();
+            sb.append(tok.value().isEmpty() ? tokenTypeToSigChar(tt) : tok.value());
+            if (tt == LESS) depth++;
+            else if (tt == GREATER) {
+                depth--;
+                if (depth == 0) break;
+            }
+            cursor++;
+        }
+        cursor++; // consume closing '>'
+        String sig = sb.toString();
+        // Validate: detect n<n> (parametrized non-array type) → S0401
+        if (sig.matches(".*[bnslu]<.*")) {
+            throw new ParseException("S0401: Invalid type specification in signature: '" + sig + "'", startPos);
+        }
+        return sig;
+    }
+
+    private static String tokenTypeToSigChar(TokenType tt) {
+        return switch (tt) {
+            case LESS -> "<";
+            case GREATER -> ">";
+            case LPAREN -> "(";
+            case RPAREN -> ")";
+            case COLON -> ":";
+            case PLUS -> "+";
+            case QUESTION -> "?";
+            case MINUS -> "-";
+            default -> "";
+        };
     }
 
     // =========================================================================
@@ -649,6 +801,10 @@ public final class Parser {
     private Token consume(TokenType expected) throws ParseException {
         Token t = tokens.get(cursor);
         if (t.type() != expected) {
+            if (t.type() == org.json_kula.jsonata_jvm.parser.lexer.TokenType.EOF)
+                throw new ParseException(
+                        "S0203: Expected " + expected + " but reached end of expression",
+                        t.position());
             throw new ParseException(
                     "S0202: Expected " + expected + " but found " + t.type() + " ('" + t.value() + "')",
                     t.position());

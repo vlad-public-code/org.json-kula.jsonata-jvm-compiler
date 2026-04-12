@@ -30,10 +30,11 @@ final class BlockCodeGen {
         int id = ctx.state.nextId();
         String methodName = "__block" + id;
 
-        // Collect the names defined by this block's own VariableBindings.
+        // Collect the names defined by this block's own VariableBindings,
+        // including names from chained (right-associative) assignments like $a := $b := 5.
         Set<String> blockLocalNames = new LinkedHashSet<>();
         for (AstNode expr : exprs) {
-            if (expr instanceof VariableBinding vb) blockLocalNames.add(vb.name());
+            collectBindingNames(expr, blockLocalNames);
         }
 
         // Pre-pass: find every variable that needs an array-holder.
@@ -52,12 +53,14 @@ final class BlockCodeGen {
         StringBuilder extraParamDecls = new StringBuilder();
         StringBuilder extraCallArgs   = new StringBuilder();
         for (String v : capturedVars) {
-            String alias = ctx.state.getAlias(v);
-            String javaName = alias != null ? alias : "$" + v;
-            extraParamDecls.append(", JsonNode ").append(javaName);
             if (ctx.state.holderVars.contains(v)) {
-                extraCallArgs.append(", $").append(v).append("Ref[0]");
+                // Pass the holder array itself so the block method can access $vRef[0]
+                extraParamDecls.append(", JsonNode[] $").append(v).append("Ref");
+                extraCallArgs.append(", $").append(v).append("Ref");
             } else {
+                String alias = ctx.state.getAlias(v);
+                String javaName = alias != null ? alias : "$" + v;
+                extraParamDecls.append(", JsonNode ").append(javaName);
                 extraCallArgs.append(", ").append(javaName);
             }
         }
@@ -87,10 +90,11 @@ final class BlockCodeGen {
                 sb.append("    JsonNode[] $").append(name).append("Ref = {MISSING};\n");
             }
 
+            Set<String> declared = new java.util.HashSet<>();
             for (int i = 0; i < exprs.size() - 1; i++) {
                 AstNode expr = exprs.get(i);
                 if (expr instanceof VariableBinding vb) {
-                    emitVarBinding(t, vb, sb, innerCtx);
+                    emitVarBinding(t, vb, sb, innerCtx, declared);
                 } else {
                     sb.append("    ").append(expr.accept(t, innerCtx)).append(";\n");
                 }
@@ -98,7 +102,7 @@ final class BlockCodeGen {
 
             AstNode last = exprs.get(exprs.size() - 1);
             if (last instanceof VariableBinding vb) {
-                emitVarBinding(t, vb, sb, innerCtx);
+                emitVarBinding(t, vb, sb, innerCtx, declared);
                 sb.append("    return $").append(vb.name()).append(";\n");
             } else {
                 sb.append("    return ").append(last.accept(t, innerCtx)).append(";\n");
@@ -122,10 +126,48 @@ final class BlockCodeGen {
      * update so that lambdas that captured the holder see the real value.
      */
     static void emitVarBinding(Translator t, VariableBinding vb, StringBuilder sb, GenCtx ctx) {
+        emitVarBinding(t, vb, sb, ctx, new java.util.HashSet<>());
+    }
+
+    static void emitVarBinding(Translator t, VariableBinding vb, StringBuilder sb, GenCtx ctx,
+                                Set<String> declared) {
+        // For chained assignment $a := $b := val: emit the inner binding first,
+        // then use the inner variable as the value of the outer binding.
+        if (vb.value() instanceof VariableBinding innerVb) {
+            emitVarBinding(t, innerVb, sb, ctx, declared);
+            String innerRef = "$" + innerVb.name();
+            if (declared.add(vb.name())) {
+                sb.append("    JsonNode $").append(vb.name()).append(" = ").append(innerRef).append(";\n");
+            } else {
+                sb.append("    $").append(vb.name()).append(" = ").append(innerRef).append(";\n");
+            }
+            if (ctx.state.holderVars.contains(vb.name())) {
+                sb.append("    $").append(vb.name()).append("Ref[0] = $").append(vb.name()).append(";\n");
+            }
+            return;
+        }
         String valExpr = vb.value().accept(t, ctx);
-        sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+        if (declared.add(vb.name())) {
+            // First declaration of this variable in this block
+            sb.append("    JsonNode $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+        } else {
+            // Re-binding: just reassign (no re-declaration)
+            sb.append("    $").append(vb.name()).append(" = ").append(valExpr).append(";\n");
+        }
         if (ctx.state.holderVars.contains(vb.name())) {
             sb.append("    $").append(vb.name()).append("Ref[0] = $").append(vb.name()).append(";\n");
+        }
+    }
+
+    /**
+     * Recursively collects variable names from a VariableBinding chain.
+     * Handles chained assignments like {@code $a := $b := 5} where the outer binding's
+     * value is itself a VariableBinding.
+     */
+    private static void collectBindingNames(AstNode expr, Set<String> names) {
+        if (expr instanceof VariableBinding vb) {
+            names.add(vb.name());
+            collectBindingNames(vb.value(), names); // recurse into value for chains
         }
     }
 }

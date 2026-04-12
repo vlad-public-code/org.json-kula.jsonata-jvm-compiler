@@ -22,37 +22,50 @@ final class GenCtx {
     /** True if we're inside an array constructor used as a step (e.g. Email.[address]). */
     final boolean inArrayConstructorStep;
 
+    /**
+     * True when the array constructor path step should preserve inner arrays as
+     * single items (used for the {@code $.[arr][]} pattern, i.e. ForceArray wraps
+     * a path ending with ArrayConstructor).
+     */
+    final boolean arrayConstructorPreserve;
+
     GenCtx(String ctxVar, String rootVar, GenState state) {
-        this(ctxVar, rootVar, state, List.of(), false);
+        this(ctxVar, rootVar, state, List.of(), false, false);
     }
 
-    private GenCtx(String ctxVar, String rootVar, GenState state, List<String> parentVars, 
-                   boolean inArrayConstructorStep) {
+    private GenCtx(String ctxVar, String rootVar, GenState state, List<String> parentVars,
+                   boolean inArrayConstructorStep, boolean arrayConstructorPreserve) {
         this.ctxVar     = ctxVar;
         this.rootVar    = rootVar;
         this.state      = state;
         this.parentVars = parentVars;
         this.inArrayConstructorStep = inArrayConstructorStep;
+        this.arrayConstructorPreserve = arrayConstructorPreserve;
     }
 
     GenCtx withCtx(String newCtx) {
-        return new GenCtx(newCtx, rootVar, state, parentVars, inArrayConstructorStep);
+        return new GenCtx(newCtx, rootVar, state, parentVars, inArrayConstructorStep, arrayConstructorPreserve);
     }
 
     /** Returns a new context with {@code newCtx} as context and the current ctxVar pushed as parent. */
     GenCtx withCtxAndParent(String newCtx) {
         List<String> newParents = new java.util.ArrayList<>(parentVars);
         newParents.add(ctxVar);
-        return new GenCtx(newCtx, rootVar, state, newParents, inArrayConstructorStep);
+        return new GenCtx(newCtx, rootVar, state, newParents, inArrayConstructorStep, arrayConstructorPreserve);
     }
 
     /** Returns a new context with the given parent vars list. */
     GenCtx withParents(List<String> newParentVars) {
-        return new GenCtx(ctxVar, rootVar, state, newParentVars, inArrayConstructorStep);
+        return new GenCtx(ctxVar, rootVar, state, newParentVars, inArrayConstructorStep, arrayConstructorPreserve);
     }
 
     /** Returns a new context with inArrayConstructorStep flag set. */
     GenCtx withInArrayConstructorStep() {
-        return new GenCtx(ctxVar, rootVar, state, parentVars, true);
+        return new GenCtx(ctxVar, rootVar, state, parentVars, true, arrayConstructorPreserve);
+    }
+
+    /** Returns a new context with arrayConstructorPreserve flag set. */
+    GenCtx withArrayConstructorPreserve() {
+        return new GenCtx(ctxVar, rootVar, state, parentVars, inArrayConstructorStep, true);
     }
 }

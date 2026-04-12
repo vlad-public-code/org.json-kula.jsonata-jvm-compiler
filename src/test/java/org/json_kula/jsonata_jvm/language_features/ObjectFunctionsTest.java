@@ -342,8 +342,8 @@ class ObjectFunctionsTest {
 
     @Test
     void assert_truthy_value_passes() throws Exception {
-        assertTrue(eval("$assert(1, \"msg\")").isMissingNode());
-        assertTrue(eval("$assert(\"non-empty\", \"msg\")").isMissingNode());
+        assertThrows(Exception.class, () -> eval("$assert(1, \"msg\")"));
+        assertThrows(Exception.class, () -> eval("$assert(\"non-empty\", \"msg\")"));
     }
 
     @Test

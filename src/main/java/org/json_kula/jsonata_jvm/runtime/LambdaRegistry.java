@@ -58,9 +58,17 @@ final class LambdaRegistry {
      * </ul>
      */
     static JsonNode fn_pipe(JsonNode arg, JsonNode fn) throws RuntimeEvaluationException {
+        // Regex on the right: test whether arg matches the regex
+        if (RegexRegistry.isRegexToken(fn)) {
+            if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
+            byte[] bytes = JsonataRuntime.toText(arg).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            return JsonataRuntime.bool(
+                    RegexRegistry.lookupRegex(fn).matcher(bytes)
+                            .search(0, bytes.length, org.joni.Option.NONE) >= 0);
+        }
         if (!isLambdaToken(fn)) {
             throw new RuntimeEvaluationException(
-                    "Right-hand side of ~> is not a function; got: " + fn);
+                    "T2006: Right-hand side of ~> is not a function; got: " + fn);
         }
         if (isLambdaToken(arg)) {
             final JsonataLambda f = lookupLambda(arg);
