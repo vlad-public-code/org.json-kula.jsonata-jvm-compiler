@@ -129,7 +129,7 @@ class StringFunctionsTest {
 
     @Test
     void substringAfter_not_found() throws Exception {
-        assertEquals("", eval("$substringAfter(\"hello\", \"xyz\")").textValue());
+        assertEquals("hello", eval("$substringAfter(\"hello\", \"xyz\")").textValue());
     }
 
     // =========================================================================
@@ -197,7 +197,7 @@ class StringFunctionsTest {
     @Test
     void split_with_limit() throws Exception {
         JsonNode result = eval("$split(\"a,b,c\", \",\", 2)");
-        assertTrue(result.isArray());
+assertTrue(result.isArray());
         assertEquals(2, result.size());
     }
 

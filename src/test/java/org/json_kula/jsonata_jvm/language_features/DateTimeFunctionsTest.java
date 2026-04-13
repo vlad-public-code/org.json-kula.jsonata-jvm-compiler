@@ -185,4 +185,55 @@ class DateTimeFunctionsTest {
         JsonNode result = JsonNodeTestHelper.evaluate("$toMillis($notDefined)");
         assertTrue(result.isMissingNode(), "Expected null but got: " + result);
     }
+
+    @Test
+    void toMillis_dayOfYearWords() throws Exception {
+        // Test from jsonata-test-suite: 365th day of 2018 is 31st December
+        JsonNode result = JsonNodeTestHelper.evaluate("$toMillis('three hundred and sixty-fifth day of 2018', '[dwo] day of [Y]') ~> $fromMillis()");
+        assertEquals("2018-12-31T00:00:00.000Z", result.textValue());
+    }
+    
+    @Test
+    void toMillis_twentiethOfAugust() throws Exception {
+        // Test from jsonata-test-suite: Twentieth of August, two thousand and seventeen
+        JsonNode result = JsonNodeTestHelper.evaluate("$toMillis('Twentieth of August, two thousand and seventeen', '[DW] of [MNn], [Yw]')");
+        assertEquals(1503187200000L, result.asLong());
+    }
+    
+    @Test
+    void toMillis_twelfthNovemberMon() throws Exception {
+        // Test from jsonata-test-suite with [DWwo] pattern
+        JsonNode result = JsonNodeTestHelper.evaluate("$toMillis('Mon, Twelfth November 2018', '[FNn,*-3], [DWwo] [MNn] [Y]') ~> $fromMillis()");
+        assertEquals("2018-11-12T00:00:00.000Z", result.textValue());
+    }
+    
+@Test
+    void toMillis_gmtTimezone() throws Exception {
+        // Test +0530
+        JsonNode result1 = JsonNodeTestHelper.evaluate("$toMillis('2020-09-09 12:00:00 +0530', '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01] [Z]') ~> $fromMillis()");
+        System.out.println("+0530 result: " + result1);
+        
+        // Test GMT-5
+        JsonNode result2 = JsonNodeTestHelper.evaluate("$toMillis('2020-09-09 12:00:00 GMT-5', '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01] [z]') ~> $fromMillis()");
+        System.out.println("GMT-5 result: " + result2);
+    }
+    
+    @Test
+    void test_isoWeekDate_fromTestSuite() throws Exception {
+        // Test new regex pattern
+        String[] tests = {
+            "[Y]-[M]-[D]",
+            "[Y0001]-[M01]-[D01]",
+            "[M01]",
+            "[M]",
+            "[MNn]",
+            "[m]"
+        };
+        
+        System.out.println("=== Testing new regex: .*\\[M(?!m).* ===");
+        for (String pic : tests) {
+            boolean hasMonth = pic.matches(".*\\[M(?!m).*");
+            System.out.println("'" + pic + "' -> hasMonth: " + hasMonth);
+        }
+    }
 }

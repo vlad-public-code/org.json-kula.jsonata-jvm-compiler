@@ -74,6 +74,15 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             Map.entry("merge",      "fn_merge")
     );
 
+    /**
+     * Built-in functions that take 2 arguments, used as first-class values.
+     * When referenced as a variable (e.g. {@code $reduce(arr, $append)}), the
+     * generated lambda unpacks a packed {@code [arg1, arg2]} array.
+     */
+    private static final Map<String, String> BUILTIN_BINARY_LAMBDA_WRAPPERS = Map.ofEntries(
+            Map.entry("append", "fn_append")
+    );
+
     // =========================================================================
     // Public API
     // =========================================================================
@@ -101,7 +110,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         String bodyExpr = ast.accept(t, ctx);
 
         return ClassAssembler.buildClass(pkg, className, bodyExpr, state.helperMethods.toString(),
-                sourceExpression);
+                state.localDeclarations.toString(), sourceExpression);
     }
 
     /**
@@ -173,6 +182,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // wrap it as an inline lambda so it can be stored / applied later.
         String wrapper = BUILTIN_LAMBDA_WRAPPERS.get(n.name());
         if (wrapper != null) return "lambdaNode((__bArg -> " + wrapper + "(__bArg)))";
+        String binaryWrapper = BUILTIN_BINARY_LAMBDA_WRAPPERS.get(n.name());
+        if (binaryWrapper != null) return "lambdaNode((__bArg -> " + binaryWrapper
+                + "(__bArg.isArray() ? __bArg.get(0) : __bArg,"
+                + " __bArg.isArray() && __bArg.size() > 1 ? __bArg.get(1) : MISSING)))";
         return "resolveBinding(\"" + n.name() + "\")";
     }
 
@@ -197,7 +210,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // immediate parent expression. This is set up by compilePathSteps when
         // generating nested mapStep lambdas with parent tracking.
         if (ctx.parentVars.isEmpty()) {
-            throw new IllegalStateException("S0217: Parent operator % used with no parent context");
+            throw new RuntimeTranslatorException("S0217", "Parent operator % used with no parent context");
         }
         return ctx.parentVars.get(ctx.parentVars.size() - 1);
     }
@@ -205,13 +218,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitPositionBinding(PositionBinding n, GenCtx ctx) {
         // PositionBinding is handled structurally in compilePathSteps.
-        throw new IllegalStateException("PositionBinding must appear inside a PathExpr");
+        throw new RuntimeTranslatorException(null, "PositionBinding must appear inside a PathExpr");
     }
 
     @Override
     public String visitContextBinding(ContextBinding n, GenCtx ctx) {
         // ContextBinding is handled structurally in compilePathSteps.
-        throw new IllegalStateException("ContextBinding must appear inside a PathExpr");
+        throw new RuntimeTranslatorException(null, "ContextBinding must appear inside a PathExpr");
     }
 
     // =========================================================================
@@ -221,6 +234,12 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitPathExpr(PathExpr n, GenCtx ctx) {
         List<AstNode> steps = n.steps();
+
+        // Each PathExpr is a fresh path scope: clear any inherited cross-join context
+        // so that sub-paths inside constructors or predicates don't inadvertently
+        // reuse the cross-join base from an outer path.
+        ctx = ctx.withCrossJoinParent(null);
+
         // Check whether the first step is a ForceArray marker.
         // If so, use its inner source as the actual first step and wrap the
         // final result in forceArray() to prevent singleton collapsing.
@@ -233,13 +252,79 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         if (!forceArr && firstStep instanceof PredicateExpr pe && pe.source() instanceof ForceArray) {
             forceArr = true;
         }
+
+        // When ForceArray(inner_binding_path) is the first step and there are remaining
+        // outer steps (e.g. ObjectConstructor), merge them into the inner path so that
+        // cross-join variables ($l, $b) bound inside the inner path remain in scope for
+        // the outer steps.  Without this, the OC is compiled outside the lambda scopes.
+        if (forceArr && firstStep instanceof PathExpr innerPe
+                && hasAnyBinding(innerPe.steps())
+                && steps.size() > 1) {
+            List<AstNode> mergedSteps = new ArrayList<>(innerPe.steps());
+            mergedSteps.addAll(steps.subList(1, steps.size()));
+            return "forceArray(" + visitPathExpr(new PathExpr(mergedSteps), ctx) + ")";
+        }
+
+        // When the first step is PredicateExpr(inner_binding_path, pred), unfold
+        // the inner path + predicate + remaining steps into a single flat PathExpr so that:
+        // (a) cross-join parent tracking works correctly, and
+        // (b) variables bound by @$var / #$var inside the inner path remain in scope.
+        // This handles patterns like:
+        //   Employee@$e.(Contact)[ssn=$e.SSN].{...}
+        //   Account.Order#$o.Product[pred].{'Order Index': $o}
+        //   library.books#$pos.$[$...].pos
+        if (!forceArr && firstStep instanceof PredicateExpr outerPe
+                && outerPe.source() instanceof PathExpr innerPath
+                && hasAnyBinding(innerPath.steps())) {
+            List<AstNode> newSteps = new ArrayList<>(innerPath.steps());
+            // Re-attach the outer predicate as a context-relative step.
+            newSteps.add(new PredicateExpr(new ContextRef(), outerPe.predicate()));
+            for (int i = 1; i < steps.size(); i++) newSteps.add(steps.get(i));
+            return visitPathExpr(new PathExpr(newSteps), ctx);
+        }
+
+        // When the first step is SortExpr(inner_binding_path, keys), unfold
+        // the inner path so that variables bound by @$var / #$var remain in scope
+        // for subsequent steps (e.g. object constructors using $o / $e).
+        // Account.Order#$o.Product^(ProductID).{'Order Index': $o} →
+        //   PathExpr([Account, Order, #$o, SortExpr(Product, ^ProductID), ObjectConstructor])
+        if (!forceArr && firstStep instanceof SortExpr outerSort
+                && outerSort.source() instanceof PathExpr innerPath
+                && hasAnyBinding(innerPath.steps())) {
+            List<AstNode> innerSteps = innerPath.steps();
+            // Find the last binding step and split there.
+            int bindIdx = -1;
+            for (int i = 0; i < innerSteps.size(); i++) {
+                if (innerSteps.get(i) instanceof ContextBinding
+                        || innerSteps.get(i) instanceof PositionBinding) bindIdx = i;
+            }
+            // Prefix: path steps up to and including the binding.
+            List<AstNode> newSteps = new ArrayList<>(innerSteps.subList(0, bindIdx + 1));
+            // Sort source: remaining inner steps after the binding.
+            List<AstNode> sortSourceSteps = new ArrayList<>(
+                    innerSteps.subList(bindIdx + 1, innerSteps.size()));
+            AstNode sortSource = sortSourceSteps.isEmpty() ? new ContextRef()
+                    : sortSourceSteps.size() == 1 ? sortSourceSteps.get(0)
+                    : new PathExpr(sortSourceSteps);
+            newSteps.add(new SortExpr(sortSource, outerSort.keys()));
+            for (int i = 1; i < steps.size(); i++) newSteps.add(steps.get(i));
+            return visitPathExpr(new PathExpr(newSteps), ctx);
+        }
+
+        // If the path has @$var.FieldRef cross-join AND uses %, inject the initial
+        // context into parentVars as root so that %.% can navigate back to root.
+        if (hasCrossJoinFieldRef(steps) && needsParentTracking(steps, 0)
+                && ctx.parentVars.isEmpty()) {
+            ctx = ctx.withParents(new ArrayList<>(List.of(ctx.ctxVar)));
+        }
+
         // Handle ParentStep as first step: navigate up via parentVars and
         // adjust the parentVars for subsequent steps.
         String expr;
         int startFrom = 1;
         if (firstStep instanceof ParentStep) {
             if (ctx.parentVars.isEmpty()) {
-                throw new IllegalStateException("S0217: Parent operator % used with no parent context");
+                throw new RuntimeTranslatorException("S0217", "Parent operator % used with no parent context");
             }
             expr = ctx.parentVars.get(ctx.parentVars.size() - 1);
             List<String> newParents = ctx.parentVars.size() > 1
@@ -249,9 +334,100 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         } else {
             expr = stepExpr(firstStep, ctx);
         }
+        // Detect cross-join subscript hoisting:
+        // When a path has @$var cross-join(s) AND ends with ArraySubscript(pred, n) [ObjectConstructor?],
+        // the subscript must apply to the ENTIRE flat cross-join result, not per-element.
+        // Rewrite: remove the ArraySubscript, compile the rest (so oc applies per match),
+        // then wrap the result in subscript(…, n).
+        if (hasContextBinding(steps) && !forceArr) {
+            for (int si = 1; si < steps.size(); si++) {
+                if (steps.get(si) instanceof ArraySubscript hoistAs
+                        && hoistAs.source() instanceof PredicateExpr
+                        && si > 0 && (steps.get(si - 1) instanceof ContextBinding
+                                       || steps.get(si - 1) instanceof PositionBinding
+                                       || steps.get(si - 1) instanceof PredicateExpr)) {
+                    // Replace ArraySubscript with its source (PredicateExpr) in the step list,
+                    // compile the modified path, then wrap with subscript.
+                    List<AstNode> hoistedSteps = new ArrayList<>(steps);
+                    hoistedSteps.set(si, hoistAs.source());
+                    String innerResult = visitPathExpr(new PathExpr(hoistedSteps), ctx);
+                    String idxExpr = hoistAs.index().accept(this, ctx);
+                    return "subscript(" + innerResult + ", " + idxExpr + ")";
+                }
+            }
+        }
+
         // Use recursive compile to handle ContextBinding, PositionBinding, ParentStep.
         String result = compilePathSteps(steps, startFrom, expr, ctx);
+        // When a GroupByExpr(ContextRef) appears as the last step and the path contains
+        // binding operators (@$var / #$var), each iteration of the binding loop produces
+        // a separate GroupBy object.  Merge all per-iteration objects into one.
+        if (pathEndsWithGroupByAfterBinding(steps)) {
+            result = "mergeGroupByObjects(" + result + ")";
+        }
         return forceArr ? "forceArray(" + result + ")" : result;
+    }
+
+    /**
+     * Returns {@code true} when the last step is a {@link GroupByExpr} with a
+     * {@link ContextRef} source AND an earlier step is a {@link ContextBinding}
+     * or {@link PositionBinding}.  In that case every iteration of the binding
+     * produces its own GroupBy object, and they must all be merged together.
+     */
+    private static boolean pathEndsWithGroupByAfterBinding(List<AstNode> steps) {
+        if (steps.size() < 2) return false;
+        AstNode last = steps.get(steps.size() - 1);
+        if (!(last instanceof GroupByExpr gbe && gbe.source() instanceof ContextRef)) return false;
+        for (int i = 0; i < steps.size() - 1; i++) {
+            if (steps.get(i) instanceof ContextBinding || steps.get(i) instanceof PositionBinding) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if the step list contains an {@code @$var} ContextBinding
+     * immediately followed by a FieldRef — the pattern that introduces a cross-join
+     * where subsequent FieldRef steps navigate from the same parent rather than from
+     * the bound variable.
+     */
+    private static boolean hasCrossJoinFieldRef(List<AstNode> steps) {
+        for (int i = 0; i + 1 < steps.size(); i++) {
+            if (steps.get(i) instanceof ContextBinding && steps.get(i + 1) instanceof FieldRef) return true;
+            // @$var#$pos.FieldRef pattern
+            if (steps.get(i) instanceof ContextBinding && i + 2 < steps.size()
+                    && steps.get(i + 1) instanceof PositionBinding
+                    && steps.get(i + 2) instanceof FieldRef) return true;
+            // @$var ^(sort) FieldRef pattern
+            if (steps.get(i) instanceof ContextBinding && i + 2 < steps.size()
+                    && steps.get(i + 1) instanceof SortExpr se2
+                    && se2.source() instanceof ContextRef
+                    && steps.get(i + 2) instanceof FieldRef) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if the step list contains any {@link ContextBinding} node,
+     * indicating that variables bound by {@code @$var} may be used in later predicates.
+     */
+    private static boolean hasContextBinding(List<AstNode> steps) {
+        for (AstNode step : steps) {
+            if (step instanceof ContextBinding) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if the step list contains any {@link ContextBinding} or
+     * {@link PositionBinding} node — either {@code @$var} or {@code #$var}.
+     * Used to decide whether an outer PredicateExpr or SortExpr that wraps a path
+     * with binding steps needs to be unfolded so the bound variables remain in scope.
+     */
+    private static boolean hasAnyBinding(List<AstNode> steps) {
+        for (AstNode step : steps) {
+            if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
+        }
+        return false;
     }
 
     /**
@@ -269,21 +445,130 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             ctx.state.pushScope();
             ctx.state.addLocalVar(cb.varName());
             try {
-                // Check if next step is a Parenthesized — if so, evaluate from ROOT (cross-join)
-                String innerExpr;
-                int nextFrom;
                 if (from + 1 < steps.size() && steps.get(from + 1) instanceof Parenthesized p) {
-                    // Cross-join: the parenthesized expression evaluates from document root
-                    innerExpr = p.inner().accept(this, ctx.withCtx(ctx.rootVar));
-                    nextFrom = from + 2;
+                    // Cross-join: the parenthesized expression evaluates from document root.
+                    String innerExpr = p.inner().accept(this, ctx.withCtx(ctx.rootVar));
+                    GenCtx innerCtx = ctx.withCtx(varName).withParents(new ArrayList<>(List.of(varName)));
+                    String restExpr = compilePathSteps(steps, from + 2, innerExpr, innerCtx);
+                    return "mapStep(" + prevExpr + ", " + varName + " -> " + restExpr + ")";
+                } else if (from + 1 < steps.size() && steps.get(from + 1) instanceof PositionBinding pb2
+                        && from + 2 < steps.size() && steps.get(from + 2) instanceof FieldRef) {
+                    // @$var#$pos.FieldRef cross-join: combine @$var and #$pos into a single
+                    // eachIndexed call so that (a) positions are correct and (b) the FieldRef
+                    // navigates from the cross-join parent (not from the individual element).
+                    String idxVar = "$" + pb2.varName();
+                    ctx.state.addLocalVar(pb2.varName());
+                    String pairVar = "__pair" + ctx.state.nextId();
+                    String cjp = ctx.crossJoinParent != null ? ctx.crossJoinParent
+                            : (ctx.parentVars.isEmpty() ? varName
+                               : ctx.parentVars.get(ctx.parentVars.size() - 1));
+                    GenCtx innerCtx = ctx.withCtx(varName).withCrossJoinParent(cjp);
+                    // Compile from the FieldRef step (from+2) with prevExpr=cjp
+                    String restExpr = compilePathSteps(steps, from + 2, cjp, innerCtx);
+                    String lambdaBody = "(" + pairVar + " -> { JsonNode " + varName + " = " + pairVar + ".isArray() ? " + pairVar + ".get(0) : " + pairVar + "; "
+                            + "JsonNode " + idxVar + " = " + pairVar + ".isArray() ? " + pairVar + ".get(1) : number(0L); "
+                            + "return " + restExpr + "; })";
+                    return "eachIndexed(" + prevExpr + ", " + lambdaBody + ")";
+                } else if (from + 1 < steps.size() && steps.get(from + 1) instanceof PositionBinding pb3) {
+                    // @$var#$pos without cross-join FieldRef: combine into single eachIndexed
+                    // so that positions are correct (mapStep+eachIndexed would always give index 0).
+                    String idxVar3 = "$" + pb3.varName();
+                    ctx.state.addLocalVar(pb3.varName());
+                    String pairVar3 = "__pair" + ctx.state.nextId();
+                    List<String> poppedParents3 = ctx.parentVars.isEmpty() ? List.of()
+                            : new ArrayList<>(ctx.parentVars.subList(0, ctx.parentVars.size() - 1));
+                    GenCtx innerCtx3 = ctx.withCtx(varName).withParents(poppedParents3)
+                            .withCrossJoinParent(ctx.crossJoinParent);
+                    String restExpr3 = compilePathSteps(steps, from + 2, varName, innerCtx3);
+                    String lambdaBody3 = "(" + pairVar3 + " -> { JsonNode " + varName + " = " + pairVar3 + ".isArray() ? " + pairVar3 + ".get(0) : " + pairVar3 + "; "
+                            + "JsonNode " + idxVar3 + " = " + pairVar3 + ".isArray() ? " + pairVar3 + ".get(1) : number(0L); "
+                            + "return " + restExpr3 + "; })";
+                    return "eachIndexed(" + prevExpr + ", " + lambdaBody3 + ")";
+                } else if (from + 1 < steps.size() && steps.get(from + 1) instanceof FieldRef) {
+                    // Cross-join: @$var followed by a FieldRef means the FieldRef navigates
+                    // from the cross-join parent (last in parentVars), not from each $var.
+                    // Use the last parentVar as the navigation base (= library in the tests).
+                    String cjp = ctx.parentVars.isEmpty()
+                            ? varName
+                            : ctx.parentVars.get(ctx.parentVars.size() - 1);
+                    // innerCtx preserves existing parentVars and sets crossJoinParent so
+                    // subsequent FieldRef steps also navigate from the cross-join base.
+                    GenCtx innerCtx = ctx.withCtx(varName).withCrossJoinParent(cjp);
+                    String restExpr = compilePathSteps(steps, from + 1, cjp, innerCtx);
+                    return "mapStep(" + prevExpr + ", " + varName + " -> " + restExpr + ")";
+                } else if (from + 1 < steps.size() && steps.get(from + 1) instanceof SortExpr se
+                        && se.source() instanceof ContextRef) {
+                    // @$var ^(sort) more_steps: sort the WHOLE source (prevExpr) first, then map.
+                    // This handles Employee@$e^($e.Surname).Contact where Contact navigates from root.
+                    String sortedExpr = prevExpr;
+                    for (int ki = se.keys().size() - 1; ki >= 0; ki--) {
+                        SortKey sk = se.keys().get(ki);
+                        String keyVar  = "__sk" + ctx.state.nextId();
+                        // Alias $var → keyVar so sort keys like $e.Surname compile as field(keyVar, "Surname")
+                        ctx.state.pushScope();
+                        ctx.state.addLocalVarWithAlias(cb.varName(), keyVar);
+                        String keyExpr = sk.key().accept(this, ctx.withCtx(keyVar));
+                        ctx.state.popScope();
+                        String sorted  = "fn_sort(" + sortedExpr + ", " + keyVar + " -> " + keyExpr + ")";
+                        sortedExpr = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+                    }
+                    if (from + 2 < steps.size() && steps.get(from + 2) instanceof FieldRef) {
+                        // Cross-join: FieldRef after sort navigates from cross-join parent (root)
+                        String cjp2 = ctx.parentVars.isEmpty()
+                                ? ctx.ctxVar
+                                : ctx.parentVars.get(ctx.parentVars.size() - 1);
+                        GenCtx innerCtx2 = ctx.withCtx(varName).withCrossJoinParent(cjp2);
+                        String restExpr2 = compilePathSteps(steps, from + 2, cjp2, innerCtx2);
+                        return "mapStep(" + sortedExpr + ", " + varName + " -> " + restExpr2 + ")";
+                    } else if (from + 2 < steps.size()) {
+                        // Non-cross-join: remaining steps navigate from $var
+                        List<String> poppedParents2 = ctx.parentVars.isEmpty() ? List.of()
+                                : new ArrayList<>(ctx.parentVars.subList(0, ctx.parentVars.size() - 1));
+                        GenCtx innerCtx2 = ctx.withCtx(varName).withParents(poppedParents2)
+                                .withCrossJoinParent(ctx.crossJoinParent);
+                        String restExpr2 = compilePathSteps(steps, from + 2, varName, innerCtx2);
+                        return "mapStep(" + sortedExpr + ", " + varName + " -> " + restExpr2 + ")";
+                    } else {
+                        // Only sort, nothing follows — just return the sorted expr
+                        return "unwrap(" + sortedExpr + ")";
+                    }
                 } else {
-                    innerExpr = varName;
-                    nextFrom = from + 1;
+                    // Regular @$var binding (no cross-join FieldRef follows).
+                    // Special case: @$var [pred?] {GroupBy(ContextRef)} as the last steps.
+                    // Instead of per-element mapStep, filter the whole collection and pass to
+                    // GroupBy so that aggregation functions see the full group at once.
+                    {
+                        int ni = from + 1;
+                        PredicateExpr predStep = null;
+                        if (ni < steps.size() && steps.get(ni) instanceof PredicateExpr pe
+                                && pe.source() instanceof ContextRef) {
+                            predStep = pe;
+                            ni++;
+                        }
+                        if (ni == steps.size() - 1
+                                && steps.get(ni) instanceof GroupByExpr gbe
+                                && gbe.source() instanceof ContextRef) {
+                            // Filter the collection first (without per-element mapStep)
+                            String filteredExpr = prevExpr;
+                            if (predStep != null) {
+                                String predExpr = predStep.predicate().accept(this, ctx.withCtx(varName));
+                                filteredExpr = "dynamicFilter(" + prevExpr + ", " + varName + " -> " + predExpr + ")";
+                            }
+                            // Compile GroupBy with the filtered collection as source context,
+                            // and tell it that varName should be rebound to the group element.
+                            GenCtx gbCtx = ctx.withCtx(filteredExpr).withPrimaryContextVar(varName);
+                            return gbe.accept(this, gbCtx);
+                        }
+                    }
+                    // Pop one level from parentVars: this @$var ends one cross-join nesting
+                    // level so that %.% can navigate back one additional step.
+                    List<String> poppedParents = ctx.parentVars.isEmpty() ? List.of()
+                            : new ArrayList<>(ctx.parentVars.subList(0, ctx.parentVars.size() - 1));
+                    GenCtx innerCtx = ctx.withCtx(varName).withParents(poppedParents)
+                            .withCrossJoinParent(ctx.crossJoinParent);
+                    String restExpr = compilePathSteps(steps, from + 1, varName, innerCtx);
+                    return "mapStep(" + prevExpr + ", " + varName + " -> " + restExpr + ")";
                 }
-                // Inside the lambda, $varName is the current element and its parent context starts fresh.
-                GenCtx innerCtx = ctx.withCtx(varName).withParents(new ArrayList<>(List.of(varName)));
-                String restExpr = compilePathSteps(steps, nextFrom, innerExpr, innerCtx);
-                return "mapStep(" + prevExpr + ", " + varName + " -> " + restExpr + ")";
             } finally {
                 ctx.state.popScope();
             }
@@ -302,11 +587,99 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 List<String> newParents = new ArrayList<>(ctx.parentVars);
                 newParents.add(prevExpr);
                 GenCtx innerCtx = ctx.withCtx(elemVar).withParents(newParents);
+
+                // Detect the $#$pos[pred][n] pattern:
+                //   steps[from+1] = ArraySubscript(source=PredicateExpr(...), index=numericExpr)
+                // In this case the predicate filter must be applied per-element INSIDE the
+                // eachIndexed lambda (because it may reference $pos), but the numeric subscript
+                // [n] must be applied to the COLLECTED sequence OUTSIDE.
+                // If we included the full ArraySubscript inside the lambda it would subscript each
+                // scalar individually, always producing MISSING.
+                int innerEndFrom = from + 1;
+                String postCollectSubscriptIdx = null; // idxExpr for outside subscript, or null
+                int outerStepStart = from + 1;         // first step to compile after eachIndexed
+                if (from + 1 < steps.size()
+                        && steps.get(from + 1) instanceof ArraySubscript splitAs
+                        && splitAs.source() instanceof PredicateExpr) {
+                    // Compile the predicate source as the restExpr for the lambda.
+                    // The source (PredicateExpr) applied to innerCtx produces e.g.
+                    // dynamicFilter(__pe0, __el -> lt($pos, 3)), which is correct per-element.
+                    String innerRestExpr = splitAs.source().accept(this, innerCtx);
+                    postCollectSubscriptIdx = splitAs.index().accept(this, innerCtx);
+                    outerStepStart = from + 2; // steps after the ArraySubscript go outside
+                    String pairVar = "__pair" + ctx.state.nextId();
+                    String lambdaBody = "(" + pairVar + " -> { JsonNode " + elemVar + " = " + pairVar + ".isArray() ? " + pairVar + ".get(0) : " + pairVar + "; "
+                            + "JsonNode " + idxVar + " = " + pairVar + ".isArray() ? " + pairVar + ".get(1) : number(0L); "
+                            + "return " + innerRestExpr + "; })";
+                    boolean perElement = from >= 2 && steps.get(from - 1) instanceof ContextRef;
+                    String eachResult;
+                    if (perElement) {
+                        String mapElem = "__me" + ctx.state.nextId();
+                        eachResult = "mapStep(" + prevExpr + ", " + mapElem + " -> eachIndexed(" + mapElem + ", " + lambdaBody + "))";
+                    } else {
+                        eachResult = "eachIndexed(" + prevExpr + ", " + lambdaBody + ")";
+                    }
+                    String subscriptResult = "subscript(" + eachResult + ", " + postCollectSubscriptIdx + ")";
+                    return compilePathSteps(steps, outerStepStart, subscriptResult, ctx);
+                }
+
+                // #$pos.SortExpr.rest pattern: sort must be global (across ALL elements),
+                // not per-element. Build (sortSource, $pos) tuples via collectPosTuples,
+                // sort globally, then compile remaining steps with tuplePos so
+                // ObjectConstructor unpacks [sortItem, $pos] tuples.
+                if (from + 1 < steps.size() && steps.get(from + 1) instanceof SortExpr se) {
+                    String pairVar2 = "__pair" + ctx.state.nextId();
+                    // Compile sort source in context of individual element (elemVar = pair[0])
+                    String sortSrcExpr = se.source().accept(this, innerCtx);
+                    // collectPosTuples: for each (elem[i], i), apply lambda to get sort source
+                    // and package [sortItem, i] without flattening.
+                    String tupleCollect = "collectPosTuples(" + prevExpr + ", (" + pairVar2 + " -> { "
+                            + "JsonNode " + elemVar + " = " + pairVar2 + ".isArray() ? " + pairVar2 + ".get(0) : " + pairVar2 + "; "
+                            + "JsonNode " + idxVar + " = " + pairVar2 + ".isArray() ? " + pairVar2 + ".get(1) : number(0L); "
+                            + "return " + sortSrcExpr + "; }))";
+                    // Sort tuples globally by each sort key (applied to tuple.get(0))
+                    String result = tupleCollect;
+                    for (int i = se.keys().size() - 1; i >= 0; i--) {
+                        SortKey sk = se.keys().get(i);
+                        String tkVar = "__tk" + ctx.state.nextId();
+                        String keyExpr = sk.key().accept(this, ctx.withCtx(tkVar + ".get(0)"));
+                        String sorted = "fn_sort(" + result + ", " + tkVar + " -> " + keyExpr + ")";
+                        result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+                    }
+                    // Compile remaining steps with tuplePos so ObjectConstructor unpacks tuples
+                    return compilePathSteps(steps, from + 2, result, ctx.withTuplePos(idxVar));
+                }
+
+                // When #$pos follows a PredicateExpr inside outer loops (cross-join context),
+                // the position must be global across all outer iterations, not per-filter-result.
+                // Declare a counter array in the evaluate() method body and increment per match.
+                if (from > 0 && steps.get(from - 1) instanceof PredicateExpr
+                        && hasOuterBindings(steps, from - 1)) {
+                    String ctrVar = "__ctr" + ctx.state.nextId();
+                    ctx.state.localDeclarations.append("final long[] " + ctrVar + " = {0};\n        ");
+                    // prevExpr is a filter result (0 or 1 elements); use mapStep (not eachIndexed)
+                    // so MISSING → MISSING and a present element invokes the lambda once with the counter.
+                    String mapElem = "__me" + ctx.state.nextId();
+                    GenCtx innerCtxCtr = ctx.withCtx(mapElem).withParents(newParents);
+                    String restExprCtr = compilePathSteps(steps, from + 1, mapElem, innerCtxCtr);
+                    return "mapStep(" + prevExpr + ", " + mapElem + " -> { JsonNode " + idxVar + " = number(" + ctrVar + "[0]++); return " + restExprCtr + "; })";
+                }
+
                 String restExpr = compilePathSteps(steps, from + 1, elemVar, innerCtx);
-                // Inline lambda: (__pair -> { elem = pair.get(0); $var = pair.get(1); return rest; })
-                String lambdaBody = "(__pair -> { JsonNode " + elemVar + " = __pair.isArray() ? __pair.get(0) : __pair; "
-                        + "JsonNode " + idxVar + " = __pair.isArray() ? __pair.get(1) : number(0L); "
+                // Inline lambda: (__pairN -> { elem = pair.get(0); $var = pair.get(1); return rest; })
+                // Use a unique name for the pair parameter to avoid Java shadowing errors when
+                // multiple PositionBindings appear in nested scope (e.g. @$l#$il.@$b#$ib).
+                String pairVar = "__pair" + ctx.state.nextId();
+                String lambdaBody = "(" + pairVar + " -> { JsonNode " + elemVar + " = " + pairVar + ".isArray() ? " + pairVar + ".get(0) : " + pairVar + "; "
+                        + "JsonNode " + idxVar + " = " + pairVar + ".isArray() ? " + pairVar + ".get(1) : number(0L); "
                         + "return " + restExpr + "; })";
+                // $.$#$pos pattern: when preceded by a ContextRef (the $. spread), apply
+                // eachIndexed per-element so each element gets its own position starting at 0.
+                boolean perElement = from >= 2 && steps.get(from - 1) instanceof ContextRef;
+                if (perElement) {
+                    String mapElem = "__me" + ctx.state.nextId();
+                    return "mapStep(" + prevExpr + ", " + mapElem + " -> eachIndexed(" + mapElem + ", " + lambdaBody + "))";
+                }
                 return "eachIndexed(" + prevExpr + ", " + lambdaBody + ")";
             } finally {
                 ctx.state.popScope();
@@ -317,32 +690,59 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             // Navigate up one level in the parent vars stack.
             List<String> parents = ctx.parentVars;
             if (parents.isEmpty()) {
-                throw new IllegalStateException("S0217: Parent operator % used with no parent context in path");
+                throw new RuntimeTranslatorException("S0217", "Parent operator % used with no parent context in path");
             }
             String parentExpr = parents.get(parents.size() - 1);
             List<String> newParents = parents.size() > 1
                     ? new ArrayList<>(parents.subList(0, parents.size() - 1))
                     : new ArrayList<>();
-            return compilePathSteps(steps, from + 1, parentExpr, ctx.withParents(newParents));
+            // Guard: if prevExpr is MISSING (e.g. from an empty step before %), propagate MISSING.
+            String guardVar = "__gu" + ctx.state.nextId();
+            String guardedExpr = "mapStep(" + prevExpr + ", " + guardVar + " -> " + parentExpr + ")";
+            return compilePathSteps(steps, from + 1, guardedExpr, ctx.withParents(newParents));
         }
 
         // Normal step.
         // If any remaining step contains a ParentStep, generate a mapStep lambda
         // that introduces a named variable for the current element so it becomes
         // accessible as a "parent" reference (via %) in inner expressions.
-        if (needsParentTracking(steps, from) && step instanceof FieldRef fr) {
+        boolean needsTracking = needsParentTracking(steps, from);
+        if (needsTracking && step instanceof FieldRef fr) {
             String elemVar = "__el" + ctx.state.nextId();
-            // The previous context (prevExpr) becomes the parent of the new elements.
-            // We represent this by adding the CURRENT ctx variable to parentVars
-            // (since the outer mapStep's lambda variable holds each parent element).
-            // However, prevExpr may be a sequence, not a single element. We use ctx.ctxVar
-            // as the "parent" only if we're already inside a mapStep lambda.
-            // When generating: mapStep(field(prevExpr, name), elemVar -> rest)
-            // inside the lambda, the parent of elemVar is the element from prevExpr.
-            // But prevExpr is a sequence; we need a per-element parent variable.
-            // Solution: we must wrap the field navigation in a mapStep that also captures the parent.
-            // Actually: mapStep(prevExpr, __parent -> mapStep(field(__parent, name), elemVar -> rest))
-            // This double-wrapping makes __parent accessible as the parent.
+
+            if (ctx.crossJoinParent != null) {
+                // Cross-join FieldRef: navigate from the cross-join parent (e.g. library),
+                // not from prevExpr (which may be a per-element value like a filtered book).
+                // prevExpr acts as a gate — if it is MISSING (predicate didn't match) the
+                // lambda body is never entered; otherwise we navigate from the fixed parent.
+                String parentVar = ctx.crossJoinParent;
+                List<String> newParents = new ArrayList<>(ctx.parentVars);
+                newParents.add(parentVar);
+                String fieldExpr = "field(" + parentVar + ", " + ClassAssembler.javaString(fr.name()) + ")";
+                String dummyVar  = "__dc" + ctx.state.nextId();
+                // Preserve crossJoinParent for further cross-join navigations in the same scope.
+                GenCtx innerCtx = ctx.withCtx(elemVar).withParents(newParents)
+                        .withCrossJoinParent(parentVar);
+                String restExpr = compilePathSteps(steps, from + 1, elemVar, innerCtx);
+                return "mapStep(" + prevExpr + ", " + dummyVar + " -> mapStep(" + fieldExpr + ", " + elemVar + " -> " + restExpr + "))";
+            }
+
+            // When the next pattern is @$var#$pos (ContextBinding + PositionBinding), use a
+            // "parent-only mapStep": capture the parent but don't iterate the field result —
+            // the combined @$var#$pos eachIndexed handler will iterate it instead.
+            if (from + 1 < steps.size() && steps.get(from + 1) instanceof ContextBinding
+                    && from + 2 < steps.size() && steps.get(from + 2) instanceof PositionBinding) {
+                String parentVar = "__par" + ctx.state.nextId();
+                List<String> newParents = new ArrayList<>(ctx.parentVars);
+                newParents.add(parentVar);
+                String fieldExpr = "field(" + parentVar + ", " + ClassAssembler.javaString(fr.name()) + ")";
+                GenCtx innerCtx = ctx.withCtx(fieldExpr).withParents(newParents).withCrossJoinParent(parentVar);
+                String restExpr = compilePathSteps(steps, from + 1, fieldExpr, innerCtx);
+                return "mapStep(" + prevExpr + ", " + parentVar + " -> " + restExpr + ")";
+            }
+
+            // Normal double-mapStep: prevExpr is the sequence of parent elements;
+            // the outer lambda captures each parent so % can reference it inside.
             String parentVar = "__par" + ctx.state.nextId();
             List<String> newParents = new ArrayList<>(ctx.parentVars);
             newParents.add(parentVar);
@@ -353,17 +753,54 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             return "mapStep(" + prevExpr + ", " + parentVar + " -> mapStep(" + fieldExpr + ", " + elemVar + " -> " + restExpr + "))";
         }
 
+        // Cross-join FieldRef without parent-step tracking: when a cross-join parent is active
+        // and prevExpr differs from it (we are "below" the parent level, e.g. inside a filter
+        // result from @$var[pred]), navigate from the cross-join parent using prevExpr as a gate.
+        // This handles patterns like: library.loans@$l.books@$b[$l.isbn=$b.isbn].customers[...]
+        // where .customers must navigate from library, not from the filtered book $b.
+        if (!needsTracking && ctx.crossJoinParent != null
+                && !ctx.crossJoinParent.equals(prevExpr) && step instanceof FieldRef cjFr) {
+            String cjParent  = ctx.crossJoinParent;
+            String fieldExpr = "field(" + cjParent + ", " + ClassAssembler.javaString(cjFr.name()) + ")";
+            String dummyVar  = "__dc" + ctx.state.nextId();
+            GenCtx innerCtx  = ctx.withCrossJoinParent(cjParent);
+            String restExpr  = compilePathSteps(steps, from + 1, fieldExpr, innerCtx);
+            return "mapStep(" + prevExpr + ", " + dummyVar + " -> " + restExpr + ")";
+        }
+
         String newExpr = applyStep(prevExpr, step, ctx);
         return compilePathSteps(steps, from + 1, newExpr, ctx);
     }
 
     /**
      * Returns true if any step from {@code from} onwards (or nested within it)
-     * contains a {@link ParentStep} that would require parent variable tracking.
+     * contains a {@link ParentStep} that would require parent variable tracking,
+     * OR contains a cross-join pattern ({@code @$var} followed by a FieldRef)
+     * that requires the parent to be captured as a named variable.
      */
+    /** Returns true if any step before {@code upTo} is a ContextBinding or PositionBinding. */
+    private static boolean hasOuterBindings(List<AstNode> steps, int upTo) {
+        for (int i = 0; i < upTo; i++) {
+            if (steps.get(i) instanceof ContextBinding || steps.get(i) instanceof PositionBinding) return true;
+        }
+        return false;
+    }
+
     private static boolean needsParentTracking(List<AstNode> steps, int from) {
         for (int i = from; i < steps.size(); i++) {
             if (ScopeAnalyzer.containsParentStep(steps.get(i))) return true;
+            // Cross-join: @$var followed by FieldRef needs parent captured
+            if (steps.get(i) instanceof AstNode.ContextBinding && i + 1 < steps.size()
+                    && steps.get(i + 1) instanceof AstNode.FieldRef) return true;
+            // @$var#$pos.FieldRef pattern also needs parent captured
+            if (steps.get(i) instanceof AstNode.ContextBinding && i + 2 < steps.size()
+                    && steps.get(i + 1) instanceof AstNode.PositionBinding
+                    && steps.get(i + 2) instanceof AstNode.FieldRef) return true;
+            // @$var ^(sort) FieldRef pattern also needs parent captured
+            if (steps.get(i) instanceof AstNode.ContextBinding && i + 2 < steps.size()
+                    && steps.get(i + 1) instanceof AstNode.SortExpr se3
+                    && se3.source() instanceof AstNode.ContextRef
+                    && steps.get(i + 2) instanceof AstNode.FieldRef) return true;
         }
         return false;
     }
@@ -448,16 +885,45 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 yield ctx.arrayConstructorPreserve ? call : "unwrap(" + call + ")";
             }
             case ObjectConstructor oc -> {
-                // e.g. Phone.{type: number} — map per element, collect without flattening
-                // so each constructed object stays as a single element of the result.
+                // e.g. Phone.{type: number} — map per element, collect without flattening.
+                // When tuplePos is set the elements are (item, $pos) tuples produced by a
+                // position-aware global sort; unpack them in a block lambda.
+                if (ctx.tuplePos != null) {
+                    String tmpTuple = "__c" + ctx.state.nextId();
+                    String tupleElem = "__te" + ctx.state.nextId();
+                    String tPos = ctx.tuplePos;
+                    String stepExpr = oc.accept(this, ctx.withCtx(tupleElem).withTuplePos(null));
+                    yield "unwrap(mapConstructorStep(" + prevExpr + ", " + tmpTuple + " -> { "
+                            + "JsonNode " + tPos + " = " + tmpTuple + ".isArray() ? " + tmpTuple + ".get(1) : MISSING; "
+                            + "JsonNode " + tupleElem + " = " + tmpTuple + ".isArray() ? " + tmpTuple + ".get(0) : " + tmpTuple + "; "
+                            + "return " + stepExpr + "; }))";
+                }
                 String tmpCtx  = "__c" + ctx.state.nextId();
                 String stepExpr = oc.accept(this, ctx.withCtx(tmpCtx));
                 yield "unwrap(mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + "))";
             }
+            case GroupByExpr gbe when gbe.source() instanceof ContextRef -> {
+                // GroupByExpr(ContextRef) appears as a path step only when the Optimizer's
+                // Rule D has rewritten a binding-based GroupBy (e.g. @$e.@$c.{key:val}).
+                // The GroupBy must receive the ENTIRE accumulated sequence, not be applied
+                // per-element via mapStep — otherwise aggregation functions like $join
+                // would only see individual elements rather than the whole group.
+                yield gbe.accept(this, ctx.withCtx(prevExpr));
+            }
             default -> {
                 // For any other step type: rebind __ctx to prevExpr inside a lambda.
                 String tmpCtx = "__c" + ctx.state.nextId();
-                String stepExpr = step.accept(this, ctx.withCtx(tmpCtx));
+                GenCtx innerCtx;
+                if (ScopeAnalyzer.containsParentStep(step) && ctx.parentVars.isEmpty()) {
+                    // No parent tracking has been established yet (e.g. first path step is
+                    // a non-FieldRef that uses %).  Make the outer ctxVar available as the
+                    // parent level so % can resolve inside the step.
+                    innerCtx = ctx.withCtx(tmpCtx).withParents(List.of(ctx.ctxVar));
+                } else {
+                    // Parent tracking already established via double-mapStep — preserve it.
+                    innerCtx = ctx.withCtx(tmpCtx);
+                }
+                String stepExpr = step.accept(this, innerCtx);
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
         };
@@ -470,27 +936,111 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         AstNode sourceNode = n.source();
         boolean forceArr = sourceNode instanceof ForceArray;
         if (forceArr) sourceNode = ((ForceArray) sourceNode).source();
-        String srcExpr = sourceNode.accept(this, ctx);
+        // When the source (possibly unwrapped from ForceArray) is a PathExpr whose last
+        // step is a ContextBinding (@$var) or PositionBinding (#$var), fold the predicate
+        // as a path step so that the binding variable is in scope while the predicate is
+        // compiled.  Without folding the scope is pushed/popped during source compilation
+        // and $var is no longer visible when the predicate expression is visited.
+        // E.g.: $#$pos[][$pos<3] — the predicate [$pos<3] must be folded into the path
+        //       PathExpr([$, #$pos, PredicateExpr(ContextRef, $pos<3)]).
+        if (sourceNode instanceof PathExpr innerPath && !innerPath.steps().isEmpty()) {
+            AstNode lastStep = innerPath.steps().get(innerPath.steps().size() - 1);
+            if (lastStep instanceof PositionBinding || lastStep instanceof ContextBinding) {
+                List<AstNode> newSteps = new ArrayList<>(innerPath.steps());
+                newSteps.add(new PredicateExpr(new ContextRef(), n.predicate()));
+                AstNode newSource = new PathExpr(newSteps);
+                String result = (forceArr ? new ForceArray(newSource) : newSource).accept(this, ctx);
+                return result;
+            }
+        }
         // Range subscript: arr[[from..to]] — select elements by index range
         if (n.predicate() instanceof RangeExpr re) {
+            // $.$[[from..to]] spread pattern: source is a PathExpr ending with ContextRef
+            // (the $. part), meaning apply the range per-element rather than to the
+            // collected sequence.  Each scalar element is treated as a 1-element sequence
+            // at position 0; rangeSubscript returns it when 0 is in [from, to].
+            if (!forceArr && sourceNode instanceof PathExpr spreadPath
+                    && !spreadPath.steps().isEmpty()
+                    && spreadPath.steps().get(spreadPath.steps().size() - 1) instanceof ContextRef) {
+                List<AstNode> baseSteps = spreadPath.steps().subList(0, spreadPath.steps().size() - 1);
+                AstNode baseSource = baseSteps.isEmpty() ? new ContextRef()
+                        : baseSteps.size() == 1 ? baseSteps.get(0) : new PathExpr(baseSteps);
+                String spreadExpr = baseSource.accept(this, ctx);
+                String fromExpr   = re.from().accept(this, ctx);
+                String toExpr     = re.to().accept(this, ctx);
+                String elemVar    = "__me" + ctx.state.nextId();
+                return "mapStep(" + spreadExpr + ", " + elemVar
+                        + " -> rangeSubscript(" + elemVar + ", " + fromExpr + ", " + toExpr + "))";
+            }
+            String srcExpr  = sourceNode.accept(this, ctx);
             String fromExpr = re.from().accept(this, ctx);
             String toExpr   = re.to().accept(this, ctx);
             String r = "rangeSubscript(" + srcExpr + ", " + fromExpr + ", " + toExpr + ")";
             return forceArr ? "forceArray(" + r + ")" : r;
         }
+        // When the predicate references %, fold this predicate (and any inner predicates
+        // from a nested PredicateExpr chain) as path steps on the base PathExpr so that
+        // compilePathSteps can set up proper parent tracking via double-mapStep.
+        if (ScopeAnalyzer.containsParentStep(n.predicate())) {
+            List<AstNode> collectedPreds = new ArrayList<>();
+            PathExpr basePath = extractBasePathAndPredicates(sourceNode, collectedPreds);
+            if (basePath != null) {
+                collectedPreds.add(n.predicate()); // outermost predicate last
+                List<AstNode> newSteps = new ArrayList<>(basePath.steps());
+                for (AstNode pred : collectedPreds) {
+                    newSteps.add(new PredicateExpr(new ContextRef(), pred));
+                }
+                String result = new PathExpr(newSteps).accept(this, ctx);
+                return forceArr ? "forceArray(" + result + ")" : result;
+            }
+        }
+        String srcExpr  = sourceNode.accept(this, ctx);
         String elemVar  = "__el" + ctx.state.nextId();
         String predExpr = n.predicate().accept(this, ctx.withCtx(elemVar));
         String r = "dynamicFilter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
         return forceArr ? "forceArray(" + r + ")" : r;
     }
 
+    /**
+     * Recursively extracts the base {@link PathExpr} and collects predicates from a
+     * chain of nested {@link PredicateExpr} nodes.  The predicates are appended in
+     * inside-out order (innermost first) so they can be re-attached as ordered path
+     * steps.  Returns {@code null} if the innermost source is not a {@link PathExpr}.
+     */
+    private static PathExpr extractBasePathAndPredicates(AstNode source, List<AstNode> collectedPreds) {
+        if (source instanceof PathExpr pe) return pe;
+        if (source instanceof PredicateExpr pe) {
+            PathExpr base = extractBasePathAndPredicates(pe.source(), collectedPreds);
+            if (base != null) {
+                collectedPreds.add(pe.predicate());
+                return base;
+            }
+        }
+        return null;
+    }
+
     @Override
     public String visitArraySubscript(ArraySubscript n, GenCtx ctx) {
         // Direct (non-path-step) subscript — applies to the whole array/sequence.
         // Used for arr[n], $[n], (expr)[n], etc.
+        // When the source chain contains a ForceArray (e.g. $#$pos[][$pos<3]^($)[-1]),
+        // the [] force-array semantics must propagate to the subscript result so a
+        // single-element result remains an array rather than being unwrapped.
         String srcExpr = n.source().accept(this, ctx);
         String idxExpr = n.index().accept(this, ctx);
-        return "subscript(" + srcExpr + ", " + idxExpr + ")";
+        String sub = "subscript(" + srcExpr + ", " + idxExpr + ")";
+        return sourceChainContainsForceArray(n.source()) ? "forceArray(" + sub + ")" : sub;
+    }
+
+    /** Returns {@code true} if {@code node} or any node in its source chain is a {@link ForceArray}. */
+    private static boolean sourceChainContainsForceArray(AstNode node) {
+        return switch (node) {
+            case ForceArray fa -> true;
+            case SortExpr se   -> sourceChainContainsForceArray(se.source());
+            case PredicateExpr pe -> sourceChainContainsForceArray(pe.source());
+            case PathExpr path -> path.steps().stream().anyMatch(Translator::sourceChainContainsForceArray);
+            default -> false;
+        };
     }
 
     @Override
@@ -506,8 +1056,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitBinaryOp(BinaryOp n, GenCtx ctx) {
-        String left  = n.left().accept(this, ctx);
-        String right = n.right().accept(this, ctx);
+        // Operands of binary operators are never in tail position.
+        GenCtx opCtx = ctx.withTailPosition(false);
+        String left  = n.left().accept(this, opCtx);
+        String right = n.right().accept(this, opCtx);
         return switch (n.op()) {
             case "+"   -> "add("      + left + ", " + right + ")";
             case "-"   -> "subtract(" + left + ", " + right + ")";
@@ -524,13 +1076,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "and" -> "and_("     + left + ", () -> " + right + ")";
             case "or"  -> "or_("      + left + ", () -> " + right + ")";
             case "in"  -> "in_("      + left + ", " + right + ")";
-            default    -> throw new IllegalStateException("Unknown operator: " + n.op());
+            default    -> throw new RuntimeTranslatorException(null, "Unknown operator: " + n.op());
         };
     }
 
     @Override
     public String visitUnaryMinus(UnaryMinus n, GenCtx ctx) {
-        return "negate(" + n.operand().accept(this, ctx) + ")";
+        return "negate(" + n.operand().accept(this, ctx.withTailPosition(false)) + ")";
     }
 
     // =========================================================================
@@ -539,7 +1091,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitConditionalExpr(ConditionalExpr n, GenCtx ctx) {
-        String cond = n.condition().accept(this, ctx);
+        // The condition is never in tail position (its result is used as a boolean).
+        String cond = n.condition().accept(this, ctx.withTailPosition(false));
+        // Both branches inherit the enclosing tail-position flag: whichever branch
+        // is taken, its value is returned directly — that is still a tail position.
         String then = n.then().accept(this, ctx);
         String otherwise = n.otherwise() != null ? n.otherwise().accept(this, ctx) : "MISSING";
         return "(isTruthy(" + cond + ") ? " + then + " : " + otherwise + ")";
@@ -562,7 +1117,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitPartialPlaceholder(PartialPlaceholder n, GenCtx ctx) {
         if (ctx.state.partialPhVar == null)
-            throw new IllegalStateException("PartialPlaceholder encountered outside PartialApplication");
+            throw new RuntimeTranslatorException("T1008", "The ?? operator should only appear in a function call");
         if (ctx.state.partialPhNeedIdx) {
             return ctx.state.partialPhVar + ".get(" + ctx.state.partialPhIdx++ + ")";
         }
@@ -610,7 +1165,15 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitFunctionCall(FunctionCall n, GenCtx ctx) {
-        List<String> args = n.args().stream().map(a -> a.accept(this, ctx)).toList();
+        // Arguments are never in tail position — only the call site itself may be.
+        GenCtx argCtx = ctx.withTailPosition(false);
+        List<String> args = n.args().stream().map(a -> a.accept(this, argCtx)).toList();
+        // Local variable bindings shadow built-in function names in JSONata.
+        // If the name resolves to a local variable, call it as a user function
+        // rather than falling through to the built-in dispatch switch below.
+        if (ctx.state.isLocal(n.name())) {
+            return FunctionCallCodeGen.genUserFunctionCall(this, n, args, ctx);
+        }
         return switch (n.name()) {
             // Type coercion  (all have the '-' context-default modifier)
             case "string"          -> args.size() <= 1
@@ -673,7 +1236,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     ? "fn_contains(" + ctx.ctxVar + ", " + args.get(0) + ")"
                     : "fn_contains(" + args.get(0) + ", " + args.get(1) + ")";
             case "split"   -> args.size() == 1
-                    ? "fn_split(" + ctx.ctxVar + ", " + args.get(0) + ")"
+                    ? "fn_split(" + args.get(0) + ", MISSING)"
                     : args.size() == 2
                     ? "fn_split(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_split(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
@@ -874,23 +1437,116 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitSortExpr(SortExpr n, GenCtx ctx) {
-        // The source expression should be evaluated using the current context,
-        // not the root. Use ctx (which has the current ctxVar) rather than ctx.withCtx(ctx.rootVar).
+        // When sort keys reference % (parent), we need parent-tracked pair/triple navigation.
+        boolean hasParentRef = n.keys().stream().anyMatch(k -> ScopeAnalyzer.containsParentStep(k.key()));
+        if (hasParentRef && n.source() instanceof PathExpr sourcePath) {
+            return compileSortWithParent(n, sourcePath, ctx);
+        }
         String srcExpr = n.source().accept(this, ctx);
-        // Build a composite key-and-direction sort.
-        // For simplicity, chain sorts by each key (last applied = highest priority).
-        // A future implementation can produce a multi-key comparator.
         String result = srcExpr;
         for (int i = n.keys().size() - 1; i >= 0; i--) {
             SortKey sk = n.keys().get(i);
             String keyVar  = "__sk" + ctx.state.nextId();
             String keyExpr = sk.key().accept(this, ctx.withCtx(keyVar));
-            // Use the runtime sort; wrap result in reverse() if descending.
             String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ")";
             result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
         }
-        // Unwrap single-element results: $[0]^(age) should return the object, not [object]
         return "unwrap(" + result + ")";
+    }
+
+    /** Maximum leading ParentStep depth across all sort keys. */
+    private static int maxParentDepth(List<SortKey> keys) {
+        int max = 0;
+        for (SortKey sk : keys) {
+            if (sk.key() instanceof PathExpr pe) {
+                int d = 0;
+                for (AstNode step : pe.steps()) {
+                    if (step instanceof ParentStep) d++;
+                    else break;
+                }
+                max = Math.max(max, d);
+            }
+        }
+        return max;
+    }
+
+    /**
+     * Compiles a sort expression where sort keys reference the parent operator (%).
+     * Navigates the source path keeping parent context by collecting element/parent
+     * pairs (depth=1) or triples (depth=2), sorts those, then extracts the elements.
+     */
+    private String compileSortWithParent(SortExpr n, PathExpr sourcePath, GenCtx ctx) {
+        int depth = maxParentDepth(n.keys());
+        List<AstNode> steps = sourcePath.steps();
+        if (depth < 1 || steps.size() < depth + 1) {
+            // Fallback: standard sort (may fail at runtime for %)
+            String srcExpr = sourcePath.accept(this, ctx);
+            String result = srcExpr;
+            for (int i = n.keys().size() - 1; i >= 0; i--) {
+                SortKey sk = n.keys().get(i);
+                String keyVar  = "__sk" + ctx.state.nextId();
+                String keyExpr = sk.key().accept(this, ctx.withCtx(keyVar));
+                String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ")";
+                result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+            }
+            return "unwrap(" + result + ")";
+        }
+
+        String tupleExpr;
+        List<String> parentRefExprs; // how to reference parents from a tuple var
+
+        if (depth == 1) {
+            // Navigate all-but-last steps → parents; last step → elements
+            String prefixExpr;
+            if (steps.size() == 1) {
+                prefixExpr = ctx.ctxVar;
+            } else {
+                PathExpr prefix = new PathExpr(new ArrayList<>(steps.subList(0, steps.size() - 1)));
+                prefixExpr = prefix.accept(this, ctx);
+            }
+            AstNode elemStep = steps.get(steps.size() - 1);
+            String parVar = "__par" + ctx.state.nextId();
+            String elemExpr = applyStep(parVar, elemStep, ctx.withCtx(parVar));
+            tupleExpr = "fn_collect_pairs(" + prefixExpr + ", " + parVar + " -> " + elemExpr + ")";
+            // tuple.get(0) = element, tuple.get(1) = parent (%)
+            parentRefExprs = List.of("TUPLE.get(1)");
+        } else { // depth == 2
+            // Navigate all-but-last-2 steps → grandparents; step[-2] → parents; step[-1] → elements
+            String gpExpr;
+            if (steps.size() == 2) {
+                gpExpr = ctx.ctxVar;
+            } else {
+                PathExpr gp = new PathExpr(new ArrayList<>(steps.subList(0, steps.size() - 2)));
+                gpExpr = gp.accept(this, ctx);
+            }
+            AstNode parentStep = steps.get(steps.size() - 2);
+            AstNode elemStep   = steps.get(steps.size() - 1);
+            String gpVar  = "__gp" + ctx.state.nextId();
+            String parVar = "__par" + ctx.state.nextId();
+            String parentExpr = applyStep(gpVar, parentStep, ctx.withCtx(gpVar));
+            String elemExpr   = applyStep(parVar, elemStep, ctx.withCtx(parVar));
+            tupleExpr = "fn_collect_triples(" + gpExpr + ", " + gpVar + " -> " + parentExpr
+                    + ", " + parVar + " -> " + elemExpr + ")";
+            // tuple.get(0) = element, tuple.get(1) = parent (%), tuple.get(2) = grandparent (%%)
+            parentRefExprs = List.of("TUPLE.get(2)", "TUPLE.get(1)");
+        }
+
+        // Sort the tuples by each key (chained, lowest priority first)
+        String result = tupleExpr;
+        for (int i = n.keys().size() - 1; i >= 0; i--) {
+            SortKey sk = n.keys().get(i);
+            String tupleVar = "__tk" + ctx.state.nextId();
+            // Build parentVars using tupleVar as the base: replace "TUPLE" placeholder
+            List<String> pVars = new ArrayList<>();
+            for (String ref : parentRefExprs) pVars.add(ref.replace("TUPLE", tupleVar));
+            String keyExpr = sk.key().accept(this,
+                    ctx.withCtx(tupleVar + ".get(0)").withParents(pVars));
+            String sorted = "fn_sort(" + result + ", " + tupleVar + " -> " + keyExpr + ")";
+            result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+        }
+        // Extract elements from sorted tuples
+        String extVar = "__tex" + ctx.state.nextId();
+        return "unwrap(fn_map(" + result + ", " + extVar + " -> " + extVar + ".get(0)))";
     }
 
     @Override
@@ -912,6 +1568,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         }
         usedLocals.retainAll(outerLocals);
         java.util.List<String> capturedVars = new java.util.ArrayList<>(usedLocals);
+        // When primaryContextVar is set (@$c[pred]{GroupBy} pattern), exclude it from
+        // captured parameters — it will be rebound to the group element inside the helper.
+        if (ctx.primaryContextVar != null) {
+            String stripped = ctx.primaryContextVar.startsWith("$")
+                    ? ctx.primaryContextVar.substring(1) : ctx.primaryContextVar;
+            capturedVars.remove(stripped);
+        }
 
         StringBuilder extraParamDecls = new StringBuilder();
         StringBuilder extraCallArgs   = new StringBuilder();
@@ -966,7 +1629,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("    for (JsonNode ").append(elemVar).append(" : __items) {\n");
             sb.append("        JsonNode __kNode").append(pi).append(" = ").append(kExpr).append(";\n");
             sb.append("        if (!__kNode").append(pi).append(".isMissingNode() && !__kNode").append(pi).append(".isTextual()) ");
-            sb.append("throw new RuntimeEvaluationException(\"T1003: The key of an object constructor must evaluate to a string\");\n");
+            sb.append("throw new RuntimeEvaluationException(\"T1003\", \"The key of an object constructor must evaluate to a string\");\n");
             sb.append("        if (__kNode").append(pi).append(".isMissingNode()) continue;\n");
             sb.append("        String __k = __kNode").append(pi).append(".textValue();\n");
             sb.append("        if (!").append(grpVar).append(".containsKey(__k)) {")
@@ -978,14 +1641,23 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
               .append(entVar).append(" : ").append(grpVar).append(".entrySet()) {\n");
             sb.append("        com.fasterxml.jackson.databind.node.ArrayNode __grpArr = ").append(entVar).append(".getValue();\n");
             sb.append("        JsonNode ").append(elemVar).append(" = __grpArr.size() == 1 ? __grpArr.get(0) : __grpArr;\n");
+            // When primaryContextVar is set, rebind it to the group element so that
+            // aggregation functions in the value expression see the whole group.
+            if (ctx.primaryContextVar != null) {
+                sb.append("        JsonNode ").append(ctx.primaryContextVar)
+                  .append(" = ").append(elemVar).append(";\n");
+            }
             sb.append("        JsonNode __v = ").append(vExpr).append(";\n");
             sb.append("        if (!__v.isMissingNode()) {\n");
             sb.append("            if (__result.has(").append(entVar).append(".getKey())) ");
-            sb.append("throw new RuntimeEvaluationException(\"D1009: Multiple key definitions evaluate to same key: '\" + ").append(entVar).append(".getKey() + \"'\");\n");
+            sb.append("throw new RuntimeEvaluationException(\"D1009\", \"Multiple key definitions evaluate to same key: '\" + ").append(entVar).append(".getKey() + \"'\");\n");
             sb.append("            __result.set(").append(entVar).append(".getKey(), __v);\n");
             sb.append("        }\n");
             sb.append("    }\n");
         }
+        // Return MISSING only when the source itself was absent; an empty but valid
+        // source (e.g. an empty array) should yield an empty object {}.
+        sb.append("    if (__src.isMissingNode()) return MISSING;\n");
         sb.append("    return __result;\n");
         sb.append("}\n");
         ctx.state.helperMethods.append(sb);
@@ -1027,6 +1699,17 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             argsWithPipe.addAll(fc.args());
             return visitPartialApplication(new PartialApplication(fc.name(), argsWithPipe), ctx);
         }
+        // ForceArray wrapping a FunctionCall: e.g. $data ~> $map($square)[]
+        // The [] is applied to the result of the piped call, not to $map($square) alone.
+        if (step instanceof ForceArray fa && fa.source() instanceof FunctionCall fc) {
+            java.util.List<AstNode> argsWithPipe = new java.util.ArrayList<>();
+            argsWithPipe.add(new PartialPlaceholder());
+            argsWithPipe.addAll(fc.args());
+            String innerPartial = visitPartialApplication(new PartialApplication(fc.name(), argsWithPipe), ctx);
+            int id = ctx.state.nextId();
+            String argVar = "__cfaArg" + id;
+            return "lambdaNode(" + argVar + " -> forceArray(fn_apply(" + innerPartial + ", " + argVar + ")))";
+        }
         return step.accept(this, ctx);
     }
 
@@ -1065,8 +1748,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     private static String buildClass(String pkg, String className,
                                       String bodyExpr, String helperMethods,
-                                      String sourceExpression) {
-        return ClassAssembler.buildClass(pkg, className, bodyExpr, helperMethods, sourceExpression);
+                                      String localDeclarations, String sourceExpression) {
+        return ClassAssembler.buildClass(pkg, className, bodyExpr, helperMethods, localDeclarations, sourceExpression);
     }
 
     // =========================================================================

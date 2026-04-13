@@ -30,13 +30,16 @@ final class FunctionCallCodeGen {
                 String alias = ctx.state.getAlias(n.name());
                 fnRef = alias != null ? alias : "$" + n.name();
             }
+            // Use fn_apply_tco when in tail position to enable TCO (trampoline).
+            // Use fn_apply otherwise (non-tail: result is used as an operand).
+            final String applyFn = ctx.isTailPosition ? "fn_apply_tco" : "fn_apply";
             // Single-arg: pass directly; multi-arg: pack into array so the lambda
             // can unpack each parameter via the multi-param inline-lambda pattern.
             // packArgs is used (not array) to avoid flattening array arguments.
             if (args.size() <= 1) {
-                return "fn_apply(" + fnRef + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
+                return applyFn + "(" + fnRef + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
             } else {
-                return "fn_apply(" + fnRef + ", packArgs(" + String.join(", ", args) + "))";
+                return applyFn + "(" + fnRef + ", packArgs(" + String.join(", ", args) + "))";
             }
         }
         // Not a local — look up as an externally bound function.
@@ -143,10 +146,12 @@ final class FunctionCallCodeGen {
         String lambdaExpr;
         if (fnArg instanceof Lambda lam && lam.params().size() < 2) {
             // D3050: reducer function must accept at least 2 parameters
-            return "fn_throw(\"D3050: The second argument of $reduce must accept at least 2 parameters, got " + lam.params().size() + "\")";
+            return "fn_throw(\"D3050\",\"The second argument of $reduce must accept at least 2 parameters, got " + lam.params().size() + "\")";
         } else if (fnArg instanceof Lambda lam && lam.params().size() > 1) {
-            // Unpack the [acc, elem] pair into named parameters.
-            lambdaExpr = genUnpackLambda(t, lam, ctx, 2);
+            // Use inline lambda so outer-scope variables are captured as closures.
+            // The runtime now passes [acc, elem, index, array] — buildInlineLambda
+            // unpacks as many slots as the lambda has params, MISSING for extras.
+            lambdaExpr = buildInlineLambda(t, lam, ctx);
         } else if (fnArg instanceof Lambda lam) {
             lambdaExpr = inlineLambda(t, lam, ctx);
         } else {
@@ -346,7 +351,7 @@ final class FunctionCallCodeGen {
                 String check = buildTypeCheck(paramTypes.get(i), javaNames.get(i), i + 1);
                 if (check != null) sb.append("    ").append(check).append("\n");
             }
-            String body = lam.body().accept(t, ctx);
+            String body = lam.body().accept(t, ctx.withTailPosition(true));
             sb.append("    return ").append(body).append(";\n})");
             return sb.toString();
         } finally {
@@ -354,9 +359,28 @@ final class FunctionCallCodeGen {
         }
     }
 
+    /**
+     * Wraps a self-referential VariableBinding in a synthetic Block node so that
+     * {@link org.json_kula.jsonata_jvm.translator.BlockCodeGen#visitBlock} can apply
+     * the holder-array pattern.  Without this wrapper the binding name is never added
+     * to scope, causing inner lambdas that reference it (e.g. a {@code next:} closure
+     * that calls {@code $match(...)}) to fall back to the built-in function instead of
+     * the locally-defined one.
+     */
+    private static AstNode wrapIfSelfRef(AstNode body) {
+        if (body instanceof AstNode.VariableBinding vb
+                && vb.value() instanceof AstNode.Lambda innerLam
+                && ScopeAnalyzer.containsVarRef(innerLam.body(), vb.name())) {
+            return new AstNode.Block(java.util.List.of(body));
+        }
+        return body;
+    }
+
     static String buildInlineLambda(Translator t, Lambda lam, GenCtx ctx) {
+        // Lambda bodies are always in tail position — their last expression is the return value.
+        GenCtx tailCtx = ctx.withTailPosition(true);
         if (lam.params().isEmpty()) {
-            String body = lam.body().accept(t, ctx);
+            String body = wrapIfSelfRef(lam.body()).accept(t, tailCtx);
             return "(__ignored -> " + body + ")";
         }
         if (lam.params().size() == 1) {
@@ -364,7 +388,7 @@ final class FunctionCallCodeGen {
             ctx.state.pushScope();
             ctx.state.addLocalVar(lam.params().get(0));
             try {
-                String body = lam.body().accept(t, ctx);
+                String body = wrapIfSelfRef(lam.body()).accept(t, tailCtx);
                 return "(" + p + " -> " + body + ")";
             } finally {
                 ctx.state.popScope();
@@ -392,7 +416,7 @@ final class FunctionCallCodeGen {
                   .append(" && !").append(packed).append(".get(").append(i).append(").isMissingNode()")
                   .append(" ? ").append(packed).append(".get(").append(i).append(") : MISSING;\n");
             }
-            String body = lam.body().accept(t, ctx);
+            String body = wrapIfSelfRef(lam.body()).accept(t, tailCtx);
             sb.append("    return ").append(body).append(";\n})");
             return sb.toString();
         } finally {
@@ -477,7 +501,7 @@ final class FunctionCallCodeGen {
         // If there are extra args and no variadic spec → always T0410
         if (numArgs > numParams && lastVariadicSpec == null) {
             // Evaluate args for their expressions (side-effect ordering), then throw
-            return "fn_throw(\"T0410: Too many arguments supplied to lambda expression\")";
+            return "fn_throw(\"T0410\",\"Too many arguments supplied to lambda expression\")";
         }
 
         // Compute explicit arg expressions
@@ -704,11 +728,11 @@ final class FunctionCallCodeGen {
         }
         String guard = focus ? "if (!" + paramVar + ".isMissingNode()) " : "";
         if (base.equals("n")) {
-            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isNumber()) throw new RuntimeEvaluationException(\"T0410: Argument " + argNum + " of function is not a number\");";
+            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isNumber()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a number\");";
         } else if (base.equals("s")) {
-            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isTextual()) throw new RuntimeEvaluationException(\"T0410: Argument " + argNum + " of function is not a string\");";
+            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isTextual()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a string\");";
         } else if (base.equals("b")) {
-            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isBoolean()) throw new RuntimeEvaluationException(\"T0410: Argument " + argNum + " of function is not a boolean\");";
+            return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isBoolean()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a boolean\");";
         } else if (base.startsWith("a<")) {
             // Typed array: coerce scalar → single-element array, then validate elements.
             // A non-array scalar is wrapped first; after wrapping, element types are checked.
@@ -721,7 +745,7 @@ final class FunctionCallCodeGen {
             }
             return coerce + "\n" +
                    "    if (!" + paramVar + ".isMissingNode()) {\n" +
-                   "        for (com.fasterxml.jackson.databind.JsonNode __ae : " + paramVar + ") { if (" + elemCheck + ") throw new RuntimeEvaluationException(\"T0412: Array element is not of expected type\"); }\n" +
+                   "        for (com.fasterxml.jackson.databind.JsonNode __ae : " + paramVar + ") { if (" + elemCheck + ") throw new RuntimeEvaluationException(\"T0412\",\"Array element is not of expected type\"); }\n" +
                    "    }";
         } else if (base.equals("a")) {
             // Plain array: coerce scalar → single-element array (no element type to check).

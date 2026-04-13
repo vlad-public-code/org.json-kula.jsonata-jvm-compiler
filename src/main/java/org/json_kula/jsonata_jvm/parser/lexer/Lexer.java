@@ -103,7 +103,7 @@ public final class Lexer {
                 default -> {
                     if (Character.isDigit(c)) yield lexNumber(start);
                     else if (isIdentStart(c))   yield lexIdentifierOrKeyword(start);
-                    else throw new ParseException("Unexpected character: '" + c + "'", start);
+                    else throw new ParseException(null, "Unexpected character: '" + c + "'", start);
                 }
             };
             tokens.add(token);
@@ -175,7 +175,7 @@ public final class Lexer {
             pos++;
             return Token.of(TokenType.NOT_EQUAL, start);
         }
-        throw new ParseException("S0204: Unexpected '!' character", start);
+        throw new ParseException("S0204", "Unexpected '!' character", start);
     }
 
     private Token lexTilde(int start) throws ParseException {
@@ -184,7 +184,7 @@ public final class Lexer {
             pos++;
             return Token.of(TokenType.TILDE_GT, start);
         }
-        throw new ParseException("Expected '>' after '~'", start);
+        throw new ParseException(null, "Expected '>' after '~'", start);
     }
 
     private Token lexDollar(int start) {
@@ -267,7 +267,7 @@ public final class Lexer {
                 pos++; // consume closing '/'
                 break;
             } else if (c == '\n' || c == '\r') {
-                throw new ParseException("Unterminated regex literal", start);
+                throw new ParseException(null, "Unterminated regex literal", start);
             } else {
                 pattern.append(c);
                 pos++;
@@ -305,7 +305,7 @@ public final class Lexer {
             if (c == '\\') {
                 pos++;
                 if (pos >= src.length()) {
-                    throw new ParseException("Unterminated string escape", pos - 1);
+                    throw new ParseException(null, "Unterminated string escape", pos - 1);
                 }
                 char esc = src.charAt(pos++);
                 sb.append(switch (esc) {
@@ -320,7 +320,7 @@ public final class Lexer {
                     case 't'  -> '\t';
                     case 'u'  -> readUnicodeEscape(pos - 2);
                     default   -> throw new ParseException(
-                            "S0103: Unsupported escape sequence: \\" + esc, pos - 2);
+                            "S0103", "Unsupported escape sequence: \\" + esc, pos - 2);
                 });
             } else {
                 sb.append(c);
@@ -334,14 +334,14 @@ public final class Lexer {
 
     private char readUnicodeEscape(int errorPos) throws ParseException {
         if (pos + 4 > src.length()) {
-            throw new ParseException("S0104: The escape sequence \\u must be followed by 4 hex digits", errorPos);
+            throw new ParseException("S0104", "The escape sequence \\u must be followed by 4 hex digits", errorPos);
         }
         String hex = src.substring(pos, pos + 4);
         pos += 4;
         try {
             return (char) Integer.parseInt(hex, 16);
         } catch (NumberFormatException e) {
-            throw new ParseException("S0104: The escape sequence \\u must be followed by 4 hex digits: " + hex, errorPos);
+            throw new ParseException("S0104", "The escape sequence \\u must be followed by 4 hex digits: " + hex, errorPos);
         }
     }
 
@@ -356,7 +356,7 @@ public final class Lexer {
             pos++;
         }
         if (pos >= src.length()) {
-            throw new ParseException("S0105: Unterminated backtick identifier", start);
+            throw new ParseException("S0105", "Unterminated backtick identifier", start);
         }
         String name = src.substring(nameStart, pos);
         pos++; // consume closing backtick
@@ -382,21 +382,21 @@ public final class Lexer {
             pos++;
             if (pos < src.length() && (src.charAt(pos) == '+' || src.charAt(pos) == '-')) pos++;
             if (pos >= src.length() || !Character.isDigit(src.charAt(pos))) {
-                throw new ParseException("Malformed number exponent", start);
+                throw new ParseException(null, "Malformed number exponent", start);
             }
             while (pos < src.length() && Character.isDigit(src.charAt(pos))) pos++;
         }
         String numStr = src.substring(begin, pos);
         // A number immediately followed by a letter/underscore is a syntax error (e.g. 7a)
         if (pos < src.length() && isIdentStart(src.charAt(pos))) {
-            throw new ParseException("S0201: Syntax error: malformed number '" + numStr + src.charAt(pos) + "'", start);
+            throw new ParseException("S0201", "Syntax error: malformed number '" + numStr + src.charAt(pos) + "'", start);
         }
         try {
             double val = Double.parseDouble(numStr);
             if (Double.isInfinite(val))
-                throw new ParseException("S0102: Number out of range: " + numStr, start);
+                throw new ParseException("S0102", "Number out of range: " + numStr, start);
         } catch (NumberFormatException e) {
-            throw new ParseException("S0102: Number out of range: " + numStr, start);
+            throw new ParseException("S0102", "Number out of range: " + numStr, start);
         }
         return Token.of(TokenType.NUMBER, numStr, start);
     }
@@ -443,7 +443,7 @@ public final class Lexer {
             }
             pos++;
         }
-        throw new ParseException("S0106: Unterminated block comment", start);
+        throw new ParseException("S0106", "Unterminated block comment", start);
     }
 
     // -------------------------------------------------------------------------

@@ -85,20 +85,20 @@ public final class Parser {
         if (!parser.peek().type().equals(EOF)) {
             Token t = parser.peek();
             if (t.type() == COLON_ASSIGN) {
-                throw new ParseException("S0212: The := operator can only be used to assign to a $variable", t.position());
+                throw new ParseException("S0212", "The := operator can only be used to assign to a $variable", t.position());
             }
             if (t.type() == SEMICOLON) {
-                throw new ParseException("S0201: Syntax error: unexpected ';'", t.position());
+                throw new ParseException("S0201", "Syntax error: unexpected ';'", t.position());
             }
             if (t.type() == LPAREN) {
                 // A non-function expression followed by '(...)' — detect partial-application vs call
                 Token inner = parser.peekAt(1);
                 if (inner.type() == QUESTION) {
-                    throw new ParseException("T1008: The expression is not a function", t.position());
+                    throw new ParseException("T1008", "The expression is not a function", t.position());
                 }
-                throw new ParseException("T1006: The expression is not a function", t.position());
+                throw new ParseException("T1006", "The expression is not a function", t.position());
             }
-            throw new ParseException("S0211: Unexpected token '" + t.value() + "'", t.position());
+            throw new ParseException("S0211", "Unexpected token '" + t.value() + "'", t.position());
         }
         return result;
     }
@@ -123,7 +123,7 @@ public final class Parser {
         AstNode lhs = parseConditional();
         // Detect invalid assignment target like $a[1]:=3 or foo:=3
         if (peek().type() == COLON_ASSIGN) {
-            throw new ParseException("S0212: The := operator can only be used to assign to a $variable", peek().position());
+            throw new ParseException("S0212", "The := operator can only be used to assign to a $variable", peek().position());
         }
         return lhs;
     }
@@ -291,14 +291,32 @@ public final class Parser {
                 node = parseDotStep(node);
             } else if (peek().type() == AT && peekAt(1).type() == VARIABLE) {
                 // Context variable binding: node@$var
+                // S0215: @$var cannot follow a predicate/subscript step
+                if (endsWithPredicateOrSubscript(node)) {
+                    Token t = peek();
+                    throw new ParseException("S0215", "A context variable binding must not be applied after a predicate step", t.position());
+                }
+                // S0216: @$var cannot follow a sort expression
+                if (node instanceof SortExpr) {
+                    Token t = peek();
+                    throw new ParseException("S0216", "A context variable binding cannot follow a sort expression", t.position());
+                }
                 String varName = peekAt(1).value();
                 cursor += 2; // consume AT and VARIABLE
                 node = appendToPath(node, new ContextBinding(varName));
+            } else if (peek().type() == AT) {
+                // AT not followed by $var — must use a variable name (S0214)
+                Token t = peek();
+                throw new ParseException("S0214", "The operand of the '@' operator must be a variable name ($var)", t.position());
             } else if (peek().type() == HASH && peekAt(1).type() == VARIABLE) {
                 // Positional variable binding: node#$var
                 String varName = peekAt(1).value();
                 cursor += 2; // consume HASH and VARIABLE
                 node = appendToPath(node, new PositionBinding(varName));
+            } else if (peek().type() == HASH) {
+                // HASH not followed by $var — must use a variable name (S0214)
+                Token t = peek();
+                throw new ParseException("S0214", "The operand of the '#' operator must be a variable name ($var)", t.position());
             } else if (peek().type() == LBRACKET) {
                 node = parseSubscriptOrPredicate(node);
             } else if (peek().type() == CARET) {
@@ -307,6 +325,11 @@ public final class Parser {
                 node = parseGroupBy(node);
             } else if (peek().type() == PIPE && transformPatternDepth == 0) {
                 node = parseTransform(node);
+            } else if (peek().type() == LPAREN) {
+                // Chained function application: expr(args) where expr evaluates to a lambda.
+                // Desugar to ($__callN := callee; $__callN(args)) so the translator can
+                // apply the result of any expression as a function.
+                node = desugarCallExpr(node);
             } else {
                 break;
             }
@@ -319,6 +342,15 @@ public final class Parser {
      * If {@code node} is already a {@link PathExpr}, the step is added to its list.
      * Otherwise, a new two-element {@link PathExpr} is created.
      */
+    /** Returns true if the node's last path step is a predicate or numeric subscript. */
+    private static boolean endsWithPredicateOrSubscript(AstNode node) {
+        AstNode last = node;
+        if (node instanceof PathExpr pe && !pe.steps().isEmpty()) {
+            last = pe.steps().get(pe.steps().size() - 1);
+        }
+        return last instanceof PredicateExpr || last instanceof ArraySubscript;
+    }
+
     private static AstNode appendToPath(AstNode node, AstNode step) {
         List<AstNode> steps = new ArrayList<>();
         if (node instanceof PathExpr pe) {
@@ -348,7 +380,7 @@ public final class Parser {
         } else if (peek().type() == NUMBER) {
             // A number literal after '.' is not a valid path step — S0213
             Token t = peek();
-            throw new ParseException("S0213: The expression on the right side of the '.' operator must be a name or a wildcard, not a number", t.position());
+            throw new ParseException("S0213", "The expression on the right side of the '.' operator must be a name or a wildcard, not a number", t.position());
         } else {
             right = parsePrimary();
         }
@@ -366,7 +398,7 @@ public final class Parser {
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
         if (source instanceof GroupByExpr) {
             Token t = peek();
-            throw new ParseException("S0209: A predicate cannot be applied to a group-by expression", t.position());
+            throw new ParseException("S0209", "A predicate cannot be applied to a group-by expression", t.position());
         }
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
@@ -392,6 +424,14 @@ public final class Parser {
                 List<AstNode> steps = new ArrayList<>(pe.steps());
                 AstNode lastStep = steps.remove(steps.size() - 1);
                 steps.add(new ArraySubscript(lastStep, inner));
+                return new PathExpr(steps);
+            }
+            // a.b.c[pred][n] — fold when source is a PredicateExpr on a PathExpr,
+            // so [n] is applied per-element (per-b), not on the globally collected result.
+            if (source instanceof PredicateExpr pe2 && pe2.source() instanceof PathExpr pp) {
+                List<AstNode> steps = new ArrayList<>(pp.steps());
+                AstNode lastStep = steps.remove(steps.size() - 1);
+                steps.add(new ArraySubscript(new PredicateExpr(lastStep, pe2.predicate()), inner));
                 return new PathExpr(steps);
             }
             return new ArraySubscript(source, inner);
@@ -434,7 +474,7 @@ public final class Parser {
     private AstNode parseGroupBy(AstNode source) throws ParseException {
         if (source instanceof GroupByExpr) {
             Token t = peek();
-            throw new ParseException("S0210: Each group-by clause can only contain one expression", t.position());
+            throw new ParseException("S0210", "Each group-by clause can only contain one expression", t.position());
         }
         List<KeyValuePair> pairs = parseObjectBody();
         return new GroupByExpr(source, pairs);
@@ -447,7 +487,8 @@ public final class Parser {
         transformPatternDepth++;
         AstNode pattern = parseExpression();
         consume(PIPE);
-        AstNode update = parseObjectConstructorNode();
+        // Update may be any expression; T2011 is thrown at runtime if it's not an object.
+        AstNode update = parseExpression();
         AstNode delete = null;
         if (tryConsume(COMMA)) {
             delete = parseExpression();
@@ -465,7 +506,8 @@ public final class Parser {
         transformPatternDepth++;
         AstNode pattern = parseExpression();
         consume(PIPE);
-        AstNode update = parseObjectConstructorNode();
+        // Update may be any expression; T2011 is thrown at runtime if it's not an object.
+        AstNode update = parseExpression();
         AstNode delete = null;
         if (tryConsume(COMMA)) {
             delete = parseExpression();
@@ -522,10 +564,10 @@ public final class Parser {
             case MINUS          -> parseUnary();  // let unary handle it
             case NOT            -> parseUnary();
             case EOF            -> throw new ParseException(
-                    "S0207: Unexpected end of expression", t.position());
-            case ERROR          -> throw new ParseException(t.value(), t.position());
+                    "S0207", "Unexpected end of expression", t.position());
+            case ERROR          -> throw ParseException.withErrorCodeFromMessage(t.value(), t.position());
             default             -> throw new ParseException(
-                    "S0211: Unexpected token '" + t.value() + "'", t.position());
+                    "S0211", "Unexpected token '" + t.value() + "'", t.position());
         };
     }
 
@@ -556,14 +598,14 @@ public final class Parser {
                 // Bare identifier partial application is invalid.
                 // T1007 if name matches a known built-in; T1008 otherwise.
                 if (BUILTIN_NAMES.contains(t.value())) {
-                    throw new ParseException("T1007: Attempted to partially apply a built-in function '"
+                    throw new ParseException("T1007", "Attempted to partially apply a built-in function '"
                             + t.value() + "'", t.position());
                 }
-                throw new ParseException("T1008: The expression is not a function", t.position());
+                throw new ParseException("T1008", "The expression is not a function", t.position());
             }
             // Regular call of a built-in function without $ prefix - throw T1005
             if (BUILTIN_NAMES.contains(t.value())) {
-                throw new ParseException("T1005: Attempted to invoke a non-function. Did you mean $" 
+                throw new ParseException("T1005", "Attempted to invoke a non-function. Did you mean $"
                         + t.value() + "?", t.position());
             }
             return call;
@@ -680,7 +722,7 @@ public final class Parser {
                 Token p = peek();
                 if (p.type() != VARIABLE) {
                     throw new ParseException(
-                            "S0208: Lambda parameter '" + p.value() + "' must be a $variable", p.position());
+                            "S0208", "Lambda parameter '" + p.value() + "' must be a $variable", p.position());
                 }
                 cursor++;
                 params.add(p.value());
@@ -694,7 +736,7 @@ public final class Parser {
         }
         // Extra '>' after signature is S0402
         if (peek().type() == GREATER) {
-            throw new ParseException("S0402: Invalid type signature: unexpected '>' after signature", peek().position());
+            throw new ParseException("S0402", "Invalid type signature: unexpected '>' after signature", peek().position());
         }
         consume(LBRACE);
         AstNode body = parseExpression();
@@ -723,6 +765,28 @@ public final class Parser {
         String tmpName = "__ln_" + lambdaTempCounter++;
         return new Parenthesized(new Block(List.of(
                 new VariableBinding(tmpName, lambda),
+                new FunctionCall(tmpName, args)
+        )));
+    }
+
+    /**
+     * Desugars a chained call {@code expr(args)} (where {@code expr} is already parsed)
+     * to {@code ($__callN := expr; $__callN(args))}.
+     * Used in {@code parsePostfix} to support calling the result of any expression as a function,
+     * e.g. {@code $g($g)($a)} or {@code λ($f){…}(arg1)(arg2)}.
+     */
+    private AstNode desugarCallExpr(AstNode callee) throws ParseException {
+        consume(LPAREN);
+        List<AstNode> args = new ArrayList<>();
+        if (peek().type() != RPAREN) {
+            do {
+                args.add(parseExpression());
+            } while (tryConsume(COMMA));
+        }
+        consume(RPAREN);
+        String tmpName = "__call_" + lambdaTempCounter++;
+        return new Parenthesized(new Block(List.of(
+                new VariableBinding(tmpName, callee),
                 new FunctionCall(tmpName, args)
         )));
     }
@@ -766,7 +830,7 @@ public final class Parser {
         String sig = sb.toString();
         // Validate: detect n<n> (parametrized non-array type) → S0401
         if (sig.matches(".*[bnslu]<.*")) {
-            throw new ParseException("S0401: Invalid type specification in signature: '" + sig + "'", startPos);
+            throw new ParseException("S0401", "Invalid type specification in signature: '" + sig + "'", startPos);
         }
         return sig;
     }
@@ -803,10 +867,10 @@ public final class Parser {
         if (t.type() != expected) {
             if (t.type() == org.json_kula.jsonata_jvm.parser.lexer.TokenType.EOF)
                 throw new ParseException(
-                        "S0203: Expected " + expected + " but reached end of expression",
+                        "S0203", "Expected " + expected + " but reached end of expression",
                         t.position());
             throw new ParseException(
-                    "S0202: Expected " + expected + " but found " + t.type() + " ('" + t.value() + "')",
+                    "S0202", "Expected " + expected + " but found " + t.type() + " ('" + t.value() + "')",
                     t.position());
         }
         cursor++;
@@ -838,7 +902,7 @@ public final class Parser {
         try {
             return Double.parseDouble(text);
         } catch (NumberFormatException e) {
-            throw new ParseException("Invalid number literal: " + text, pos);
+            throw new ParseException(null, "Invalid number literal: " + text, pos);
         }
     }
 

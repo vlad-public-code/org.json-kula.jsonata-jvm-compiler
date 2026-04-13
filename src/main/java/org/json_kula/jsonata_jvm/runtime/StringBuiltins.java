@@ -36,14 +36,14 @@ final class StringBuiltins {
     static JsonNode fn_uppercase(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $uppercase() function: argument 1 of $uppercase must be a string");
+                "T0410", "$uppercase() function: argument 1 of $uppercase must be a string");
         return NF.textNode(arg.textValue().toUpperCase());
     }
 
     static JsonNode fn_lowercase(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $lowercase() function: argument 1 of $lowercase must be a string");
+                "T0410", "$lowercase() function: argument 1 of $lowercase must be a string");
         return NF.textNode(arg.textValue().toLowerCase());
     }
 
@@ -59,7 +59,7 @@ final class StringBuiltins {
     static JsonNode fn_length(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isTextual())
-            throw new RuntimeEvaluationException("T0410: $length: argument must be a string");
+            throw new RuntimeEvaluationException("T0410", "$length: argument must be a string");
         String s = arg.textValue();
         return NF.numberNode(s.codePointCount(0, s.length()));
     }
@@ -68,7 +68,7 @@ final class StringBuiltins {
     static JsonNode fn_length_ctx(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isTextual())
-            throw new RuntimeEvaluationException("T0411: $length: context value must be a string");
+            throw new RuntimeEvaluationException("T0411", "$length: context value must be a string");
         String s = arg.textValue();
         return NF.numberNode(s.codePointCount(0, s.length()));
     }
@@ -76,9 +76,9 @@ final class StringBuiltins {
     static JsonNode fn_substring(JsonNode str, JsonNode start) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substring() function: argument 1 of $substring must be a string");
+                "T0410", "$substring() function: argument 1 of $substring must be a string");
         if (!start.isNumber()) throw new RuntimeEvaluationException(
-                "T0410: $substring() function: argument 2 of $substring must be a number");
+                "T0410", "$substring() function: argument 2 of $substring must be a number");
         String s = str.textValue();
         int cpLen = s.codePointCount(0, s.length());
         int cpBegin = clampCpIndex((int) JsonataRuntime.toNumber(start), cpLen);
@@ -90,11 +90,11 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substring() function: argument 1 of $substring must be a string");
+                "T0410", "$substring() function: argument 1 of $substring must be a string");
         if (!start.isNumber()) throw new RuntimeEvaluationException(
-                "T0410: $substring() function: argument 2 of $substring must be a number");
+                "T0410", "$substring() function: argument 2 of $substring must be a number");
         if (!length.isNumber()) throw new RuntimeEvaluationException(
-                "T0410: $substring() function: argument 3 of $substring must be a number");
+                "T0410", "$substring() function: argument 3 of $substring must be a number");
         String s = str.textValue();
         int cpLen = s.codePointCount(0, s.length());
         int cpBegin = clampCpIndex((int) JsonataRuntime.toNumber(start), cpLen);
@@ -115,9 +115,9 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringBefore() function: argument 1 of $substringBefore must be a string");
+                "T0410", "$substringBefore() function: argument 1 of $substringBefore must be a string");
         if (!chars.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringBefore() function: argument 2 of $substringBefore must be a string");
+                "T0410", "$substringBefore() function: argument 2 of $substringBefore must be a string");
         String s = str.textValue();
         String c = chars.textValue();
         int idx = s.indexOf(c);
@@ -129,9 +129,9 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0411: $substringBefore() function: context value of $substringBefore must be a string");
+                "T0411", "$substringBefore() function: context value of $substringBefore must be a string");
         if (!chars.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringBefore() function: argument 2 of $substringBefore must be a string");
+                "T0410", "$substringBefore() function: argument 2 of $substringBefore must be a string");
         String s = str.textValue();
         String c = chars.textValue();
         int idx = s.indexOf(c);
@@ -142,9 +142,9 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringAfter() function: argument 1 of $substringAfter must be a string");
+                "T0410", "$substringAfter() function: argument 1 of $substringAfter must be a string");
         if (!chars.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringAfter() function: argument 2 of $substringAfter must be a string");
+                "T0410", "$substringAfter() function: argument 2 of $substringAfter must be a string");
         String s = str.textValue();
         String c = chars.textValue();
         int idx = s.indexOf(c);
@@ -156,9 +156,9 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(chars)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) throw new RuntimeEvaluationException(
-                "T0411: $substringAfter() function: context value of $substringAfter must be a string");
+                "T0411", "$substringAfter() function: context value of $substringAfter must be a string");
         if (!chars.isTextual()) throw new RuntimeEvaluationException(
-                "T0410: $substringAfter() function: argument 2 of $substringAfter must be a string");
+                "T0410", "$substringAfter() function: argument 2 of $substringAfter must be a string");
         String s = str.textValue();
         String c = chars.textValue();
         int idx = s.indexOf(c);
@@ -168,14 +168,14 @@ final class StringBuiltins {
     static JsonNode fn_contains(JsonNode str, JsonNode search) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(search)) return JsonataRuntime.MISSING;
         if (!str.isTextual())
-            throw new RuntimeEvaluationException("T0410: Argument 1 of $contains must be a string");
+            throw new RuntimeEvaluationException("T0410", "Argument 1 of $contains must be a string");
         if (RegexRegistry.isRegexToken(search)) {
             byte[] bytes = str.textValue().getBytes(java.nio.charset.StandardCharsets.UTF_8);
             return JsonataRuntime.bool(RegexRegistry.lookupRegex(search).matcher(bytes)
                     .search(0, bytes.length, org.joni.Option.NONE) >= 0);
         }
         if (!search.isTextual())
-            throw new RuntimeEvaluationException("T0410: Argument 2 of $contains must be a string or regex");
+            throw new RuntimeEvaluationException("T0410", "Argument 2 of $contains must be a string or regex");
         return JsonataRuntime.bool(str.textValue().contains(search.textValue()));
     }
 
@@ -185,19 +185,21 @@ final class StringBuiltins {
 
     static JsonNode fn_split(JsonNode str, JsonNode separator, JsonNode limit)
             throws RuntimeEvaluationException {
-        if (JsonataRuntime.missing(str) || JsonataRuntime.missing(separator)) return JsonataRuntime.MISSING;
+        if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
+        // Missing separator defaults to empty (split each character)
+        if (JsonataRuntime.missing(separator)) separator = NF.textNode("");
         if (!str.isTextual())
-            throw new RuntimeEvaluationException("T0410: $split: argument 1 must be a string");
+            throw new RuntimeEvaluationException("T0410", "$split: argument 1 must be a string");
         if (org.json_kula.jsonata_jvm.runtime.LambdaRegistry.isLambdaToken(separator))
-            throw new RuntimeEvaluationException("T1010: The separator argument of $split must be a string or regular expression");
+            throw new RuntimeEvaluationException("T1010", "The separator argument of $split must be a string or regular expression");
         if (!RegexRegistry.isRegexToken(separator) && !separator.isTextual())
-            throw new RuntimeEvaluationException("T0410: $split: argument 2 must be a string or regex");
+            throw new RuntimeEvaluationException("T0410", "$split: argument 2 must be a string or regex");
         if (!JsonataRuntime.missing(limit)) {
             if (!limit.isNumber())
-                throw new RuntimeEvaluationException("T0410: $split: argument 3 must be a number");
+                throw new RuntimeEvaluationException("T0410", "$split: argument 3 must be a number");
             double limD = limit.doubleValue();
             if (limD < 0)
-                throw new RuntimeEvaluationException("D3020: $split: limit must be non-negative");
+                throw new RuntimeEvaluationException("D3020", "$split: limit must be non-negative");
         }
         String s = str.textValue();
         int lim = JsonataRuntime.missing(limit) ? -1 : (int) limit.doubleValue();
@@ -250,6 +252,12 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern)) return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
+
+        if (LambdaRegistry.isLambdaToken(pattern)) {
+            return fn_matchWithLambda(s, pattern,
+                JsonataRuntime.missing(limit) ? Integer.MAX_VALUE : (int) JsonataRuntime.toNumber(limit));
+        }
+
         org.joni.Regex rx = RegexRegistry.isRegexToken(pattern)
                 ? RegexRegistry.lookupRegex(pattern)
                 : RegexRegistry.buildLiteralRegex(JsonataRuntime.toText(pattern));
@@ -286,6 +294,55 @@ final class StringBuiltins {
         return results.isEmpty() ? JsonataRuntime.MISSING : results;
     }
 
+    private static JsonNode fn_matchWithLambda(String s, JsonNode pattern, int limit) {
+        // Custom matcher protocol: the pattern is function($str, $offset).
+        // Initial call: pass the full string as a TextNode (single arg, so $offset = MISSING
+        // inside the lambda, which uses $exists($offset) ? $offset : 0).
+        // Subsequent calls: use the "next" zero-arg function returned in the previous result.
+        ArrayNode results = NF.arrayNode();
+        int count = 0;
+        JsonNode currentPattern = pattern;
+        boolean firstCall = true;
+
+        while (count < limit) {
+            JsonNode result;
+            if (firstCall) {
+                result = LambdaRegistry.fn_apply(currentPattern, NF.textNode(s));
+                firstCall = false;
+            } else {
+                // "next" is a zero-arg closure: the single arg is ignored by the lambda body.
+                result = LambdaRegistry.fn_apply(currentPattern, JsonataRuntime.NULL);
+            }
+
+            if (JsonataRuntime.missing(result)) break;
+            if (!result.isObject()) break;
+
+            JsonNode match = result.get("match");
+            JsonNode start = result.get("start");
+            JsonNode end   = result.get("end");
+            JsonNode groups = result.get("groups");
+            JsonNode next  = result.get("next");
+
+            if (JsonataRuntime.missing(match) || JsonataRuntime.missing(start) || JsonataRuntime.missing(end)) break;
+
+            // start/end returned by the custom matcher are already absolute positions.
+            ObjectNode out = NF.objectNode();
+            out.put("match", match.asText());
+            out.put("index", start.asInt());
+            out.set("groups", JsonataRuntime.missing(groups) ? NF.arrayNode() : groups);
+            results.add(out);
+            count++;
+
+            if (!JsonataRuntime.missing(next) && LambdaRegistry.isLambdaToken(next)) {
+                currentPattern = next;
+            } else {
+                break;
+            }
+        }
+
+        return results.isEmpty() ? JsonataRuntime.MISSING : results;
+    }
+
     static JsonNode fn_replace(JsonNode str, JsonNode pattern, JsonNode replacement)
             throws RuntimeEvaluationException {
         return fn_replace(str, pattern, replacement, JsonataRuntime.MISSING);
@@ -297,21 +354,21 @@ final class StringBuiltins {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern) || JsonataRuntime.missing(replacement))
             return JsonataRuntime.MISSING;
         if (!str.isTextual())
-            throw new RuntimeEvaluationException("T0410: $replace: argument 1 must be a string");
+            throw new RuntimeEvaluationException("T0410", "$replace: argument 1 must be a string");
         if (!RegexRegistry.isRegexToken(pattern) && !pattern.isTextual())
-            throw new RuntimeEvaluationException("T0410: $replace: argument 2 must be a string or regex");
+            throw new RuntimeEvaluationException("T0410", "$replace: argument 2 must be a string or regex");
         if (!LambdaRegistry.isLambdaToken(replacement) && !replacement.isTextual())
-            throw new RuntimeEvaluationException("T0410: $replace: argument 3 must be a string or function");
+            throw new RuntimeEvaluationException("T0410", "$replace: argument 3 must be a string or function");
         if (!JsonataRuntime.missing(limit)) {
             if (!limit.isNumber())
-                throw new RuntimeEvaluationException("T0410: $replace: argument 4 must be a number");
+                throw new RuntimeEvaluationException("T0410", "$replace: argument 4 must be a number");
             if (limit.doubleValue() < 0)
-                throw new RuntimeEvaluationException("D3011: $replace: limit must be non-negative");
+                throw new RuntimeEvaluationException("D3011", "$replace: limit must be non-negative");
         }
         String s = str.textValue();
         // Empty string pattern is invalid
         if (!RegexRegistry.isRegexToken(pattern) && pattern.textValue().isEmpty())
-            throw new RuntimeEvaluationException("D3010: $replace: second argument cannot be an empty string");
+            throw new RuntimeEvaluationException("D3010", "$replace: second argument cannot be an empty string");
         if (LambdaRegistry.isLambdaToken(replacement)) {
             // Lambda replacement: check return type later per match
         }
@@ -350,12 +407,15 @@ final class StringBuiltins {
                 matchObj.set("groups", groups);
                 JsonNode repResult = LambdaRegistry.lookupLambda(replacement).apply(matchObj);
                 if (!JsonataRuntime.missing(repResult) && !repResult.isTextual())
-                    throw new RuntimeEvaluationException("D3012: $replace: replacement function must return a string");
+                    throw new RuntimeEvaluationException("D3012", "$replace: replacement function must return a string");
                 sb.append(JsonataRuntime.missing(repResult) ? "" : repResult.textValue());
             } else {
                 sb.append(expandReplacement(JsonataRuntime.toText(replacement), matchStr, bytes, region));
             }
             count++;
+            if (end == found) {
+                throw new RuntimeEvaluationException("D1004", "Regular expression matches zero length string");
+            }
             pos = (end > found) ? end : end + 1;
         }
         if (pos <= bytes.length) {
@@ -369,17 +429,17 @@ final class StringBuiltins {
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         if (!JsonataRuntime.missing(separator) && !separator.isTextual())
             throw new RuntimeEvaluationException(
-                    "T0410: $join: separator argument must be a string");
+                    "T0410", "$join: separator argument must be a string");
         if (!arr.isArray()) {
             if (!arr.isTextual())
                 throw new RuntimeEvaluationException(
-                        "T0412: $join: function argument must be an array of strings");
+                        "T0412", "$join: function argument must be an array of strings");
             return arr;
         }
         for (JsonNode elem : arr) {
             if (!elem.isTextual())
                 throw new RuntimeEvaluationException(
-                        "T0412: $join: function argument must be an array of strings");
+                        "T0412", "$join: function argument must be an array of strings");
         }
         String sep = JsonataRuntime.missing(separator) ? "" : separator.textValue();
         StringJoiner sj = new StringJoiner(sep);
@@ -399,8 +459,10 @@ final class StringBuiltins {
             // Jackson adds spaces inside empty arrays: "[ ]" → "[]"
             raw = raw.replace("[ ]", "[]");
             return NF.textNode(raw);
+        } catch (RuntimeEvaluationException e) {
+            throw new RuntimeEvaluationException(e.getErrorCode(), "$string: " + e.getMessage());
         } catch (Exception e) {
-            throw new RuntimeEvaluationException("$string: " + e.getMessage());
+            throw new RuntimeEvaluationException(null, "$string: " + e.getMessage());
         }
     }
 
@@ -408,7 +470,7 @@ final class StringBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(width)) return JsonataRuntime.MISSING;
         if (!str.isTextual())
-            throw new RuntimeEvaluationException("T0410: $pad: argument 1 must be a string");
+            throw new RuntimeEvaluationException("T0410", "$pad: argument 1 must be a string");
         String s = str.textValue();
         int w = (int) JsonataRuntime.toNumber(width);
         String pc = JsonataRuntime.missing(padChar) ? " " : JsonataRuntime.toText(padChar);
@@ -437,7 +499,7 @@ final class StringBuiltins {
         if (JsonataRuntime.missing(expr)) return JsonataRuntime.MISSING;
         JsonataRuntime.EvalDelegate delegate = JsonataRuntime.getEvalDelegate();
         if (delegate == null) {
-            throw new RuntimeEvaluationException(
+            throw new RuntimeEvaluationException(null,
                     "$eval: no eval delegate registered (create a JsonataExpressionFactory first)");
         }
         JsonNode ctx = JsonataRuntime.missing(context) ? JsonataRuntime.MISSING : context;
@@ -455,8 +517,8 @@ final class StringBuiltins {
         try {
             byte[] decoded = java.util.Base64.getDecoder().decode(JsonataRuntime.toText(str));
             return NF.textNode(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
-        } catch (IllegalArgumentException e) {
-            throw new RuntimeEvaluationException("$base64decode: invalid base64 input");
+        } catch (RuntimeEvaluationException e) {
+            throw new RuntimeEvaluationException(e.getErrorCode(), "$base64decode: invalid base64 input: " + e.getMessage());
         }
     }
 
@@ -469,8 +531,8 @@ final class StringBuiltins {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         try {
             return NF.textNode(percentDecode(JsonataRuntime.toText(str)));
-        } catch (Exception e) {
-            throw new RuntimeEvaluationException("$decodeUrlComponent: " + e.getMessage());
+        } catch (RuntimeEvaluationException e) {
+            throw new RuntimeEvaluationException(e.getErrorCode(), "$decodeUrlComponent: " + e.getMessage());
         }
     }
 
@@ -483,8 +545,8 @@ final class StringBuiltins {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         try {
             return NF.textNode(percentDecode(JsonataRuntime.toText(str)));
-        } catch (Exception e) {
-            throw new RuntimeEvaluationException("$decodeUrl: " + e.getMessage());
+        } catch (RuntimeEvaluationException e) {
+            throw new RuntimeEvaluationException(e.getErrorCode(), "$decodeUrl: " + e.getMessage());
         }
     }
 
@@ -504,11 +566,11 @@ final class StringBuiltins {
             if (Character.isHighSurrogate(c)) {
                 if (k + 1 >= s.length() || !Character.isLowSurrogate(s.charAt(k + 1)))
                     throw new RuntimeEvaluationException(
-                            "D3140: $encodeUrl/Component: the string contains an invalid Unicode character");
+                            "D3140", "$encodeUrl/Component: the string contains an invalid Unicode character");
                 k++; // valid surrogate pair, skip low
             } else if (Character.isLowSurrogate(c)) {
                 throw new RuntimeEvaluationException(
-                        "D3140: $encodeUrl/Component: the string contains an invalid Unicode character");
+                        "D3140", "$encodeUrl/Component: the string contains an invalid Unicode character");
             }
         }
         byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -534,13 +596,13 @@ final class StringBuiltins {
             if (c == '%') {
                 if (i + 2 >= s.length()) {
                     throw new RuntimeEvaluationException(
-                            "D3140: Malformed URL: incomplete percent sequence at position " + i);
+                            "D3140", "Malformed URL: incomplete percent sequence at position " + i);
                 }
                 int hi = Character.digit(s.charAt(i + 1), 16);
                 int lo = Character.digit(s.charAt(i + 2), 16);
                 if (hi < 0 || lo < 0) {
                     throw new RuntimeEvaluationException(
-                            "D3140: Malformed URL: invalid percent sequence '%" + s.charAt(i + 1) + s.charAt(i + 2) + "'");
+                            "D3140", "Malformed URL: invalid percent sequence '%" + s.charAt(i + 1) + s.charAt(i + 2) + "'");
                 }
                 bytes[len++] = (byte) (hi * 16 + lo);
                 i += 3;
@@ -558,7 +620,7 @@ final class StringBuiltins {
         try {
             return decoder.decode(buf).toString();
         } catch (java.nio.charset.CharacterCodingException e) {
-            throw new RuntimeEvaluationException("D3140: Malformed URL: invalid UTF-8 sequence");
+            throw new RuntimeEvaluationException("D3140", "Malformed URL: invalid UTF-8 sequence");
         }
     }
 
@@ -582,9 +644,14 @@ final class StringBuiltins {
         while (i < repl.length()) {
             char c = repl.charAt(i);
             if (c == '$' && i + 1 < repl.length() && Character.isDigit(repl.charAt(i + 1))) {
-                // Parse all consecutive digits
+                // Parse all consecutive digits, stopping at $ or end
                 int j = i + 1;
                 while (j < repl.length() && Character.isDigit(repl.charAt(j))) j++;
+                // Stop at $ (reserved for next group reference) or end
+                if (j < repl.length() && repl.charAt(j) == '$') {
+                    j = i + 1; // Reset to just after the first $
+                    while (j < repl.length() && Character.isDigit(repl.charAt(j))) j++;
+                }
                 String digits = repl.substring(i + 1, j);
                 // Try from longest group reference to shortest (greedy fallback)
                 boolean matched = false;
@@ -598,16 +665,30 @@ final class StringBuiltins {
                     } else if (region != null && idx < region.getNumRegs()) {
                         int gb = region.getBeg(idx);
                         int ge = region.getEnd(idx);
-                        if (gb >= 0)
+                        if (gb >= 0) {
                             out.append(new String(bytes, gb, ge - gb, java.nio.charset.StandardCharsets.UTF_8));
+                            out.append(literal);
+                            matched = true;
+                            break;
+                        }
+                        // Group exists but not captured - output literal suffix
                         out.append(literal);
                         matched = true;
                         break;
+                    } else {
+                        // No group found at this index - treat as empty capture for shorter fallback
+                        if (len == 1) {
+                            // Single-digit - output remaining literal (empty for just this)
+                            out.append(literal);
+                            matched = true;
+                            break;
+                        }
+                        // Multi-digit - continue to try shorter
                     }
                 }
                 if (!matched) {
-                    // Back-reference exceeds available capture groups → D1004
-                    throw new RuntimeEvaluationException("D1004: Back-reference in replacement string refers to capture group that does not exist in the pattern");
+                    // Fallback: output digits as-is
+                    out.append(digits);
                 }
                 i = j;
             } else if (c == '$' && i + 1 < repl.length() && repl.charAt(i + 1) == '$') {

@@ -109,10 +109,10 @@ final class EvaluationContext {
                 try {
                     return fn.apply(new JsonataFunctionArguments(coerced));
                 } catch (JsonataEvaluationException e) {
-                    throw new RuntimeEvaluationException("Error calling bound function", e);
+                    throw new RuntimeEvaluationException(e.getErrorCode(), "Error calling bound function", e);
                 }
             }
         }
-        throw new RuntimeEvaluationException("T1006: The function '" + name + "' is not defined");
+        throw new RuntimeEvaluationException("T1006", "The function '" + name + "' is not defined");
     }
 }

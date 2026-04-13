@@ -8,6 +8,7 @@ import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
+import org.json_kula.jsonata_jvm.translator.RuntimeTranslatorException;
 import org.json_kula.jsonata_jvm.translator.Translator;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,13 +51,12 @@ public class JsonataExpressionFactory {
                 }
                 return compiled.evaluate(com.fasterxml.jackson.databind.node.NullNode.instance);
             } catch (JsonataCompilationException e) {
-                String msg = e.getMessage();
-                if (msg != null && msg.contains("T1005")) {
-                    throw new RuntimeEvaluationException("D3121: Ev1005: The expression cannot be evaluated");
+                if ("T1005".equals(e.getErrorCode())) {
+                    throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated");
                 }
-                throw new RuntimeEvaluationException("D3120: Ev1004: The expression cannot be parsed");
+                throw new RuntimeEvaluationException("D3120", "The expression cannot be parsed");
             } catch (JsonataEvaluationException e) {
-                throw new RuntimeEvaluationException("D3121: Ev1005: The expression cannot be evaluated");
+                throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated");
             }
         });
     }
@@ -79,7 +79,7 @@ public class JsonataExpressionFactory {
             return loader.load(src);
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
-                    "Failed to compile generated code for expression: " + e.getMessage(), e);
+                    null, "Failed to load generated class for expression: " + e.getMessage(), e);
         }
     }
 
@@ -90,7 +90,11 @@ public class JsonataExpressionFactory {
             return Translator.translate(ast, GEN_PACKAGE, className, expression);
         } catch (ParseException e) {
             throw new JsonataCompilationException(
-                    "Invalid JSONata expression: " + e.getMessage(), e);
+                    e.getErrorCode(), "Invalid JSONata expression: " + e.getMessage(), e);
+        }
+        catch (RuntimeTranslatorException e) {
+            throw new JsonataCompilationException(
+                    e.getErrorCode(), "Failed to translate expression: " + e.getMessage(), e);
         }
     }
 }

@@ -139,8 +139,17 @@ public final class Optimizer {
         @Override
         public AstNode visitBlock(Block n, Void c) {
             List<AstNode> exprs = rewriteList(n.expressions());
-            // Single-expression block: unwrap
-            if (exprs.size() == 1) return exprs.get(0);
+            // Single-expression block: unwrap — UNLESS it is a self-referential
+            // VariableBinding whose lambda body references the binding name.
+            // In that case the Block must be preserved so BlockCodeGen can apply
+            // the holder-array pattern and make the name available in scope.
+            if (exprs.size() == 1) {
+                AstNode only = exprs.get(0);
+                boolean isSelfRef = only instanceof VariableBinding vb
+                        && vb.value() instanceof Lambda lam
+                        && lambdaBodyReferencesName(lam.body(), vb.name());
+                if (!isSelfRef) return only;
+            }
             return exprs.equals(n.expressions()) ? n : new Block(exprs);
         }
 
@@ -250,8 +259,39 @@ public final class Optimizer {
         public AstNode visitGroupByExpr(GroupByExpr n, Void c) {
             AstNode source = rewrite(n.source());
             List<KeyValuePair> pairs = rewritePairs(n.pairs());
+            // Rule D: if source contains @$var or #$var bindings, unfold to a PathExpr
+            // so the binding steps become path steps and binding variables remain in scope
+            // when the GroupBy key/value expressions are compiled.
+            if (containsBinding(source)) {
+                List<AstNode> steps = new ArrayList<>();
+                unfoldToPathSteps(source, steps);
+                steps.add(new GroupByExpr(new ContextRef(), pairs));
+                return new PathExpr(steps);
+            }
             return source == n.source() && pairs.equals(n.pairs())
                     ? n : new GroupByExpr(source, pairs);
+        }
+
+        private static boolean containsBinding(AstNode node) {
+            return switch (node) {
+                case ContextBinding ignored -> true;
+                case PositionBinding ignored -> true;
+                case PathExpr pe -> pe.steps().stream().anyMatch(RewriteVisitor::containsBinding);
+                case PredicateExpr pe -> containsBinding(pe.source());
+                case SortExpr se -> containsBinding(se.source());
+                default -> false;
+            };
+        }
+
+        private static void unfoldToPathSteps(AstNode source, List<AstNode> steps) {
+            if (source instanceof PathExpr pe) {
+                steps.addAll(pe.steps());
+            } else if (source instanceof PredicateExpr pe) {
+                unfoldToPathSteps(pe.source(), steps);
+                steps.add(new PredicateExpr(new ContextRef(), pe.predicate()));
+            } else {
+                steps.add(source);
+            }
         }
 
         @Override
@@ -488,6 +528,44 @@ public final class Optimizer {
                 if (r != n) changed = true;
             }
             return changed ? result : nodes;
+        }
+
+        /**
+         * Returns {@code true} if {@code node} contains a reference to {@code name}
+         * as a free variable (FunctionCall or VariableRef not shadowed by a lambda
+         * parameter or block binding).  Used to detect self-referential lambdas.
+         */
+        private static boolean lambdaBodyReferencesName(AstNode node, String name) {
+            return lambdaBodyRef(node, name, new java.util.HashSet<>());
+        }
+
+        private static boolean lambdaBodyRef(AstNode node, String name, java.util.Set<String> bound) {
+            if (node == null) return false;
+            return switch (node) {
+                case VariableRef vr    -> !bound.contains(vr.name()) && vr.name().equals(name);
+                case FunctionCall fc   -> (!bound.contains(fc.name()) && fc.name().equals(name))
+                                          || fc.args().stream().anyMatch(a -> lambdaBodyRef(a, name, bound));
+                case Lambda lam        -> {
+                    java.util.Set<String> inner = new java.util.HashSet<>(bound);
+                    inner.addAll(lam.params());
+                    yield lambdaBodyRef(lam.body(), name, inner);
+                }
+                case Block blk         -> blk.expressions().stream().anyMatch(e -> lambdaBodyRef(e, name, bound));
+                case VariableBinding vb-> lambdaBodyRef(vb.value(), name, bound);
+                case BinaryOp op       -> lambdaBodyRef(op.left(), name, bound) || lambdaBodyRef(op.right(), name, bound);
+                case UnaryMinus um     -> lambdaBodyRef(um.operand(), name, bound);
+                case ConditionalExpr ce-> lambdaBodyRef(ce.condition(), name, bound)
+                                          || lambdaBodyRef(ce.then(), name, bound)
+                                          || (ce.otherwise() != null && lambdaBodyRef(ce.otherwise(), name, bound));
+                case PathExpr pe       -> pe.steps().stream().anyMatch(s -> lambdaBodyRef(s, name, bound));
+                case ArrayConstructor ac -> ac.elements().stream().anyMatch(e -> lambdaBodyRef(e, name, bound));
+                case ObjectConstructor oc -> oc.pairs().stream()
+                                              .anyMatch(p -> lambdaBodyRef(p.key(), name, bound)
+                                                          || lambdaBodyRef(p.value(), name, bound));
+                case PredicateExpr pe  -> lambdaBodyRef(pe.source(), name, bound) || lambdaBodyRef(pe.predicate(), name, bound);
+                case Parenthesized p   -> lambdaBodyRef(p.inner(), name, bound);
+                default                -> false;
+            };
         }
 
         private List<KeyValuePair> rewritePairs(List<KeyValuePair> pairs) {

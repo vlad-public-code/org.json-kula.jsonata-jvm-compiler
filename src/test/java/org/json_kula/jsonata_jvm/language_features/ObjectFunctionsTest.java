@@ -265,11 +265,11 @@ class ObjectFunctionsTest {
     }
 
     @Test
-    void sift_all_removed_returns_empty_object() throws Exception {
+    void sift_all_removed_returns_undefined() throws Exception {
         String json = "{\"a\": 1, \"b\": 2}";
         JsonNode result = eval("$sift($, function($v){$v > 100})", json);
-        assertTrue(result.isObject());
-        assertEquals(0, result.size());
+        // JSONata returns undefined (null/MISSING) when no key passes the predicate.
+        assertTrue(result == null || result.isNull() || result.isMissingNode());
     }
 
     // =========================================================================

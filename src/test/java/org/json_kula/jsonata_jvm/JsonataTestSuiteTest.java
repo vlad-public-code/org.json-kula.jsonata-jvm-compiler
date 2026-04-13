@@ -128,9 +128,9 @@ public class JsonataTestSuiteTest {
                 fail("Expected either result, undefinedResult, or code. Got: " + testCase + " for expression: " + expression);
             }
             
-        } catch (RuntimeException e) {
+        } catch (JsonataCompilationException | JsonataEvaluationException e) {
             if (expectedCode != null) {
-                String actualCode = extractErrorCode(e.getMessage());
+                String actualCode = e.getErrorCode();
                 assertEquals(expectedCode, actualCode, "Error code mismatch for expression: " + expression);
             } else if (undefinedResult || expectedResult != null) {
                 fail("Expected success but got error: " + e.getMessage() +  " for expression: " + expression);
@@ -164,26 +164,15 @@ public class JsonataTestSuiteTest {
         return EMPTY_OBJECT;
     }
 
-    private JsonNode evaluate(String expression, JsonNode data, JsonNode bindings) {
+    private JsonNode evaluate(String expression, JsonNode data, JsonNode bindings)
+            throws JsonataCompilationException, JsonataEvaluationException {
         JsonataBindings jsonataBindings = new JsonataBindings();
         
         bindings.fields().forEachRemaining(entry -> {
             jsonataBindings.bindValue(entry.getKey(), entry.getValue());
         });
         
-        try {
-            JsonataExpression compiled = FACTORY.compile(expression);
-            return compiled.evaluate(data, jsonataBindings);
-        } catch (JsonataCompilationException | JsonataEvaluationException e) {
-            throw new RuntimeException(e.getMessage(), e);
-        }
-    }
-
-    private static final java.util.regex.Pattern ERROR_CODE_PATTERN =
-            java.util.regex.Pattern.compile("[A-Z]\\d{4}");
-
-    private String extractErrorCode(String message) {
-        var matcher = ERROR_CODE_PATTERN.matcher(message);
-        return matcher.find() ? matcher.group() : "UNKNOWN";
+        JsonataExpression compiled = FACTORY.compile(expression);
+        return compiled.evaluate(data, jsonataBindings);
     }
 }

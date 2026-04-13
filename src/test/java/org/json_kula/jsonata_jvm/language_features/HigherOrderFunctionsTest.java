@@ -55,12 +55,12 @@ class HigherOrderFunctionsTest {
     }
 
     @Test
-    void map_singleParam_singletonArrayReturnedAsArray() throws Exception {
-        // JSONata $map always returns an array, even for a single-element input.
+    void map_singleParam_singletonUnwrapped() throws Exception {
+        // JSONata $map with a single-element input returns the single result unwrapped
+        // (sequence semantics — a one-element sequence collapses to a scalar).
         JsonNode result = eval("$map([2], function($v){ $v * 3 })");
-        assertTrue(result.isArray(), "single-element $map must return an array");
-        assertEquals(1, result.size());
-        assertEquals(6, result.get(0).intValue());
+        assertTrue(result.isNumber());
+        assertEquals(6, result.intValue());
     }
 
     @Test
@@ -248,12 +248,12 @@ class HigherOrderFunctionsTest {
     }
 
     @Test
-    void sift_noneMatchReturnsEmptyObject() throws Exception {
+    void sift_noneMatchReturnsUndefined() throws Exception {
         JsonNode result = eval(
                 "$sift({\"a\": 1, \"b\": 2}, function($v){ $v > 100 })");
-        // An empty object is the expected result when nothing passes the predicate.
-        assertTrue(result.isObject());
-        assertEquals(0, result.size());
+        // JSONata returns undefined (null/MISSING) when no key passes the predicate,
+        // so that empty-sift results are excluded from sequences (see case001).
+        assertTrue(result == null || result.isNull() || result.isMissingNode());
     }
 
     @Test

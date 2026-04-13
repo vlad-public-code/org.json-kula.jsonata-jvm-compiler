@@ -24,7 +24,18 @@ final class BlockCodeGen {
         if (exprs.isEmpty()) return "MISSING";
 
         // Single expression: skip the helper method overhead.
-        if (exprs.size() == 1) return exprs.get(0).accept(t, ctx);
+        // Exception: a VariableBinding whose value is a self-referential lambda needs
+        // the holder-array pattern so that the lambda body can call itself by name
+        // (e.g. "$match := function($s,$o){... next: function(){$match(...)}}").
+        // Without the holder pattern the single-expression shortcut would never add
+        // $match to scope, causing the translator to fall back to the built-in fn_match.
+        if (exprs.size() == 1) {
+            AstNode only = exprs.get(0);
+            boolean needsHolder = only instanceof VariableBinding vb
+                && vb.value() instanceof Lambda lam
+                && ScopeAnalyzer.containsVarRef(lam.body(), vb.name());
+            if (!needsHolder) return only.accept(t, ctx);
+        }
 
         // Multiple expressions: emit as a private helper method (a "block method").
         int id = ctx.state.nextId();
@@ -65,23 +76,44 @@ final class BlockCodeGen {
             }
         }
 
+        // If any expression in the block references %, pass the outer parentVars as
+        // extra parameters so % resolves correctly inside the helper method.
+        boolean hasParentRef = exprs.stream().anyMatch(ScopeAnalyzer::containsParentStep);
+        List<String> outerParentVars = ctx.parentVars;
+        List<String> parentParamNames = new java.util.ArrayList<>();
+        StringBuilder parentParamDecls = new StringBuilder();
+        StringBuilder parentCallArgs   = new StringBuilder();
+        if (hasParentRef && !outerParentVars.isEmpty()) {
+            for (int pi = 0; pi < outerParentVars.size(); pi++) {
+                String pn = "__pp" + id + "_" + pi;
+                parentParamNames.add(pn);
+                parentParamDecls.append(", JsonNode ").append(pn);
+                parentCallArgs.append(", ").append(outerParentVars.get(pi));
+            }
+        }
+
         // The block method uses fixed parameter names __root / __ctx so that
         // the body generation context is stable regardless of how the block
         // was called (e.g. from inside an inline lambda with ctxVar = "$x").
-        GenCtx innerCtx = new GenCtx("__ctx", "__root", ctx.state);
+        GenCtx innerCtx = new GenCtx("__ctx", "__root", ctx.state).withParents(parentParamNames);
 
         // Activate all holder variables BEFORE compiling the body so that
         // visitVariableRef emits $nameRef[0] for every holder reference,
         // including forward references to variables not yet assigned.
+        // Non-holder variables are added to scope lazily inside emitVarBinding,
+        // AFTER their RHS is generated.  This ensures the RHS sees the outer
+        // alias (e.g. the lambda-parameter alias $step__1), not the uninitialized
+        // inner local $step, when a variable shadows a same-named outer binding.
         ctx.state.holderVars.addAll(holderNeeded);
         ctx.state.pushScope();
-        for (String name : blockLocalNames) ctx.state.addLocalVar(name);
+        for (String name : holderNeeded) ctx.state.addLocalVar(name);
 
         try {
             StringBuilder sb = new StringBuilder();
             sb.append("\nprivate JsonNode ").append(methodName)
               .append("(JsonNode __root, JsonNode __ctx")
               .append(extraParamDecls)
+              .append(parentParamDecls)
               .append(") throws RuntimeEvaluationException {\n");
 
             // Pre-declare all holder arrays at the very top so lambdas defined
@@ -100,12 +132,15 @@ final class BlockCodeGen {
                 }
             }
 
+            // The last expression of the block is in tail position when the block
+            // itself is in tail position (i.e. when it is the body of a lambda).
+            GenCtx lastCtx = ctx.isTailPosition ? innerCtx.withTailPosition(true) : innerCtx;
             AstNode last = exprs.get(exprs.size() - 1);
             if (last instanceof VariableBinding vb) {
-                emitVarBinding(t, vb, sb, innerCtx, declared);
+                emitVarBinding(t, vb, sb, lastCtx, declared);
                 sb.append("    return $").append(vb.name()).append(";\n");
             } else {
-                sb.append("    return ").append(last.accept(t, innerCtx)).append(";\n");
+                sb.append("    return ").append(last.accept(t, lastCtx)).append(";\n");
             }
 
             sb.append("}\n");
@@ -115,7 +150,7 @@ final class BlockCodeGen {
             ctx.state.holderVars.removeAll(holderNeeded);
         }
 
-        return methodName + "(" + ctx.rootVar + ", " + ctx.ctxVar + extraCallArgs + ")";
+        return methodName + "(" + ctx.rootVar + ", " + ctx.ctxVar + extraCallArgs + parentCallArgs + ")";
     }
 
     /**
@@ -131,6 +166,18 @@ final class BlockCodeGen {
 
     static void emitVarBinding(Translator t, VariableBinding vb, StringBuilder sb, GenCtx ctx,
                                 Set<String> declared) {
+        // Special case: desugared function call with % as callee and no parent context.
+        // Emitting MISSING allows fn_apply to throw T1006 ("not a function") at runtime
+        // rather than S0217 during compilation.
+        if (vb.name().startsWith("__call_") && vb.value() instanceof AstNode.ParentStep
+                && ctx.parentVars.isEmpty()) {
+            if (declared.add(vb.name())) {
+                sb.append("    JsonNode $").append(vb.name()).append(" = MISSING;\n");
+            } else {
+                sb.append("    $").append(vb.name()).append(" = MISSING;\n");
+            }
+            return;
+        }
         // For chained assignment $a := $b := val: emit the inner binding first,
         // then use the inner variable as the value of the outer binding.
         if (vb.value() instanceof VariableBinding innerVb) {
@@ -144,6 +191,8 @@ final class BlockCodeGen {
             if (ctx.state.holderVars.contains(vb.name())) {
                 sb.append("    $").append(vb.name()).append("Ref[0] = $").append(vb.name()).append(";\n");
             }
+            // Lazily register in scope so subsequent statements resolve to this local.
+            ctx.state.addLocalVar(vb.name());
             return;
         }
         String valExpr = vb.value().accept(t, ctx);
@@ -157,6 +206,10 @@ final class BlockCodeGen {
         if (ctx.state.holderVars.contains(vb.name())) {
             sb.append("    $").append(vb.name()).append("Ref[0] = $").append(vb.name()).append(";\n");
         }
+        // Lazily register in scope so subsequent statements resolve to this local
+        // (non-holders were not pre-added to scope; the lazy registration also ensures
+        // that the RHS of THIS binding sees the outer alias, not the uninitialized local).
+        ctx.state.addLocalVar(vb.name());
     }
 
     /**

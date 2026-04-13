@@ -2,14 +2,14 @@ package org.json_kula.jsonata_jvm.language_features;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.json_kula.jsonata_jvm.JsonataCompilationException;
+import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 import org.json_kula.jsonata_jvm.JsonataExpressionFactory;
 import org.junit.jupiter.api.Test;
-import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ErrorCodesTest {
 
-    private static final Pattern CODE = Pattern.compile("[A-Z]\\d{4}");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final JsonataExpressionFactory FACTORY = new JsonataExpressionFactory();
     private static final ObjectNode EMPTY = MAPPER.createObjectNode();
@@ -18,11 +18,10 @@ class ErrorCodesTest {
         try {
             FACTORY.compile(expr).evaluate(EMPTY);
             return "none";
-        } catch (Exception ex) {
+        } catch (JsonataCompilationException | JsonataEvaluationException ex) {
             String msg = ex.getMessage();
             if (msg == null) return "null";
-            var m = CODE.matcher(msg);
-            return m.find() ? m.group() : "UNKNOWN(" + msg.substring(0, Math.min(40, msg.length())) + ")";
+            return ex.getErrorCode() != null ? ex.getErrorCode() : "UNKNOWN(" + msg.substring(0, Math.min(40, msg.length())) + ")";
         }
     }
 

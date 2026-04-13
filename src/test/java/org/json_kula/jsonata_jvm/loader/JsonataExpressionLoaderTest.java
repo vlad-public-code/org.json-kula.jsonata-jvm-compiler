@@ -376,7 +376,7 @@ class JsonataExpressionLoaderTest {
                 public class Expr25 implements JsonataExpression {
                     public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
                         if (input == null || input.isNull()) {
-                            throw new JsonataEvaluationException("Input cannot be null");
+                            throw new JsonataEvaluationException(null, "Input cannot be null");
                         }
                         return input;
                     }

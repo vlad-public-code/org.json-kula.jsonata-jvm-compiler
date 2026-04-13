@@ -43,7 +43,7 @@ final class SequenceBuiltins {
         if (keyFn == null) {
             for (JsonNode elem : list) {
                 if (elem.isObject() || elem.isArray()) {
-                    throw new RuntimeEvaluationException("D3070: $sort() cannot sort arrays of objects without a comparator function");
+                    throw new RuntimeEvaluationException("D3070", "$sort() cannot sort arrays of objects without a comparator function");
                 }
             }
         }
@@ -60,7 +60,7 @@ final class SequenceBuiltins {
             }
             if (k.isNull()) {
                 // null is not a valid sort key
-                throw new RuntimeEvaluationException("T2008: The key expression in the order-by clause must evaluate to a string or a number");
+                throw new RuntimeEvaluationException("T2008", "The key expression in the order-by clause must evaluate to a string or a number");
             }
             if (k.isNumber()) {
                 hasNumber = true;
@@ -68,12 +68,12 @@ final class SequenceBuiltins {
                 hasString = true;
             } else {
                 // boolean, object, array, etc.
-                throw new RuntimeEvaluationException("T2008: The key expression in the order-by clause must evaluate to a string or a number");
+                throw new RuntimeEvaluationException("T2008", "The key expression in the order-by clause must evaluate to a string or a number");
             }
             keys[i] = k;
         }
         if (hasNumber && hasString) {
-            throw new RuntimeEvaluationException("T2007: The items in the order-by clause must evaluate to a single type, either all string or all number");
+            throw new RuntimeEvaluationException("T2007", "The items in the order-by clause must evaluate to a single type, either all string or all number");
         }
 
         final boolean allNumbers = hasNumber;
@@ -105,25 +105,77 @@ final class SequenceBuiltins {
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
         Comparator<JsonNode> cmp = (a, b) -> {
-            try {
-                // comparatorFn(a, b) returns true if a should come AFTER b (ascending semantics)
-                JsonNode resultAB = comparatorFn.apply(NF.arrayNode().add(a).add(b));
-                if (JsonataRuntime.isTruthy(resultAB)) return 1;  // a > b
-                // Check if b > a; if neither, they are equal → return 0 for stable ordering
-                JsonNode resultBA = comparatorFn.apply(NF.arrayNode().add(b).add(a));
-                return JsonataRuntime.isTruthy(resultBA) ? -1 : 0;
-            } catch (RuntimeEvaluationException ex) {
-                throw new RuntimeException(ex);
-            }
+            // comparatorFn(a, b) returns true if a should come AFTER b (ascending semantics)
+            JsonNode resultAB = comparatorFn.apply(NF.arrayNode().add(a).add(b));
+            if (JsonataRuntime.isTruthy(resultAB)) return 1;  // a > b
+            // Check if b > a; if neither, they are equal → return 0 for stable ordering
+            JsonNode resultBA = comparatorFn.apply(NF.arrayNode().add(b).add(a));
+            return JsonataRuntime.isTruthy(resultBA) ? -1 : 0;
         };
-        try { list.sort(cmp); }
-        catch (RuntimeException e) {
-            if (e.getCause() instanceof RuntimeEvaluationException jee) throw jee;
-            throw e;
-        }
+        list.sort(cmp);
         ArrayNode result = NF.arrayNode();
         list.forEach(result::add);
         return result;
+    }
+
+    /**
+     * Produces {@code [element, parent]} pairs without flattening.
+     * For each element in {@code source}, applies {@code elemFn} to get child
+     * elements; each child is paired with its parent source element.
+     */
+    static JsonNode fn_collect_pairs(JsonNode source, JsonataLambda elemFn)
+            throws RuntimeEvaluationException {
+        if (JsonataRuntime.missing(source)) return JsonataRuntime.MISSING;
+        List<JsonNode> parents = new ArrayList<>();
+        if (source.isArray()) { for (JsonNode e : source) parents.add(e); }
+        else parents.add(source);
+        ArrayNode pairs = NF.arrayNode();
+        for (JsonNode parent : parents) {
+            JsonNode elem = elemFn.apply(parent);
+            if (JsonataRuntime.missing(elem)) continue;
+            if (elem.isArray()) {
+                for (JsonNode e : elem) {
+                    if (!JsonataRuntime.missing(e)) pairs.add(NF.arrayNode().add(e).add(parent));
+                }
+            } else {
+                pairs.add(NF.arrayNode().add(elem).add(parent));
+            }
+        }
+        return pairs.isEmpty() ? JsonataRuntime.MISSING : pairs;
+    }
+
+    /**
+     * Produces {@code [element, parent, grandparent]} triples without flattening.
+     * For each grandparent in {@code grandparents}, applies {@code parentFn} to get
+     * parents, then {@code elemFn} to get elements; each element is triple-packed with
+     * its parent and grandparent.
+     */
+    static JsonNode fn_collect_triples(JsonNode grandparents, JsonataLambda parentFn, JsonataLambda elemFn)
+            throws RuntimeEvaluationException {
+        if (JsonataRuntime.missing(grandparents)) return JsonataRuntime.MISSING;
+        List<JsonNode> gps = new ArrayList<>();
+        if (grandparents.isArray()) { for (JsonNode e : grandparents) gps.add(e); }
+        else gps.add(grandparents);
+        ArrayNode triples = NF.arrayNode();
+        for (JsonNode gp : gps) {
+            JsonNode parents = parentFn.apply(gp);
+            if (JsonataRuntime.missing(parents)) continue;
+            List<JsonNode> plist = new ArrayList<>();
+            if (parents.isArray()) { for (JsonNode p : parents) plist.add(p); }
+            else plist.add(parents);
+            for (JsonNode parent : plist) {
+                JsonNode elem = elemFn.apply(parent);
+                if (JsonataRuntime.missing(elem)) continue;
+                if (elem.isArray()) {
+                    for (JsonNode e : elem) {
+                        if (!JsonataRuntime.missing(e)) triples.add(NF.arrayNode().add(e).add(parent).add(gp));
+                    }
+                } else {
+                    triples.add(NF.arrayNode().add(elem).add(parent).add(gp));
+                }
+            }
+        }
+        return triples.isEmpty() ? JsonataRuntime.MISSING : triples;
     }
 
     static JsonNode fn_shuffle(JsonNode arg) {
@@ -173,8 +225,11 @@ final class SequenceBuiltins {
             acc   = init;
             start = 0;
         }
+        // Build the full array node once for passing as the 4th argument
+        ArrayNode arrNode = NF.arrayNode();
+        items.forEach(arrNode::add);
         for (int i = start; i < items.size(); i++) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)));
+            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)).add(NF.numberNode(i)).add(arrNode));
         }
         return acc;
     }
@@ -227,12 +282,12 @@ final class SequenceBuiltins {
         for (JsonNode item : items) {
             if (JsonataRuntime.isTruthy(predicate.apply(item))) {
                 if (found != null)
-                    throw new RuntimeEvaluationException("D3138: $single: more than one match found");
+                    throw new RuntimeEvaluationException("D3138", "$single: more than one match found");
                 found = item;
             }
         }
         if (found == null)
-            throw new RuntimeEvaluationException("D3139: $single: no match found");
+            throw new RuntimeEvaluationException("D3139", "$single: no match found");
         return found;
     }
 
@@ -242,17 +297,16 @@ final class SequenceBuiltins {
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
         if (items.isEmpty())
-            throw new RuntimeEvaluationException("D3139: $single: no match found");
+            throw new RuntimeEvaluationException("D3139", "$single: no match found");
         if (items.size() > 1)
-            throw new RuntimeEvaluationException("D3138: $single: more than one match found");
+            throw new RuntimeEvaluationException("D3138", "$single: more than one match found");
         return items.get(0);
     }
 
     /** Multi-param $single: passes [value, index, array] to the predicate. */
     static JsonNode fn_single_indexed(JsonNode arr, JsonataLambda predicate)
             throws RuntimeEvaluationException {
-        if (JsonataRuntime.missing(arr))
-            throw new RuntimeEvaluationException("D3139: $single: no match found");
+        if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
         com.fasterxml.jackson.databind.node.ArrayNode arrNode = NF.arrayNode();
@@ -263,12 +317,12 @@ final class SequenceBuiltins {
                     .add(items.get(i)).add(NF.numberNode(i)).add(arrNode);
             if (JsonataRuntime.isTruthy(predicate.apply(tuple))) {
                 if (found != null)
-                    throw new RuntimeEvaluationException("D3138: $single: more than one match found");
+                    throw new RuntimeEvaluationException("D3138", "$single: more than one match found");
                 found = items.get(i);
             }
         }
         if (found == null)
-            throw new RuntimeEvaluationException("D3139: $single: no match found");
+            throw new RuntimeEvaluationException("D3139", "$single: no match found");
         return found;
     }
 
@@ -286,6 +340,6 @@ final class SequenceBuiltins {
             JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
             if (JsonataRuntime.isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
         }
-        return result.size() == 0 ? JsonataRuntime.MISSING : result;
+        return result.isEmpty() ? JsonataRuntime.MISSING : result;
     }
 }

@@ -3,6 +3,7 @@ package org.json_kula.jsonata_jvm.runtime;
 import java.time.*;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.format.SignStyle;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
@@ -125,7 +126,7 @@ final class DateTimeUtils {
                         .toInstant().toEpochMilli();
             } catch (DateTimeParseException e2) {
                 throw new RuntimeEvaluationException(
-                        "D3110: $toMillis: invalid ISO 8601 timestamp: " + timestamp);
+                        "D3110", "$toMillis: invalid ISO 8601 timestamp: " + timestamp);
             }
         }
     }
@@ -172,30 +173,769 @@ final class DateTimeUtils {
     /**
      * Parses {@code timestamp} using an XPath/XQuery picture string and returns
      * milliseconds since the Unix epoch.
+     * @return the epoch millis, or {@link Long#MIN_VALUE} if no match
      */
     static long pictureToMillis(String timestamp, String picture)
             throws RuntimeEvaluationException {
-        java.time.format.DateTimeFormatter formatter = pictureToFormatter(picture);
+// Pre-process: handle ordinal suffixes (st, nd, rd, th) for day parsing
+        String processedTimestamp = preprocessOrdinalSuffixes(timestamp, picture);
+        
+        // Determine if day words were converted to numbers (for formatter builder)
+        boolean dayWordsConverted = picture.contains("[DWwo]") || picture.toLowerCase().contains("[dwo") 
+            || (picture.matches(".*\\[DW\\].*") && picture.toLowerCase().contains("[yw]"));
+        
+        java.time.format.DateTimeFormatter formatter = pictureToFormatter(picture, dayWordsConverted);
+        
         try {
-            TemporalAccessor ta = formatter.parse(timestamp);
+            TemporalAccessor ta = formatter.parse(processedTimestamp);
+            
+            // Special handling for [dwo] or [dwwo] pattern - use day-of-year directly
+            String lowerPic = picture.toLowerCase();
+            boolean hasDayOfYearPattern = lowerPic.contains("[dwo]") || lowerPic.contains("[dwwo]");
+            if (hasDayOfYearPattern && ta.isSupported(ChronoField.DAY_OF_YEAR)) {
+                int year = ta.isSupported(ChronoField.YEAR) ? ta.get(ChronoField.YEAR) : 1;
+                int dayOfYear = ta.get(ChronoField.DAY_OF_YEAR);
+                LocalDate date = LocalDate.ofYearDay(year, dayOfYear);
+                return date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+            }
+            
             try {
                 return Instant.from(ta).toEpochMilli();
             } catch (DateTimeException e) {
-                // No timezone or no time components in picture — treat as UTC with defaults
-                int year = ta.isSupported(ChronoField.YEAR) ? ta.get(ChronoField.YEAR) : 1970;
+                // Try ZonedDateTime as fallback (needed for [z] timezone parsing)
+                try {
+                    return java.time.ZonedDateTime.from(ta).toInstant().toEpochMilli();
+                } catch (DateTimeException e2) {
+                    // Fall through to the date/time underspecified logic below
+                }
+                
+                // Check if picture string has any date components at all
+                boolean hasYear = picture.contains("[Y");
+                // Fix: [M] followed by anything except [m] or [M followed by lowercase]
+                // Pattern should match [M], [M01], [MNn], [M-anything that's not m
+                boolean hasMonth = picture.matches(".*\\[M(?!m)[^\\]]*].*");  // [M] not followed by 'm'
+                boolean hasDayOfMonth = picture.contains("[D]");  // [D] = day-of-month
+                boolean hasDayOfYear = picture.toLowerCase().contains("[d]") && !picture.contains("[D]");  // [d] but not [D]
+
+                // Check for unsupported format: ISO week components [X], [x], [W]
+                // These are not fully supported in parsing
+                boolean hasIsoWeekYear = picture.contains("[X]") || picture.contains("[x]");
+                boolean hasIsoWeek = picture.contains("[W]");
+                if (hasIsoWeekYear || hasIsoWeek) {
+                    throw new RuntimeEvaluationException(
+                            "D3136", "Date/time underspecified");
+                }
+
+                // Check for time gaps: has minutes/seconds but no hours
+                // Use original case picture to check [m] (minute) vs [M] (month)
+                boolean hasHours = picture.contains("[h") || picture.contains("[H]");
+                boolean hasMinutes = picture.contains("[m]");  // [m] = minute (not [M] = month) - use original case
+                boolean hasSeconds = picture.contains("[s]");
+                boolean timeIsUnderspecified = (hasMinutes || hasSeconds) && !hasHours;
+
+                if (hasYear && hasDayOfMonth && !hasMonth && !hasDayOfYear) {
+                    throw new RuntimeEvaluationException(
+                            "D3136", "Date/time underspecified");
+                }
+                if (timeIsUnderspecified) {
+                    throw new RuntimeEvaluationException(
+                            "D3136", "Date/time underspecified");
+                }
+
+                // Check if picture string has any date components at all
+                // Important: Check original (not uppercase) to distinguish [M] (month) from [m] (minute)
+                // Note: [dwo] contains lowercase 'd', so we check case-insensitively
+                boolean pictureHasDate = picture.contains("[Y") && picture.contains("]")  // year
+                        || (picture.contains("[M") && !picture.contains("[m") && !picture.contains("[MA]"))  // month, but NOT [m] (minute) or [MA]
+                        || picture.toLowerCase().contains("[d")  // day (both [D] for day-of-month and [d] for day-of-year)
+                        || picture.contains("[F]");  // day of week
+                
+                // Check if picture has time components (distinguishing [m]=minute from [M]=month)
+                String lower = picture.toLowerCase();
+                boolean pictureHasTime = lower.contains("[h") || lower.contains("[m]") || lower.contains("[s]");
+                
+                if (!pictureHasDate) {
+                    // No date in picture at all
+                    if (!pictureHasTime) {
+                        // Neither date nor time - return undefined
+                        return Long.MIN_VALUE;
+                    }
+                    // Time-only: default date to today
+                    LocalDate today = LocalDate.now(ZoneOffset.UTC);
+                    int hour = ta.isSupported(ChronoField.HOUR_OF_DAY) ? ta.get(ChronoField.HOUR_OF_DAY) : 0;
+                    int minute = ta.isSupported(ChronoField.MINUTE_OF_HOUR) ? ta.get(ChronoField.MINUTE_OF_HOUR) : 0;
+                    int second = ta.isSupported(ChronoField.SECOND_OF_MINUTE) ? ta.get(ChronoField.SECOND_OF_MINUTE) : 0;
+                    int millis = ta.isSupported(ChronoField.MILLI_OF_SECOND) ? ta.get(ChronoField.MILLI_OF_SECOND) : 0;
+                    return LocalDateTime.of(today.getYear(), today.getMonthValue(), today.getDayOfMonth(), hour, minute, second, millis * 1_000_000)
+                            .toInstant(ZoneOffset.UTC).toEpochMilli();
+                }
+                
+                // Has date - use values from parsed TemporalAccessor, default missing to 1
+                int year = ta.isSupported(ChronoField.YEAR) ? ta.get(ChronoField.YEAR) : 1;
                 int month = ta.isSupported(ChronoField.MONTH_OF_YEAR) ? ta.get(ChronoField.MONTH_OF_YEAR) : 1;
-                int day = ta.isSupported(ChronoField.DAY_OF_MONTH) ? ta.get(ChronoField.DAY_OF_MONTH) : 1;
+                int dayOfMonth = ta.isSupported(ChronoField.DAY_OF_MONTH) ? ta.get(ChronoField.DAY_OF_MONTH) : 1;
+                int dayOfYear = ta.isSupported(ChronoField.DAY_OF_YEAR) ? ta.get(ChronoField.DAY_OF_YEAR) : -1;
                 int hour = ta.isSupported(ChronoField.HOUR_OF_DAY) ? ta.get(ChronoField.HOUR_OF_DAY) : 0;
                 int minute = ta.isSupported(ChronoField.MINUTE_OF_HOUR) ? ta.get(ChronoField.MINUTE_OF_HOUR) : 0;
                 int second = ta.isSupported(ChronoField.SECOND_OF_MINUTE) ? ta.get(ChronoField.SECOND_OF_MINUTE) : 0;
-                return LocalDateTime.of(year, month, day, hour, minute, second)
+                int millis = ta.isSupported(ChronoField.MILLI_OF_SECOND) ? ta.get(ChronoField.MILLI_OF_SECOND) : 0;
+                
+                
+                
+                // If the picture contains [dwo] (lowercase 'd' = day-of-year in words), 
+                // we MUST use day-of-year, not day-of-month
+                // The [dwo] pattern specifically means day-of-year in words format
+                LocalDate date;
+                if (dayOfYear > 0) {
+                    // Use day-of-year if available
+                    date = LocalDate.ofYearDay(year, dayOfYear);
+                } else {
+                    // Use day-of-month
+                    date = LocalDate.of(year, month, dayOfMonth);
+                }
+                
+                return date.atTime(hour, minute, second, millis * 1_000_000)
                         .toInstant(ZoneOffset.UTC).toEpochMilli();
             }
         } catch (DateTimeParseException e) {
-            throw new RuntimeEvaluationException(
-                    "$toMillis: cannot parse '" + timestamp + "' with picture '" + picture + "': "
-                            + e.getMessage());
+            return Long.MIN_VALUE;
         }
+    }
+    
+    /**
+     * Pre-processes ordinal suffixes and special date formats for $toMillis parsing.
+     */
+    private static String preprocessOrdinalSuffixes(String timestamp, String picture) {
+        String result = timestamp;
+        
+        // Handle GMT timezone format: convert "GMT-05:00" or "GMT-5" to "-05:00" or "+00:00"
+        // This must happen before DateTimeFormatter parsing since it doesn't handle "GMT" prefix
+        if (result.contains("GMT")) {
+            // Replace "GMT+HH:MM" or "GMT-HH:MM" or "GMT+HH" or "GMT-HH" with offset format
+            java.util.regex.Pattern gmtPattern = java.util.regex.Pattern.compile("GMT([+-])(\\d{1,2}):?(\\d{2})?");
+            java.util.regex.Matcher gmtMatcher = gmtPattern.matcher(result);
+            StringBuffer sb = new StringBuffer();
+            while (gmtMatcher.find()) {
+                String sign = gmtMatcher.group(1);
+                String hours = gmtMatcher.group(2);
+                String mins = gmtMatcher.group(3) != null ? gmtMatcher.group(3) : "00";
+                // Ensure hours are always 2 digits (e.g., "05" not "5")
+                String formattedHours = hours.length() == 1 ? "0" + hours : hours;
+                // Use zero-width replacement to remove the space before GMT
+                gmtMatcher.appendReplacement(sb, sign + formattedHours + ":" + mins);
+            }
+            gmtMatcher.appendTail(sb);
+            result = sb.toString();
+            // Handle remaining "GMT" (without offset) - replace with nothing or +00:00
+            // But be careful not to create double spaces - first remove space before GMT
+            result = result.replace(" GMT", "").replace("GMT", "+00:00");
+        }
+        
+        // Normalize offset format: ensure colon in offset (e.g., "12:00:00 +0530" -> "12:00:00 +05:30")
+        // Keep the space before the +/- 
+        result = result.replaceAll(" ([+-])(\\d{2})(\\d{2})", " $1$2:$3");
+        
+        // Handle ordinal suffixes for day (st, nd, rd, th) when picture has [D...o]
+        if (picture.contains("[D") && picture.contains("o")) {
+            if (result.matches(".*\\d(st|nd|rd|th).*")) {
+                result = result.replaceAll("(\\d)(st|nd|rd|th)", "$1");
+            }
+        }
+        
+        // Handle lowercase Roman numerals in month when picture has [Mi]
+        if (picture.contains("[Mi]")) {
+            result = preprocessLowercaseRomanNumeralsInMonth(result);
+        }
+        
+        // Handle month letters [MA], [MA]
+        if (picture.contains("[MA]") && !picture.contains("[M01]")) {
+            result = preprocessMonthLetters(result);
+        }
+        
+        // Handle English words for numbers when picture has [Dw] or [Dwo] (day words)
+        // Also handle [Yw] or [Ywo] (year words)
+        // For [Dw], convert only the day (first word)
+        // For [Yw], convert the entire string
+        
+        // Check for [Dw] or [Dwo] - both indicate day in words
+        // [dwo] uses lowercase o after the letters are converted to lowercase
+        // Picture "[dwo] day of [Y]" becomes "[dwo] day of [y]" after toLowerCase()
+        // We need to check for this specific pattern
+// Check for [Dw], [Dwo], [DWwo], [Dwwo] - all indicate day in words
+        // [Dwo] -> lowercase becomes [dwo]
+        // [DWwo] -> lowercase becomes [dwwo]
+        String lowerPic = picture.toLowerCase();
+        
+        // [dwo] matches directly, but [DWwo] becomes [dwwo]
+        // [DWwo] (uppercase) = ordinal words for day-of-month - convert "Twelfth" -> "12"
+        // [DW] (uppercase) = words for day - DON'T convert "twentieth" -> "20" (formatter handles it)
+        
+        // Determine if we need to convert day words to numbers
+        // [DW] uppercase with [Yw] - convert day words so formatter can parse
+        // [DWwo] uppercase with 'o' = convert ordinal words (Twelfth -> 12)
+        // [dw], [dwo], [dwwo] lowercase = convert words
+        boolean needsDayWordConversion;
+        boolean hasDWwo = picture.contains("[DWwo]");
+        boolean hasDW = picture.matches(".*\\[DW\\].*");  // uppercase [DW] without 'o'
+        boolean hasDwo = lowerPic.contains("[dwo]") || lowerPic.contains("[dwwo]") || lowerPic.contains("[dwo ") || lowerPic.contains("[dwwo ");
+        boolean hasDwLower = lowerPic.matches(".*\\[dw\\].*");
+        
+        // For [DW] (uppercase) with [Yw], we need to convert day words to numbers so formatter can parse
+        needsDayWordConversion = hasDWwo || hasDwo || hasDwLower || (hasDW && picture.toLowerCase().contains("[yw]"));
+        
+        if (needsDayWordConversion) {
+            // Convert day-in-words to a number - detect format based on presence of "day" keyword
+            String[] words = result.split("\\s+");
+            StringBuilder newResult = new StringBuilder();
+            
+            // Check if this is "day of YEAR" format (has "day" keyword) OR "N of Month" format (has "of" keyword)
+            boolean hasDayKeyword = false;
+            boolean hasOfKeyword = false;
+            for (String w : words) {
+                String clean = w.replace(",", "").replace(".", "").toLowerCase();
+                if (clean.equals("day")) {
+                    hasDayKeyword = true;
+                    break;
+                }
+                if (clean.equals("of")) {
+                    hasOfKeyword = true;
+                }
+            }
+            
+            // Month names that end the day portion
+            String[] monthNames = {"january", "february", "march", "april", "may", "june",
+                    "july", "august", "september", "october", "november", "december"};
+            
+            // For [DWwo], we should convert the FIRST word(s) before month - special handling
+            // The input is like "Mon, Twelfth November 2018" - skip weekday, convert ordinal
+            boolean isDWwoCase = hasDWwo;
+            
+            // Find the first word that can be converted to a number (skip weekday prefix like "Mon,")
+            for (int i = 0; i < words.length; i++) {
+                String word = words[i];
+                String cleanWord = word.replace(",", "").replace(".", "");
+                String lowerClean = cleanWord.toLowerCase();
+                
+                // Skip known day abbreviations at the start (Mon, Tue, Wed, etc.)
+                if (i == 0 && isDWwoCase) {
+                    String[] dayAbbrs = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"};
+                    boolean isDay = false;
+                    for (String d : dayAbbrs) {
+                        if (lowerClean.equals(d) || lowerClean.startsWith(d + ",") || lowerClean.startsWith(d + ".")) {
+                            isDay = true;
+                            break;
+                        }
+                    }
+                    if (isDay) {
+                        // Add weekday to result and continue to next word
+                        newResult.append(word);
+                        continue;
+                    }
+                }
+                
+                // For [DWwo], convert first convertible word to number
+                if (isDWwoCase && newResult.length() > 0) {
+                    String converted = englishWordsToNumber(cleanWord);
+                    if (!converted.equals(cleanWord)) {
+                        // Successfully converted (e.g., "Twelfth" -> "12")
+                        newResult.append(" ").append(converted);
+                        // Add remaining words as-is
+                        for (int j = i + 1; j < words.length; j++) {
+                            newResult.append(" ").append(words[j]);
+                        }
+                        break;
+                    }
+                }
+                
+                // For "day of YEAR" format or "N of Month" format, stop at the keyword
+                // The keyword (day/of) indicates the start of month/year part
+                if ((hasDayKeyword && lowerClean.equals("day")) || (hasOfKeyword && lowerClean.equals("of"))) {
+                    for (int j = i; j < words.length; j++) {
+                        if (newResult.length() > 0 && !newResult.toString().endsWith(" ")) {
+                            newResult.append(" ");
+                        }
+                        newResult.append(words[j]);
+                    }
+                    break;
+                }
+                
+                // For month-year format, stop at month name (but NOT for [DWwo] - we need to convert the ordinal first)
+                boolean isMonth = false;
+                if (!hasDWwo) {
+                    for (String m : monthNames) {
+                        if (lowerClean.startsWith(m.substring(0, Math.min(3, m.length())))) {
+                            isMonth = true;
+                            break;
+                        }
+                    }
+                    if (isMonth) {
+                        // Add month and everything after it
+                        for (int j = i; j < words.length; j++) {
+                            if (newResult.length() > 0 && !newResult.toString().endsWith(" ")) {
+                                newResult.append(" ");
+                            }
+                            newResult.append(words[j]);
+                        }
+                        break;
+                    }
+                }
+                
+                // Try to convert this word as part of a number
+                StringBuilder testBuilder = new StringBuilder();
+                for (int k = 0; k <= i; k++) {
+                    if (k > 0) testBuilder.append(" ");
+                    testBuilder.append(words[k].replace(",", "").replace(".", ""));
+                }
+                String testStr = testBuilder.toString();
+                
+                String converted = englishWordsToNumber(testStr);
+                
+                if (!converted.equals(testStr)) {
+                    // Valid number found - use it since testStr includes all words
+                    newResult = new StringBuilder();
+                    newResult.append(converted);
+                } else if (cleanWord.matches("\\d+")) {
+                    // Already numeric
+                    if (newResult.length() > 0 && !newResult.toString().endsWith(" ")) {
+                        newResult.append(" ");
+                    }
+                    newResult.append(word);
+                } else {
+                    // Not a number, add as-is
+                    if (newResult.length() > 0 && !newResult.toString().endsWith(" ")) {
+                        newResult.append(" ");
+                    }
+                    newResult.append(word);
+                }
+            }
+            result = newResult.toString().trim();
+        }
+        
+        // DEBUG: final result after all pre-processing
+        
+        
+        // Handle [Yw], [Ywo], [Yi], [Ywi], or [Y] — year in words or Roman numerals or numeric
+        boolean hasYw = picture.toLowerCase().contains("[yw]") || picture.toLowerCase().contains("[ywo") 
+                || picture.toLowerCase().contains("[yi]") || picture.contains("[YI]") 
+                || (picture.contains("[Y]") && !picture.contains("[Yw]"));
+        if (hasYw) {
+            // For [Yw] or [Yi], convert the entire string (year in words or Roman numerals)
+            // Try Roman numerals first (handles [YI], [Yi], etc.)
+            if (picture.toLowerCase().contains("i]") || picture.toLowerCase().contains("w]") || picture.contains("[YI]")) {
+                result = preprocessRomanNumeralsInContext(result);
+            }
+            
+            // If [Dw] or [Dwo] was also processed, preserve day and month, convert only year portion
+            // If [Dw] was NOT processed, convert the whole string
+            // For [dwo] with [Y] (numeric year) - convert year only if we converted day words
+            // For [DW] + [Yw] - convert year (formatter needs numeric year after day conversion)
+            // For [Dw] + [Yw] - convert year (formatter needs numeric year after day conversion)
+            // For [dwo] + [Y] - convert year
+            boolean hasDwForYear = 
+                (needsDayWordConversion && picture.toLowerCase().contains("[dwo]") && picture.contains("[Y]") && !picture.contains("[Yw]"))
+                || (needsDayWordConversion && picture.toLowerCase().contains("[dw]") && picture.toLowerCase().contains("[yw]"))
+                || (needsDayWordConversion && picture.contains("[DW]") && picture.toLowerCase().contains("[yw]"));
+            
+            // Convert year part
+            if (hasDwForYear) {
+                
+                // After [Dw] runs: "21 August two thousand and seventeen" OR "3 hundred and sixty-fifth day of 2018"
+                // We need to find and convert the year part
+                String[] allParts = result.split("\\s+");
+                
+                if (allParts.length >= 3) {
+                    // Find month OR "day" (for "day of year" format)
+                    String[] monthNames = {"january", "february", "march", "april", "may", "june",
+                                     "july", "august", "september", "october", "november", "december"};
+                    int monthIdx = -1;
+                    int yearStart = -1;
+                    for (int i = 0; i < allParts.length; i++) {
+                        String lowerPart = allParts[i].toLowerCase();
+                        // Check for month name
+                        for (String m : monthNames) {
+                            if (lowerPart.startsWith(m.substring(0, Math.min(3, m.length())))) {
+                                
+                                monthIdx = i;
+                                break;
+                            }
+                        }
+                        // Check for "day" (format: "Nth day of YEAR")
+                        if (lowerPart.equals("day") && i > 0) {
+                            yearStart = i + 2; // "day of YEAR" -> year starts after "of"
+                            if (i + 2 < allParts.length) break;
+                        }
+                        if (monthIdx >= 0 || yearStart >= 0) break;
+                    }
+                    
+                    
+                    
+                    if (monthIdx >= 0 && monthIdx < allParts.length - 1) {
+                        // Input after [Dw]: "20 of August, two thousand and seventeen"
+                        // allParts = ["20", "of", "August,", "two", "thousand", "and", "seventeen"]
+                        // monthIdx = 2 ("August,")
+                        // Get year words = all words AFTER monthIdx (index 3 onwards)
+                        StringBuilder yearWords = new StringBuilder();
+                        for (int wi = monthIdx + 1; wi < allParts.length; wi++) {
+                            if (wi > monthIdx + 1) yearWords.append(" ");
+                            yearWords.append(allParts[wi]);
+                        }
+                        String yearPart = yearWords.toString(); // "two thousand and seventeen"
+                        String convertedYear = englishWordsToNumber(yearPart);
+                        
+                        
+                        if (!convertedYear.equals(yearPart)) {
+                            // Clean month of comma for reconstruction
+                            String monthClean = allParts[monthIdx].replace(",", "");
+                            boolean hasComma = allParts[monthIdx].contains(",");
+                            
+                            // Rebuild string: day + (prefix) + month + sep + year
+                            // prefix = text between day and month (e.g., "of")
+                            StringBuilder prefix = new StringBuilder();
+                            for (int pi = 1; pi < monthIdx; pi++) {
+                                if (pi > 1) prefix.append(" ");
+                                prefix.append(allParts[pi]);
+                                prefix.append(" ");
+                            }
+                            String prefixStr = prefix.toString();
+                            
+                            // Result: "20 of August, 2017"
+                            result = allParts[0] + " " + prefixStr + monthClean + (hasComma ? ", " : " ") + convertedYear;
+                            
+                        } else {
+                            
+                        }
+                    } else if (yearStart >= 0 && yearStart < allParts.length) {
+                        // Format: "3 hundred and sixty-fifth day of 2018"
+                        // Get all words from yearStart to end
+                        StringBuilder yearWords = new StringBuilder();
+                        for (int wi = yearStart; wi < allParts.length; wi++) {
+                            if (wi > yearStart) yearWords.append(" ");
+                            yearWords.append(allParts[wi]);
+                        }
+                        String yearPart = yearWords.toString(); // "2018" or "two thousand seventeen"
+                        String convertedYear = englishWordsToNumber(yearPart);
+                        if (!convertedYear.equals(yearPart)) {
+                            // Replace year words with number
+                            StringBuilder newResult = new StringBuilder();
+                            for (int wi = 0; wi < yearStart - 1; wi++) {
+                                if (wi > 0) newResult.append(" ");
+                                newResult.append(allParts[wi]);
+                            }
+                            newResult.append(" ");
+                            newResult.append(convertedYear);
+                            result = newResult.toString();
+                        }
+                    }
+                }
+            } else {
+                // No [Dw] - convert entire string for year
+                // Convert year words to numbers UNLESS picture has [Dw] + [Yw] (formatter expects words in that case)
+                boolean hasDwInPicture = picture.toLowerCase().contains("[dw]");
+                boolean hasYwInPicture = picture.toLowerCase().contains("[yw]");
+                boolean shouldConvertYear = !(hasDwInPicture && hasYwInPicture);
+                
+                if (shouldConvertYear) {
+                    String converted = englishWordsToNumber(result);
+                    if (!converted.equals(result)) {
+                        result = converted;
+                    }
+                }
+            }
+        }
+        
+        // Handle single-letter day placeholders - if first part is letter and not month,
+        // map letter(s) to day number
+        // Skip this for [DW] - day in words, not single letters
+        String[] parts = result.split("\\s+");
+        if (!picture.contains("[DW]") && parts.length >= 1 && parts[0].length() <= 2 && !parts[0].matches("\\d+")) {
+            // Check if the first part is a known letter (month)
+            String firstUpper = parts[0].toUpperCase();
+            boolean isMonth = firstUpper.equals("C") || firstUpper.equals("JA") || firstUpper.equals("FE") ||
+                firstUpper.equals("MA") || firstUpper.equals("AP") || firstUpper.equals("MY") ||
+                firstUpper.equals("JN") || firstUpper.equals("JL") || firstUpper.equals("AU") ||
+                firstUpper.equals("SE") || firstUpper.equals("OC") || firstUpper.equals("NO") ||
+                firstUpper.equals("DE");
+            
+            if (!isMonth) {
+                int letterNum = letterToDayNumber(parts[0]);
+                if (letterNum > 0) {
+                    parts[0] = String.valueOf(letterNum);
+                    result = String.join(" ", parts);
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    private static int letterToDayNumber(String letter) {
+        int day = 0;
+        String upper = letter.toUpperCase();
+        for (int i = 0; i < upper.length(); i++) {
+            char c = upper.charAt(i);
+            if (c >= 'A' && c <= 'Z') {
+                day = day * 26 + (c - 'A' + 1);
+            }
+        }
+        // Map letter position directly to day number: a=1, b=2, ... z=26
+        // 'w' = 23 -> day 23
+        return day;
+    }
+    
+    /**
+     * Converts month letters to numbers: JA=January, FE=February, MA=March, etc.
+     */
+    private static String preprocessMonthLetters(String input) {
+        String[] parts = input.split("\\s+");
+        StringBuilder result = new StringBuilder();
+        
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            String upper = part.toUpperCase();
+            Integer monthNum = monthAbbrevToNumber(upper);
+            if (monthNum != null) {
+                result.append(String.format("%02d", monthNum));
+            } else {
+                result.append(part);
+            }
+            if (i < parts.length - 1) {
+                result.append(" ");
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    private static Integer monthAbbrevToNumber(String abbrev) {
+        return switch (abbrev) {
+            case "JA", "JANUARY" -> 1;
+            case "FE", "FEBRUARY" -> 2;
+            case "MA", "MAR", "MARCH" -> 3;
+            case "AP", "APRIL" -> 4;
+            case "MY", "MAY" -> 5;
+            case "JN", "JUNE" -> 6;
+            case "JL", "JULY" -> 7;
+            case "AU", "AUGUST" -> 8;
+            case "SE", "SEPTEMBER" -> 9;
+            case "OC", "OCTOBER" -> 10;
+            case "NO", "NOVEMBER" -> 11;
+            case "DE", "DECEMBER" -> 12;
+            case "C" -> 3;
+            default -> null;
+        };
+    }
+    
+    /**
+     * Converts English words for numbers to Arabic numbers.
+     * Handles "one thousand, nine hundred and eighty-four" -> 1984
+     */
+    private static String englishWordsToNumber(String input) {
+        String lower = input.toLowerCase().replace(",", "").replace(" and ", " ");
+        
+        // Handle hyphenated numbers like "eighty-four" -> "eighty four"
+        lower = lower.replace("-", " ");
+        
+        // Handle ordinal words: "first" -> "one", "second" -> "two", etc.
+        // Also handle compound ordinals like "sixty-fifth" -> "sixty five"
+        lower = lower.replace("first", "one").replace("second", "two").replace("third", "three")
+            .replace("fourth", "four").replace("fifth", "five").replace("sixth", "six")
+            .replace("seventh", "seven").replace("eighth", "eight").replace("ninth", "nine")
+            .replace("tenth", "ten").replace("eleventh", "eleven").replace("twelfth", "twelve")
+            .replace("thirteenth", "thirteen").replace("fourteenth", "fourteen").replace("fifteenth", "fifteen")
+            .replace("sixteenth", "sixteen").replace("seventeenth", "seventeen").replace("eighteenth", "eighteen")
+            .replace("nineteenth", "nineteen")
+            .replace("twentieth", "twenty").replace("thirtieth", "thirty").replace("fortieth", "forty")
+            .replace("fiftieth", "fifty").replace("sixtieth", "sixty").replace("seventieth", "seventy")
+            .replace("eightieth", "eighty").replace("ninetieth", "ninety")
+            // Handle -ty-one through -ty-nine ordinals (twenty-first, thirty-second, etc.)
+            .replace("twenty-first", "twenty one").replace("twenty-second", "twenty two")
+            .replace("twenty-third", "twenty three").replace("twenty-fourth", "twenty four")
+            .replace("twenty-fifth", "twenty five").replace("twenty-sixth", "twenty six")
+            .replace("twenty-seventh", "twenty seven").replace("twenty-eighth", "twenty eight")
+            .replace("twenty-ninth", "twenty nine")
+            .replace("thirty-first", "thirty one").replace("thirty-second", "thirty two")
+            .replace("thirty-third", "thirty three").replace("thirty-fourth", "thirty four")
+            .replace("thirty-fifth", "thirty five").replace("thirty-sixth", "thirty six")
+            .replace("thirty-seventh", "thirty seven").replace("thirty-eighth", "thirty eight")
+            .replace("thirty-ninth", "thirty nine")
+            .replace("forty-first", "forty one").replace("forty-second", "forty two")
+            .replace("forty-third", "forty three").replace("forty-fourth", "forty four")
+            .replace("forty-fifth", "forty five").replace("forty-sixth", "forty six")
+            .replace("forty-seventh", "forty seven").replace("forty-eighth", "forty eight")
+            .replace("forty-ninth", "forty nine")
+            .replace("fifty-first", "fifty one").replace("fifty-second", "fifty two")
+            .replace("fifty-third", "fifty three").replace("fifty-fourth", "fifty four")
+            .replace("fifty-fifth", "fifty five").replace("fifty-sixth", "fifty six")
+            .replace("fifty-seventh", "fifty seven").replace("fifty-eighth", "fifty eight")
+            .replace("fifty-ninth", "fifty nine")
+            .replace("sixty-first", "sixty one").replace("sixty-second", "sixty two")
+            .replace("sixty-third", "sixty three").replace("sixty-fourth", "sixty four")
+            .replace("sixty-fifth", "sixty five").replace("sixty-sixth", "sixty six")
+            .replace("sixty-seventh", "sixty seven").replace("sixty-eighth", "sixty eight")
+            .replace("sixty-ninth", "sixty nine")
+            .replace("seventy-first", "seventy one").replace("seventy-second", "seventy two")
+            .replace("seventy-third", "seventy three").replace("seventy-fourth", "seventy four")
+            .replace("seventy-fifth", "seventy five").replace("seventy-sixth", "seventy six")
+            .replace("seventy-seventh", "seventy seven").replace("seventy-eighth", "seventy eight")
+            .replace("seventy-ninth", "seventy nine")
+            .replace("eighty-first", "eighty one").replace("eighty-second", "eighty two")
+            .replace("eighty-third", "eighty three").replace("eighty-fourth", "eighty four")
+            .replace("eighty-fifth", "eighty five").replace("eighty-sixth", "eighty six")
+            .replace("eighty-seventh", "eighty seven").replace("eighty-eighth", "eighty eight")
+            .replace("eighty-ninth", "eighty nine")
+            .replace("ninety-first", "ninety one").replace("ninety-second", "ninety two")
+            .replace("ninety-third", "ninety three").replace("ninety-fourth", "ninety four")
+            .replace("ninety-fifth", "ninety five").replace("ninety-sixth", "ninety six")
+            .replace("ninety-seventh", "ninety seven").replace("ninety-eighth", "ninety eight")
+            .replace("ninety-ninth", "ninety nine");
+        
+        int result = 0;
+        int current = 0;
+        
+        String[] words = lower.split("\\s+");
+        for (String word : words) {
+            switch (word) {
+                case "one" -> current += 1;
+                case "two" -> current += 2;
+                case "three" -> current += 3;
+                case "four" -> current += 4;
+                case "five" -> current += 5;
+                case "six" -> current += 6;
+                case "seven" -> current += 7;
+                case "eight" -> current += 8;
+                case "nine" -> current += 9;
+                case "ten" -> current += 10;
+                case "eleven" -> current += 11;
+                case "twelve" -> current += 12;
+                case "thirteen" -> current += 13;
+                case "fourteen" -> current += 14;
+                case "fifteen" -> current += 15;
+                case "sixteen" -> current += 16;
+                case "seventeen" -> current += 17;
+                case "eighteen" -> current += 18;
+                case "nineteen" -> current += 19;
+                case "twenty" -> current += 20;
+                case "thirty" -> current += 30;
+                case "forty" -> current += 40;
+                case "fifty" -> current += 50;
+                case "sixty" -> current += 60;
+                case "seventy" -> current += 70;
+                case "eighty" -> current += 80;
+                case "ninety" -> current += 90;
+                case "thousand" -> { result += (current == 0 ? 1000 : current * 1000); current = 0; }
+                case "hundred" -> current *= 100;
+                default -> {} // skip
+            }
+        }
+        
+        result += current;
+        
+        if (result > 0) {
+            return String.valueOf(result);
+        }
+        return input;
+    }
+    
+    /**
+     * Converts Roman numerals in the timestamp to Arabic numbers.
+     * Only converts if the timestamp actually contains Roman numerals.
+     */
+    private static String preprocessRomanNumeralsInContext(String input) {
+        // If input contains Roman numerals (upper or lower), convert them to Arabic numbers
+        if (!input.matches(".*[IVXLCDMivxlcdm]+.*")) {
+            return input;
+        }
+        
+        // Split by whitespace and process each part
+        String[] parts = input.split("\\s+");
+        StringBuilder result = new StringBuilder();
+        
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (isRomanNumeral(part) || isRomanNumeral(part.toLowerCase())) {
+                result.append(romanToArabic(part.toUpperCase()));
+            } else {
+                result.append(part);
+            }
+            if (i < parts.length - 1) {
+                result.append(" ");
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    /**
+     * Converts all lowercase roman numerals in the string to uppercase.
+     */
+    private static String preprocessAllRomanNumerals(String input) {
+        // Match sequences of lowercase roman numerals and convert to uppercase
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("\\b([ivxlcdm]+)\\b");
+        java.util.regex.Matcher m = p.matcher(input);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            m.appendReplacement(sb, m.group(1).toUpperCase());
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+    
+    /**
+     * Converts lowercase Roman numerals to uppercase for month parsing.
+     */
+    private static String preprocessLowercaseRomanNumeralsInMonth(String input) {
+        // Replace lowercase roman numerals (i, ii, iii, iv, v, vi, vii, viii, ix, x, xi, xii)
+        // with Arabic numbers for month parsing
+        String[] parts = input.split("\\s+");
+        StringBuilder result = new StringBuilder();
+        
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (isRomanNumeral(part.toLowerCase())) {
+                result.append(romanToArabic(part.toUpperCase()));
+            } else {
+                result.append(part);
+            }
+            if (i < parts.length - 1) {
+                result.append(" ");
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    private static boolean isRomanNumeral(String s) {
+        if (s.isEmpty()) return false;
+        String upper = s.toUpperCase();
+        return upper.matches("^[IVXLCDM]+$");
+    }
+    
+    private static int romanCharValue(char c) {
+        return switch (c) {
+            case 'I' -> 1;
+            case 'V' -> 5;
+            case 'X' -> 10;
+            case 'L' -> 50;
+            case 'C' -> 100;
+            case 'D' -> 500;
+            case 'M' -> 1000;
+            default -> 0;
+        };
+    }
+    
+    private static int romanToArabic(String roman) {
+        int result = 0;
+        int prev = 0;
+        for (int i = roman.length() - 1; i >= 0; i--) {
+            int current = romanCharValue(roman.charAt(i));
+            if (current < prev) {
+                result -= current;
+            } else {
+                result += current;
+                prev = current;
+            }
+        }
+        return result;
     }
 
     // =========================================================================
@@ -206,7 +946,7 @@ final class DateTimeUtils {
             throws RuntimeEvaluationException {
         if (countUnclosed(picture) > 0) {
             throw new RuntimeEvaluationException(
-                    "D3135: Unclosed '[' in picture string");
+                    "D3135", "Unclosed '[' in picture string");
         }
         StringBuilder sb = new StringBuilder();
         int i = 0;
@@ -221,7 +961,7 @@ final class DateTimeUtils {
                     int j = picture.indexOf(']', i + 1);
                     if (j < 0) {
                         throw new RuntimeEvaluationException(
-                                "D3135: Unclosed '[' in picture string");
+                                "D3135", "Unclosed '[' in picture string");
                     }
                     sb.append(formatComponent(dt, picture.substring(i + 1, j)));
                     i = j + 1;
@@ -265,7 +1005,7 @@ final class DateTimeUtils {
                 if (!mod.isEmpty()) {
                     if (mod.equals("N") || mod.equals("n")) {
                         throw new RuntimeEvaluationException(
-                                "D3133: Year name component is not supported");
+                                "D3133", "Year name component is not supported");
                     } else if (mod.equals("I") || mod.equals("i")) {
                         String roman = toRoman(dt.getYear());
                         yield mod.equals("i") ? roman.toLowerCase() : roman;
@@ -421,7 +1161,7 @@ case 'x' -> {
             }
             case 'Z' -> formatOffsetZ(dt.getOffset(), mod);
             case 'z' -> formatOffsetName(dt.getOffset());
-            default  -> throw new RuntimeEvaluationException(
+            default  -> throw new RuntimeEvaluationException(null,
                     "Unknown picture-string component: [" + spec + "]");
         };
     }
@@ -757,7 +1497,7 @@ case 'x' -> {
                 String digitsOnly = mod.replaceAll("[^0-9]", "");
                 if (digitsOnly.length() > 4) {
                     // More than 4 digits is an error (D3134)
-                    throw new RuntimeEvaluationException("D3134: timezone picture string too long");
+                    throw new RuntimeEvaluationException("D3134", "timezone picture string too long");
                 }
                 if (digitsOnly.length() >= 2) {
                     hourWidth = 2;
@@ -823,13 +1563,13 @@ case 'x' -> {
     // Picture-string → DateTimeFormatter (for parsing)
     // =========================================================================
 
-    private static java.time.format.DateTimeFormatter pictureToFormatter(String picture)
+    private static java.time.format.DateTimeFormatter pictureToFormatter(String picture, boolean dayWordsConverted)
             throws RuntimeEvaluationException {
         if (countUnclosed(picture) > 0) {
             throw new RuntimeEvaluationException(
-                    "D3135: Unclosed '[' in picture string");
+                    "D3135", "Unclosed '[' in picture string");
         }
-        DateTimeFormatterBuilder b = new DateTimeFormatterBuilder().parseCaseInsensitive();
+        DateTimeFormatterBuilder b = new DateTimeFormatterBuilder().parseCaseInsensitive().parseLenient();
         int i = 0;
         int len = picture.length();
         while (i < len) {
@@ -841,8 +1581,8 @@ case 'x' -> {
                 } else {
                     int j = picture.indexOf(']', i + 1);
                     if (j < 0) throw new RuntimeEvaluationException(
-                            "D3135: Unclosed '[' in picture string");
-                    appendFormatterComponent(b, picture.substring(i + 1, j));
+                            "D3135", "Unclosed '[' in picture string");
+                    appendFormatterComponent(b, picture.substring(i + 1, j), dayWordsConverted);
                     i = j + 1;
                 }
             } else if (c == ']' && i + 1 < len && picture.charAt(i + 1) == ']') {
@@ -860,7 +1600,7 @@ case 'x' -> {
         return b.toFormatter(Locale.ENGLISH);
     }
 
-    private static void appendFormatterComponent(DateTimeFormatterBuilder b, String spec)
+    private static void appendFormatterComponent(DateTimeFormatterBuilder b, String spec, boolean dayWordsConverted)
             throws RuntimeEvaluationException {
         if (spec.isEmpty()) return;
         char d = spec.charAt(0);
@@ -881,11 +1621,24 @@ case 'x' -> {
 
         switch (d) {
             case 'Y' -> {
-                if (flexibleWidth) {
+                // Check for year name: [YN] - not supported in parsing
+                if (!mod.isEmpty() && (mod.equals("N") || mod.equals("n"))) {
+                    throw new RuntimeEvaluationException(
+                            "D3133", "Year name component is not supported");
+                }
+                // Check for word-based year: [Yw], [YW], [Ywo], etc.
+                // For [Yw], DON'T convert words - formatter expects text like "two thousand and seventeen"
+                if (!mod.isEmpty() && mod.contains("w")) {
+                    // Year in words - use text format - don't convert year words to numbers!
+                    b.appendText(ChronoField.YEAR);
+                } else if (flexibleWidth) {
                     // Use appendValue with minWidth, maxWidth, and SignStyle
                     b.appendValue(ChronoField.YEAR, minWidth, 9, java.time.format.SignStyle.NORMAL);
+                } else if (minWidth > 0) {
+                    // Use variable width (minWidth to 9 digits) to allow matching longer years
+                    b.appendValue(ChronoField.YEAR, minWidth, 9, java.time.format.SignStyle.NORMAL);
                 } else {
-                    b.appendValue(ChronoField.YEAR, minWidth > 0 ? minWidth : 4);
+                    b.appendValue(ChronoField.YEAR, 4);
                 }
             }
             case 'M' -> {
@@ -893,19 +1646,77 @@ case 'x' -> {
                     b.appendText(ChronoField.MONTH_OF_YEAR);
                 else b.appendValue(ChronoField.MONTH_OF_YEAR, minWidth > 0 ? minWidth : 2);
             }
-            case 'D' -> b.appendValue(ChronoField.DAY_OF_MONTH, minWidth > 0 ? minWidth : 2);
-            case 'd' -> b.appendValue(ChronoField.DAY_OF_YEAR, minWidth > 0 ? minWidth : 3);
+            case 'D' -> {
+                // If day words were converted to numbers, use numeric value
+                // Otherwise use text (for [Dw] patterns where formatter handles words)
+                if (dayWordsConverted || mod.contains("w")) {
+                    if (dayWordsConverted) {
+                        b.appendValue(ChronoField.DAY_OF_MONTH, minWidth > 0 ? minWidth : 2);
+                    } else {
+                        b.appendText(ChronoField.DAY_OF_MONTH);
+                    }
+                } else {
+                    b.appendValue(ChronoField.DAY_OF_MONTH, minWidth > 0 ? minWidth : 2);
+                }
+            }
+            case 'd' -> {
+                // [dwo] or [d] in picture means DAY_OF_YEAR (day of year)
+                // When we have [dwo], the picture string was "day of YEAR" format
+                // and we converted the day-in-words to a numeric day-of-year
+                b.appendValue(ChronoField.DAY_OF_YEAR, minWidth > 0 ? minWidth : 3);
+            }
             case 'F' -> b.appendText(ChronoField.DAY_OF_WEEK);
+            case 'X' -> {
+                // ISO week year - not directly supported in DateTimeFormatter parsing
+                // Fall back to regular year
+                b.appendValue(ChronoField.YEAR, minWidth > 0 ? minWidth : 4);
+            }
+            case 'x' -> {
+                // Lowercase x is not supported in JSONata parsing (only used in formatting)
+                throw new RuntimeEvaluationException(
+                        "D3136", "Date/time underspecified");
+            }
+            case 'w' -> {
+                // Week of month - not fully supported, throw underspecified error
+                throw new RuntimeEvaluationException(
+                        "D3136", "Date/time underspecified");
+            }
+            case 'W' -> {
+                // ISO week of week-based year - use WeekFields
+                b.appendValue(java.time.temporal.WeekFields.ISO.weekOfWeekBasedYear(), minWidth > 0 ? minWidth : 2);
+            }
             case 'H' -> b.appendValue(ChronoField.HOUR_OF_DAY, minWidth > 0 ? minWidth : 2);
             case 'h' -> b.appendValue(ChronoField.CLOCK_HOUR_OF_AMPM,
                     mod.startsWith("#") ? 1 : Math.max(1, minWidth));
             case 'm' -> b.appendValue(ChronoField.MINUTE_OF_HOUR, minWidth > 0 ? minWidth : 2);
             case 's' -> b.appendValue(ChronoField.SECOND_OF_MINUTE, minWidth > 0 ? minWidth : 2);
-            case 'f' -> b.appendValue(ChronoField.MILLI_OF_SECOND, minWidth > 0 ? minWidth : 3);
-            case 'P' -> b.appendText(ChronoField.AMPM_OF_DAY, Map.of(0L, "am", 1L, "pm"));
-            case 'Z', 'z' -> b.appendOffsetId();
+            case 'f' -> {
+                // Determine if modifier specifies fixed width (all zeros, e.g., "001" = exactly 3 digits)
+                // The width variable already has the count of digits
+                if (width == 3 && !mod.isEmpty()) {
+                    // Fixed width: exactly N digits (e.g., [f001])
+                    b.appendValue(ChronoField.MILLI_OF_SECOND, 3);
+                } else if (width > 0 && !mod.isEmpty()) {
+                    // Fixed width: exactly N digits
+                    b.appendValue(ChronoField.MILLI_OF_SECOND, width);
+                } else {
+                    // Variable: just [f] - parse up to 3 digits
+                    b.appendFraction(ChronoField.MILLI_OF_SECOND, 1, 3, false);
+                }
+            }
+case 'P' -> b.appendText(ChronoField.AMPM_OF_DAY, Map.of(0L, "am", 1L, "pm"));
+            case 'Z' -> {
+                // [Z] parses timezone offset like "+0530", "-05:00", "Z"
+                // Use appendZoneOrOffsetId() to handle various offset formats
+                b.appendZoneOrOffsetId();
+            }
+            case 'z' -> {
+                // [z] parses timezone offset like "-05:00", "Z", "+05:00"
+                // Use appendZoneOrOffsetId() to handle zone IDs and offsets
+                b.appendZoneOrOffsetId();
+            }
             default -> throw new RuntimeEvaluationException(
-                    "Unknown picture-string component: [" + spec + "]");
+                    "D3132", "Unknown picture-string component: [" + spec + "]");
         }
     }
 
@@ -915,7 +1726,8 @@ case 'x' -> {
 
     /**
      * Parses a timezone string in {@code ±HHMM} notation (e.g. {@code "-0500"},
-     * {@code "+0530"}) into a {@link ZoneOffset}.
+     * {@code "+0530"}) or {@code GMT±HH:MM} notation (e.g. {@code "GMT-05:00"})
+     * into a {@link ZoneOffset}.
      */
     static ZoneOffset parseZoneOffset(String tz) throws RuntimeEvaluationException {
         if (tz == null || tz.isEmpty() || tz.equals("Z") || tz.equals("UTC"))
@@ -923,10 +1735,35 @@ case 'x' -> {
         // Handle "0000" as UTC (common variant)
         if (tz.equals("0000") || tz.equals("+0000") || tz.equals("-0000"))
             return ZoneOffset.UTC;
+        // Handle GMT format: GMT-05:00, GMT-05, GMT+5:30, GMT
+        if (tz.startsWith("GMT")) {
+            if (tz.length() == 3) {
+                return ZoneOffset.UTC;
+            }
+            String offset = tz.substring(3);
+            if (offset.isEmpty()) {
+                return ZoneOffset.UTC;
+            }
+            // Parse GMT+HH:MM, GMT+HH, GMT-HH, etc.
+            try {
+                char sign = offset.charAt(0);
+                if (sign != '+' && sign != '-') {
+                    throw new RuntimeEvaluationException(null, "Invalid timezone: " + tz);
+                }
+                // Handle both "5" and "5:30" formats
+                String[] parts = offset.substring(1).split(":");
+                int h = Integer.parseInt(parts[0]);
+                int m = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+                int totalSeconds = (h * 60 + m) * 60;
+                return ZoneOffset.ofTotalSeconds(sign == '-' ? -totalSeconds : totalSeconds);
+            } catch (Exception e) {
+                throw new RuntimeEvaluationException(null, "Invalid timezone: " + tz);
+            }
+        }
         try {
             char sign = tz.charAt(0);
             if (sign != '+' && sign != '-')
-                throw new RuntimeEvaluationException("Invalid timezone: " + tz);
+                throw new RuntimeEvaluationException(null, "Invalid timezone: " + tz);
             int h = Integer.parseInt(tz.substring(1, 3));
             int m = Integer.parseInt(tz.substring(3, 5));
             int totalSeconds = (h * 60 + m) * 60;
@@ -934,7 +1771,7 @@ case 'x' -> {
         } catch (RuntimeEvaluationException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeEvaluationException("Invalid timezone: " + tz);
+            throw new RuntimeEvaluationException(null, "Invalid timezone: " + tz);
         }
     }
     

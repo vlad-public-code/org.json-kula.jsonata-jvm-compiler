@@ -124,9 +124,12 @@ class NumericOperatorsTest {
     }
 
     @Test
-    void divide_by_zero_throws() {
-        assertThrows(JsonataEvaluationException.class,
-                () -> JsonNodeTestHelper.evaluate("1 / 0"));
+    void divide_by_zero_returns_infinity() throws Exception {
+        // JSONata: 1/0 evaluates to Infinity (IEEE 754 positive infinity).
+        // $string(Infinity) throws D3001; using Infinity in arithmetic is fine.
+        JsonNode result = JsonNodeTestHelper.evaluate("1 / 0");
+        assertTrue(result.isNumber());
+        assertTrue(Double.isInfinite(result.doubleValue()));
     }
 
     @Test

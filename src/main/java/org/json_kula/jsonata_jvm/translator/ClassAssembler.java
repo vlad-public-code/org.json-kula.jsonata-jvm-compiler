@@ -13,7 +13,7 @@ final class ClassAssembler {
 
     static String buildClass(String pkg, String className,
                               String bodyExpr, String helperMethods,
-                              String sourceExpression) {
+                              String localDeclarations, String sourceExpression) {
         String pkgDecl = pkg.isEmpty() ? "" : "package " + pkg + ";\n\n";
         return pkgDecl
                 + "import com.fasterxml.jackson.databind.JsonNode;\n"
@@ -52,15 +52,18 @@ final class ClassAssembler {
                 + "    public JsonNode evaluate(JsonNode __input, JsonataBindings __perEval) throws JsonataEvaluationException {\n"
                 + "        beginEvaluation(__values, __functions, __perEval);\n"
                 + "        try {\n"
-                + "            if (__input == null) throw new JsonataEvaluationException(\"Input JSON cannot be null\");\n"
+                + "            if (__input == null) throw new JsonataEvaluationException(null, \"Input JSON cannot be null\");\n"
                 + "            final JsonNode __root = __input;\n"
                 + "            final JsonNode __ctx = __root;\n"
+                + (localDeclarations.isEmpty() ? "" : "            " + localDeclarations)
                 + "            JsonNode __result = " + bodyExpr + ";\n"
                 + "            return __result;\n"
                 + "        } catch (JsonataEvaluationException __e) {\n"
                 + "            throw __e;\n"
+                + "        } catch (RuntimeEvaluationException __e) {\n"
+                + "            throw new JsonataEvaluationException(__e.getErrorCode(), __e.getMessage(), __e);\n"
                 + "        } catch (Exception __e) {\n"
-                + "            throw new JsonataEvaluationException(__e.getMessage(), __e);\n"
+                + "            throw new JsonataEvaluationException(null, __e.getMessage(), __e);\n"
                 + "        } finally {\n"
                 + "            endEvaluation();\n"
                 + "        }\n"

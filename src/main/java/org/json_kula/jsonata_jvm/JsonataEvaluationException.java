@@ -9,13 +9,21 @@ package org.json_kula.jsonata_jvm;
  *   <li>The expression logic fails at runtime (e.g. type mismatch, division by zero).
  * </ul>
  */
-public class JsonataEvaluationException extends Exception {
+public class JsonataEvaluationException extends Exception implements JsonataException {
+    private final String errorCode;
 
-    public JsonataEvaluationException(String message) {
+    public JsonataEvaluationException(String errorCode, String message) {
         super(message);
+        this.errorCode = errorCode;
     }
 
-    public JsonataEvaluationException(String message, Throwable cause) {
+    public JsonataEvaluationException(String errorCode, String message, Throwable cause) {
         super(message, cause);
+        this.errorCode = errorCode;
+    }
+
+    @Override
+    public String getErrorCode() {
+        return errorCode;
     }
 }
