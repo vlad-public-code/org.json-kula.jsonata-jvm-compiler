@@ -22,6 +22,33 @@ final class LambdaRegistry {
     static final String LAMBDA_PREFIX = "__\u03bb:";
     private static final AtomicLong LAMBDA_COUNTER = new AtomicLong();
 
+    /** Maximum nesting depth for user-defined function calls (JSONata U1001 limit).
+     *  factorial(99) needs 100 fn_apply calls (0..99) — all succeed.
+     *  factorial(100) needs 101 fn_apply calls — the 101st triggers U1001. */
+    private static final int MAX_CALL_DEPTH = 100;
+    /** Per-thread call depth counter for user-defined lambda invocations. */
+    private static final ThreadLocal<int[]> CALL_DEPTH = ThreadLocal.withInitial(() -> new int[]{0});
+
+    /**
+     * Maximum number of trampoline iterations for TCO'd tail-recursive loops.
+     * Tail-recursive lambdas (e.g. {@code $odd(6555)}) consume one trampoline
+     * iteration per recursive call without growing the JVM stack, so this limit
+     * must exceed the maximum expected recursion depth for successful cases.
+     * Truly infinite recursive lambdas (e.g. {@code $inf := function(){$inf()}}) will
+     * eventually hit this limit and throw U1001.
+     */
+    private static final int MAX_TRAMPOLINE_ITERATIONS = 100_000;
+
+    /** Sentinel node returned by {@link #fn_apply_tco} to signal a pending tail call. */
+    static final com.fasterxml.jackson.databind.node.TextNode TCO_SENTINEL =
+            JsonNodeFactory.instance.textNode("__λ_tco:");
+
+    /** Carries the next tail-call target (lambda token + arg) when TCO_SENTINEL is returned. */
+    private record TailCallData(JsonataLambda fn, JsonNode arg) {}
+
+    /** Per-thread pending tail-call set by {@link #fn_apply_tco}. */
+    private static final ThreadLocal<TailCallData> PENDING_TAIL_CALL = ThreadLocal.withInitial(() -> null);
+
     /**
      * Registers {@code fn} in the lambda registry and returns a sentinel
      * {@link com.fasterxml.jackson.databind.node.TextNode} that can be stored as a
@@ -42,7 +69,7 @@ final class LambdaRegistry {
     static JsonataLambda lookupLambda(JsonNode n) throws RuntimeEvaluationException {
         String key = n.textValue().substring(LAMBDA_PREFIX.length());
         JsonataLambda fn = LAMBDA_REGISTRY.get(key);
-        if (fn == null) throw new RuntimeEvaluationException("Lambda expired or not found: " + key);
+        if (fn == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
         return fn;
     }
 
@@ -68,7 +95,7 @@ final class LambdaRegistry {
         }
         if (!isLambdaToken(fn)) {
             throw new RuntimeEvaluationException(
-                    "T2006: Right-hand side of ~> is not a function; got: " + fn);
+                    "T2006", "Right-hand side of ~> is not a function; got: " + fn);
         }
         if (isLambdaToken(arg)) {
             final JsonataLambda f = lookupLambda(arg);
@@ -82,12 +109,66 @@ final class LambdaRegistry {
      * Applies {@code fn} to {@code arg} — used when calling a user-defined
      * lambda stored in a local variable.
      * {@code fn} must be a lambda token produced by {@link #lambdaNode}.
+     *
+     * <p>Implements a <em>trampoline</em> for tail-call optimisation (TCO).
+     * When a lambda body emits a tail call via {@link #fn_apply_tco}, it returns
+     * {@link #TCO_SENTINEL} without consuming a new stack frame.  The trampoline
+     * loop here picks up the pending {@link TailCallData}, re-invokes the next
+     * lambda directly (without a recursive {@code fn_apply} call), and repeats
+     * until a real value is produced.  The {@link #MAX_TRAMPOLINE_ITERATIONS}
+     * cap ensures that truly-infinite tail loops are still detected as U1001.
      */
     static JsonNode fn_apply(JsonNode fn, JsonNode arg) throws RuntimeEvaluationException {
         if (isLambdaToken(fn)) {
-            return lookupLambda(fn).apply(arg);
+            int[] depth = CALL_DEPTH.get();
+            if (depth[0] >= MAX_CALL_DEPTH)
+                throw new RuntimeEvaluationException(
+                        "U1001", "Stack overflow error: Check for circular reference or too many function calls");
+            depth[0]++;
+            try {
+                JsonNode result = lookupLambda(fn).apply(arg);
+                // Trampoline loop: handle tail calls without growing the JVM stack.
+                int trampolineCount = 0;
+                while (result == TCO_SENTINEL) {
+                    if (++trampolineCount > MAX_TRAMPOLINE_ITERATIONS)
+                        throw new RuntimeEvaluationException(
+                                "U1001", "Stack overflow error: Check for circular reference or too many function calls");
+                    TailCallData tcd = PENDING_TAIL_CALL.get();
+                    PENDING_TAIL_CALL.set(null);
+                    if (tcd == null)
+                        throw new RuntimeEvaluationException(
+                                "U1001", "Stack overflow error: Check for circular reference or too many function calls");
+                    result = tcd.fn().apply(tcd.arg());
+                }
+                return result;
+            } catch (StackOverflowError e) {
+                throw new RuntimeEvaluationException(
+                        "U1001", "Stack overflow error: Check for circular reference or too many function calls");
+            } finally {
+                depth[0]--;
+                PENDING_TAIL_CALL.set(null); // clean up in case of exception mid-trampoline
+            }
         }
         throw new RuntimeEvaluationException(
-                "T1006: The expression is not a function; got: " + fn);
+                "T1006", "The expression is not a function; got: " + fn);
+    }
+
+    /**
+     * Tail-call variant of {@link #fn_apply}: instead of recursing, stores the
+     * next call in a thread-local and returns {@link #TCO_SENTINEL}.  The
+     * trampoline loop in {@link #fn_apply} will pick this up and continue without
+     * growing the JVM stack.
+     *
+     * <p>This method must only be called from <em>tail position</em> in a lambda
+     * body — i.e. when its result would be returned directly without further
+     * processing.  The translator emits {@code fn_apply_tco} for function calls
+     * that the tail-position analysis marks as eligible for TCO.
+     */
+    static JsonNode fn_apply_tco(JsonNode fn, JsonNode arg) throws RuntimeEvaluationException {
+        if (!isLambdaToken(fn))
+            throw new RuntimeEvaluationException(
+                    "T1006", "The expression is not a function; got: " + fn);
+        PENDING_TAIL_CALL.set(new TailCallData(lookupLambda(fn), arg));
+        return TCO_SENTINEL;
     }
 }

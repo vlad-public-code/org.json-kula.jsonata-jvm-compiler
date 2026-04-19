@@ -1,12 +1,22 @@
 package org.json_kula.jsonata_jvm.runtime;
 
-public class RuntimeEvaluationException extends RuntimeException {
+import org.json_kula.jsonata_jvm.JsonataException;
 
-    public RuntimeEvaluationException(String message) {
+public class RuntimeEvaluationException extends RuntimeException implements JsonataException {
+
+    private final String errorCode;
+
+    public RuntimeEvaluationException(String errorCode, String message) {
         super(message);
+        this.errorCode = errorCode;
     }
 
-    public RuntimeEvaluationException(String message, Throwable cause) {
+    public RuntimeEvaluationException(String errorCode, String message, Throwable cause) {
         super(message, cause);
+        this.errorCode = errorCode;
+    }
+
+    public String getErrorCode() {
+        return errorCode;
     }
 }

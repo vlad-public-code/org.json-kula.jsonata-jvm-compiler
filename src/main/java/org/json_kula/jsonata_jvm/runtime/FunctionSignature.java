@@ -68,7 +68,7 @@ final class FunctionSignature {
                 // Consume all remaining args (at least one required unless marked optional).
                 if (argIdx >= supplied.size()) {
                     if (!p.acceptsMissing()) {
-                        throw new RuntimeEvaluationException(
+                        throw new RuntimeEvaluationException(null,
                                 "Expected at least one argument of type \"" + p.type() + "\"");
                     }
                     break;
@@ -84,7 +84,7 @@ final class FunctionSignature {
                     if (p.acceptsMissing()) {
                         result.add(JsonataRuntime.MISSING);
                     } else {
-                        throw new RuntimeEvaluationException(
+                        throw new RuntimeEvaluationException(null,
                                 "Missing required argument of type \"" + p.type() + "\"");
                     }
                 } else {
@@ -109,14 +109,14 @@ final class FunctionSignature {
             case "b" -> NF.booleanNode(JsonataRuntime.isTruthy(value));
             case "l" -> {
                 if (!value.isNull())
-                    throw new RuntimeEvaluationException(
+                    throw new RuntimeEvaluationException(null,
                             "Expected null argument, got " + value.getNodeType());
                 yield value;
             }
             case "a" -> value.isArray() ? value : NF.arrayNode().add(value);
             case "o" -> {
                 if (!value.isObject())
-                    throw new RuntimeEvaluationException(
+                    throw new RuntimeEvaluationException(null,
                             "Expected object argument, got " + value.getNodeType());
                 yield value;
             }

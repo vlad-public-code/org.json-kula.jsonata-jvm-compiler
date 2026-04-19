@@ -257,7 +257,14 @@ public final class JsonataRuntime {
     public static JsonNode rangeSubscript(JsonNode seq, JsonNode from, JsonNode to)
             throws RuntimeEvaluationException {
         if (seq == null || seq.isMissingNode()) return MISSING;
-        if (!seq.isArray()) return MISSING;
+        if (!seq.isArray()) {
+            // Treat scalar as a single-element sequence at position 0 (or -1 as last).
+            int f = (int) toNumber(from);
+            int t = (int) toNumber(to);
+            int normF = f < 0 ? 1 + f : f;   // size=1: -1→0, anything more negative → out of range
+            int normT = t < 0 ? 1 + t : t;
+            return (normF <= 0 && normT >= 0) ? seq : MISSING;
+        }
         int f = (int) toNumber(from);
         int t = (int) toNumber(to);
         int size = seq.size();
@@ -364,97 +371,98 @@ public final class JsonataRuntime {
 
     public static JsonNode add(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001: The left side of the + operator must evaluate to a number");
+                "T2001", "The left side of the + operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002: The right side of the + operator must evaluate to a number");
+                "T2002", "The right side of the + operator must evaluate to a number");
         if (missing(a) || missing(b)) return MISSING;
         return numNode(a.doubleValue() + b.doubleValue());
     }
 
     public static JsonNode subtract(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001: The left side of the - operator must evaluate to a number");
+                "T2001", "The left side of the - operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002: The right side of the - operator must evaluate to a number");
+                "T2002", "The right side of the - operator must evaluate to a number");
         if (missing(a) || missing(b)) return MISSING;
         return numNode(a.doubleValue() - b.doubleValue());
     }
 
     public static JsonNode multiply(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001: The left side of the * operator must evaluate to a number");
+                "T2001", "The left side of the * operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002: The right side of the * operator must evaluate to a number");
+                "T2002", "The right side of the * operator must evaluate to a number");
         if (missing(a) || missing(b)) return MISSING;
         double av = a.doubleValue();
         double bv = b.doubleValue();
         double result = av * bv;
         // Check for NaN (e.g., infinity * 0 = NaN)
         if (Double.isNaN(result))
-            throw new RuntimeEvaluationException("D1001: Numeric value out of range");
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         // Check for infinity - throw D1001 (not D3001) because the result flows to division
         if (Double.isInfinite(result))
-            throw new RuntimeEvaluationException("D1001: Numeric value out of range");
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         return numNode(result);
     }
 
     public static JsonNode divide(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001: The left side of the / operator must evaluate to a number");
+                "T2001", "The left side of the / operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002: The right side of the / operator must evaluate to a number");
+                "T2002", "The right side of the / operator must evaluate to a number");
         if (missing(a) || missing(b)) return MISSING;
         double numer = a.doubleValue();
         double denom = b.doubleValue();
         // Check for zero denominator
         if (denom == 0) {
             if (Double.isInfinite(numer))
-                throw new RuntimeEvaluationException("D1001: Numeric value out of range");
-            throw new RuntimeEvaluationException("D1001: Division by zero");
+                throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+            // JSONata: 1/0 returns Infinity (no immediate error); downstream functions
+            // like $string(Infinity) then throw D3001, and $string({key: 1/0}) throws D1001.
+            return numNode(numer >= 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY);
         }
         // Check for infinite denominator
         if (Double.isInfinite(denom)) {
-            // Dividing by infinity - result is 0 for finite numerator
-            // But for this test case, we want to throw an error
-            throw new RuntimeEvaluationException("D1001: Division by zero");
+            // e.g. 1/(10e300 * 10e100) — denominator overflowed to Infinity → D1001
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         }
         // Check for NaN denominator
         if (Double.isNaN(denom))
-            throw new RuntimeEvaluationException("D1001: Numeric value out of range");
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         double result = numer / denom;
         if (Double.isNaN(result))
-            throw new RuntimeEvaluationException("D1001: Numeric value out of range");
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         return numNode(result);
     }
 
     public static JsonNode modulo(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001: The left side of the % operator must evaluate to a number");
+                "T2001", "The left side of the % operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002: The right side of the % operator must evaluate to a number");
+                "T2002", "The right side of the % operator must evaluate to a number");
         if (missing(a) || missing(b)) return MISSING;
         double denom = b.doubleValue();
-        if (denom == 0) throw new RuntimeEvaluationException("D1001: Division by zero");
+        if (denom == 0) throw new RuntimeEvaluationException("D1001", "Division by zero");
         return numNode(a.doubleValue() % denom);
     }
 
     public static JsonNode negate(JsonNode a) throws RuntimeEvaluationException {
         if (missing(a)) return MISSING;
         if (!a.isNumber()) throw new RuntimeEvaluationException(
-                "D1002: The operand of the - operator must evaluate to a number");
+                "D1002", "The operand of the - operator must evaluate to a number");
         return numNode(-a.doubleValue());
     }
 
     /** Throws the given error message as a RuntimeEvaluationException. Returns {@code JsonNode} so it can be used as an expression. */
-    public static JsonNode fn_throw(String message) throws RuntimeEvaluationException {
-        throw new RuntimeEvaluationException(message);
+    public static JsonNode fn_throw(String code, String message) throws RuntimeEvaluationException {
+        throw new RuntimeEvaluationException(code, message);
     }
 
     /** Throws a T0410 arity error. Returns {@code JsonNode} so it can be used as an expression. */
     public static JsonNode fn_arity_error(String name, int expected, int actual)
             throws RuntimeEvaluationException {
         throw new RuntimeEvaluationException(
-                "T0410: Function $" + name + " requires " + expected
+                "T0410", "Function $" + name + " requires " + expected
                         + " argument(s) but received " + actual);
     }
 
@@ -462,7 +470,7 @@ public final class JsonataRuntime {
     public static JsonNode fn_arg_count_error(String name, int min, int actual)
             throws RuntimeEvaluationException {
         throw new RuntimeEvaluationException(
-                "T0411: Function $" + name + " requires at least " + min
+                "T0411", "Function $" + name + " requires at least " + min
                         + " argument(s) but received " + actual);
     }
 
@@ -573,10 +581,10 @@ public final class JsonataRuntime {
         // T2010: at least one side is an incomparable type (null, boolean, object, array)
         if (orderingOk(a) && orderingOk(b)) {
             return new RuntimeEvaluationException(
-                    "T2009: operands of ordering operator must be of the same type");
+                    "T2009", "operands of ordering operator must be of the same type");
         }
         return new RuntimeEvaluationException(
-                "T2010: operands of ordering operator must be numeric or string values");
+                "T2010", "operands of ordering operator must be numeric or string values");
     }
 
     // =========================================================================
@@ -680,6 +688,38 @@ public final class JsonataRuntime {
         return result;
     }
 
+    /** Creates a guaranteed 2-element {@code [a, b]} array without flattening inner arrays.
+     *  Used to build {@code (element, position)} tuples for position-aware global sorts. */
+    public static JsonNode tuple2(JsonNode a, JsonNode b) {
+        return NF.arrayNode().add(a).add(b);
+    }
+
+    /**
+     * Collects {@code [sortItem, posIndex]} tuples for a position-aware global sort.
+     * For each element in {@code seq} at position {@code i}, applies {@code elemsFn}
+     * to get the sort items, then stores {@code [sortItem, i]} in the result without
+     * flattening.  Handles both scalar and array-valued {@code elemsFn} results.
+     */
+    public static JsonNode collectPosTuples(JsonNode seq, JsonataLambda elemsFn)
+            throws RuntimeEvaluationException {
+        if (seq == null || seq.isMissingNode()) return MISSING;
+        List<JsonNode> items = new ArrayList<>();
+        if (seq.isArray()) seq.forEach(items::add); else items.add(seq);
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < items.size(); i++) {
+            JsonNode elems = elemsFn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)));
+            if (elems == null || elems.isMissingNode()) continue;
+            if (elems.isArray()) {
+                for (JsonNode e : elems) {
+                    if (!missing(e)) result.add(NF.arrayNode().add(e).add(NF.numberNode(i)));
+                }
+            } else {
+                result.add(NF.arrayNode().add(elems).add(NF.numberNode(i)));
+            }
+        }
+        return result.isEmpty() ? MISSING : result;
+    }
+
     /** Marker to indicate an array element should be flattened (from range expression). */
     public record RangeHolder(int from, int to) {}
 
@@ -746,14 +786,20 @@ public final class JsonataRuntime {
      */
     public static JsonNode object(Object... keyValuePairs) throws RuntimeEvaluationException {
         if (keyValuePairs.length % 2 != 0) {
-            throw new RuntimeEvaluationException("object() requires an even number of arguments");
+            throw new RuntimeEvaluationException("T1001", "object() requires an even number of arguments");
         }
         ObjectNode result = NF.objectNode();
         for (int i = 0; i < keyValuePairs.length; i += 2) {
             JsonNode key = (JsonNode) keyValuePairs[i];
             JsonNode val = (JsonNode) keyValuePairs[i + 1];
             if (!missing(key) && !missing(val)) {
-                result.set(toText(key), val);
+                if (!key.isTextual())
+                    throw new RuntimeEvaluationException(
+                            "T1003", "The key expression of an object component must evaluate to a string");
+                if (result.has(key.textValue()))
+                    throw new RuntimeEvaluationException(
+                            "D1009", "Multiple key definitions evaluate to the same key: \"" + key.textValue() + "\"");
+                result.set(key.textValue(), val);
             }
         }
         return result;
@@ -765,29 +811,29 @@ public final class JsonataRuntime {
         if (missing(from)) {
             if (!missing(to) && !to.isNumber())
                 throw new RuntimeEvaluationException(
-                        "T2004: The right side of the range operator (..) must evaluate to an integer");
+                        "T2004", "The right side of the range operator (..) must evaluate to an integer");
             return NF.arrayNode();
         }
         if (missing(to)) {
             if (!from.isNumber())
                 throw new RuntimeEvaluationException(
-                        "T2003: The left side of the range operator (..) must evaluate to an integer");
+                        "T2003", "The left side of the range operator (..) must evaluate to an integer");
             return NF.arrayNode();
         }
         if (!from.isNumber()) throw new RuntimeEvaluationException(
-                "T2003: The left side of the range operator (..) must evaluate to an integer");
+                "T2003", "The left side of the range operator (..) must evaluate to an integer");
         if (!to.isNumber()) throw new RuntimeEvaluationException(
-                "T2004: The right side of the range operator (..) must evaluate to an integer");
+                "T2004", "The right side of the range operator (..) must evaluate to an integer");
         double fd = from.doubleValue();
         double td = to.doubleValue();
         if (fd != Math.floor(fd)) throw new RuntimeEvaluationException(
-                "T2003: The left side of the range operator (..) must be an integer");
+                "T2003", "The left side of the range operator (..) must be an integer");
         if (td != Math.floor(td)) throw new RuntimeEvaluationException(
-                "T2004: The right side of the range operator (..) must be an integer");
+                "T2004", "The right side of the range operator (..) must be an integer");
         long f = (long) fd;
         long t = (long) td;
         if (t - f >= 10_000_000L)
-            throw new RuntimeEvaluationException("D2014: The range expression generates too many values");
+            throw new RuntimeEvaluationException("D2014", "The range expression generates too many values");
         ArrayNode result = NF.arrayNode();
         for (long i = f; i <= t; i++) result.add(i);
         return result;
@@ -800,7 +846,7 @@ public final class JsonataRuntime {
     public static JsonNode fn_string(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
         if (arg.isNumber() && (Double.isInfinite(arg.doubleValue()) || Double.isNaN(arg.doubleValue())))
-            throw new RuntimeEvaluationException("D3001: Attempting to invoke a non-numeric value as a numeric function");
+            throw new RuntimeEvaluationException("D3001", "Attempting to invoke a non-numeric value as a numeric function");
         // Check if containers contain Infinity values (throws D1001)
         if (arg.isObject() || arg.isArray()) checkNoInfinity(arg);
         return NF.textNode(toText(arg));
@@ -808,7 +854,7 @@ public final class JsonataRuntime {
 
     private static void checkNoInfinity(JsonNode node) throws RuntimeEvaluationException {
         if (node.isNumber() && (Double.isInfinite(node.doubleValue()) || Double.isNaN(node.doubleValue())))
-            throw new RuntimeEvaluationException("D1001: Numeric value out of range");
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
         if (node.isArray()) { for (JsonNode e : node) checkNoInfinity(e); }
         if (node.isObject()) { for (JsonNode v : node) checkNoInfinity(v); }
     }
@@ -816,7 +862,7 @@ public final class JsonataRuntime {
     public static JsonNode fn_string(JsonNode arg, JsonNode prettify) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
         if (!missing(prettify) && !prettify.isBoolean())
-            throw new RuntimeEvaluationException("T0410: Argument 2 of function $string must be a boolean");
+            throw new RuntimeEvaluationException("T0410", "Argument 2 of function $string must be a boolean");
         if (missing(prettify) || !isTruthy(prettify)) return fn_string(arg);
         return StringBuiltins.fn_string_prettify(arg);
     }
@@ -881,7 +927,7 @@ public final class JsonataRuntime {
     public static JsonNode fn_sqrt(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
         double v = toNumber(arg);
-        if (v < 0) throw new RuntimeEvaluationException("D3060: $sqrt: the sqrt function cannot be applied to a negative number");
+        if (v < 0) throw new RuntimeEvaluationException("D3060", "$sqrt: the sqrt function cannot be applied to a negative number");
         return numNode(Math.sqrt(v));
     }
 
@@ -890,7 +936,7 @@ public final class JsonataRuntime {
         double result = Math.pow(toNumber(base), toNumber(exp));
         if (Double.isInfinite(result) || Double.isNaN(result))
             throw new RuntimeEvaluationException(
-                    "D3061: $power() function: the result of the power function is out of range");
+                    "D3061", "$power() function: the result of the power function is out of range");
         return numNode(result);
     }
 
@@ -1110,13 +1156,13 @@ public final class JsonataRuntime {
     private static void requireT0412(JsonNode n, String fnName) throws RuntimeEvaluationException {
         if (!n.isNumber())
             throw new RuntimeEvaluationException(
-                    "T0412: " + fnName + " requires an array of numbers, but found " + n.getNodeType());
+                    "T0412", fnName + " requires an array of numbers, but found " + n.getNodeType());
     }
 
     private static void requireAverageArg(JsonNode n) throws RuntimeEvaluationException {
         if (!n.isNumber())
             throw new RuntimeEvaluationException(
-                    "T0412: $average requires an array of numbers, but found " + n.getNodeType());
+                    "T0412", "$average requires an array of numbers, but found " + n.getNodeType());
     }
 
     public static JsonNode fn_append(JsonNode a, JsonNode b) {
@@ -1209,6 +1255,17 @@ public final class JsonataRuntime {
         return SequenceBuiltins.fn_sort_comparator(arg, comparatorFn);
     }
 
+    public static JsonNode fn_collect_pairs(JsonNode source, JsonataLambda elemFn)
+            throws RuntimeEvaluationException {
+        return SequenceBuiltins.fn_collect_pairs(source, elemFn);
+    }
+
+    public static JsonNode fn_collect_triples(JsonNode grandparents, JsonataLambda parentFn,
+                                               JsonataLambda elemFn)
+            throws RuntimeEvaluationException {
+        return SequenceBuiltins.fn_collect_triples(grandparents, parentFn, elemFn);
+    }
+
     public static JsonNode fn_map(JsonNode arr, JsonataLambda fn)
             throws RuntimeEvaluationException {
         return SequenceBuiltins.fn_map(arr, fn);
@@ -1260,6 +1317,43 @@ public final class JsonataRuntime {
             if (!val.isMissingNode()) appendToSequence(result, val);
         }
         return unwrap(result);
+    }
+
+    /**
+     * Merges an array of ObjectNode results (one per binding-loop iteration) into a
+     * single ObjectNode.  Used when a GroupBy expression follows a binding operator
+     * ({@code @$var} / {@code #$var}) — each iteration produces its own grouped object
+     * and they must all be combined.  Duplicate keys accumulate into arrays (JSONata
+     * group-by semantics for the same key appearing across iterations).
+     */
+    public static JsonNode mergeGroupByObjects(JsonNode seq) {
+        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (!seq.isArray()) return seq.isObject() ? seq : MISSING;
+        ObjectNode result = NF.objectNode();
+        for (JsonNode item : seq) {
+            if (!item.isObject()) continue;
+            java.util.Iterator<java.util.Map.Entry<String, JsonNode>> it = item.fields();
+            while (it.hasNext()) {
+                java.util.Map.Entry<String, JsonNode> entry = it.next();
+                String k = entry.getKey();
+                JsonNode v = entry.getValue();
+                if (!result.has(k)) {
+                    result.set(k, v);
+                } else {
+                    JsonNode existing = result.get(k);
+                    if (existing.isArray()) {
+                        ArrayNode arr = (ArrayNode) existing;
+                        if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
+                    } else {
+                        ArrayNode arr = NF.arrayNode();
+                        arr.add(existing);
+                        if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
+                        result.set(k, arr);
+                    }
+                }
+            }
+        }
+        return result.isEmpty() ? MISSING : result;
     }
 
     /**
@@ -1357,14 +1451,20 @@ public final class JsonataRuntime {
                 ObjectNode targetObj = (ObjectNode) target;
                 // Merge update fields (evaluate update against the ORIGINAL target values).
                 JsonNode update = updateFn.apply(target);
-                if (!missing(update) && update.isObject()) {
+                if (!missing(update)) {
+                    if (!update.isObject())
+                        throw new RuntimeEvaluationException(
+                                "T2011", "The update clause of the transform operator requires an object literal as the second operand");
                     update.fields().forEachRemaining(e -> targetObj.set(e.getKey(), e.getValue()));
                 }
                 // Delete fields.
                 if (!missing(deleteFields)) {
+                    if (!deleteFields.isTextual() && !deleteFields.isArray())
+                        throw new RuntimeEvaluationException(
+                                "T2012", "The delete clause of the transform operator is not valid, must be a string or array of strings");
                     if (deleteFields.isTextual()) {
                         targetObj.remove(deleteFields.textValue());
-                    } else if (deleteFields.isArray()) {
+                    } else {
                         for (JsonNode f : deleteFields) {
                             if (f.isTextual()) targetObj.remove(f.textValue());
                         }
@@ -1442,10 +1542,10 @@ public final class JsonataRuntime {
             throws RuntimeEvaluationException {
         if (!missing(condition) && !condition.isBoolean())
             throw new RuntimeEvaluationException(
-                    "T0410: Argument 1 of function $assert must be a boolean");
+                    "T0410", "Argument 1 of function $assert must be a boolean");
         if (!isTruthy(condition)) {
             String m = missing(message) ? "$assert() statement failed" : toText(message);
-            throw new RuntimeEvaluationException("D3141: " + m);
+            throw new RuntimeEvaluationException("D3141", m);
         }
         return MISSING;
     }
@@ -1566,7 +1666,9 @@ public final class JsonataRuntime {
             throws RuntimeEvaluationException {
         if (missing(timestamp)) return MISSING;
         if (missing(picture)) return fn_toMillis(timestamp);
-        return NF.numberNode(DateTimeUtils.pictureToMillis(toText(timestamp), toText(picture)));
+        long result = DateTimeUtils.pictureToMillis(toText(timestamp), toText(picture));
+        if (result == Long.MIN_VALUE) return MISSING;
+        return NF.numberNode(result);
     }
 
     // =========================================================================
@@ -1576,9 +1678,9 @@ public final class JsonataRuntime {
     public static JsonNode fn_error(JsonNode msg) throws RuntimeEvaluationException {
         if (!missing(msg) && !msg.isTextual())
             throw new RuntimeEvaluationException(
-                    "T0410: $error: argument must be a string");
+                    "T0410", "$error: argument must be a string");
         String m = missing(msg) ? "$error() function evaluated" : msg.textValue();
-        throw new RuntimeEvaluationException("D3137: " + m);
+        throw new RuntimeEvaluationException("D3137", m);
     }
 
     // =========================================================================
@@ -1609,6 +1711,17 @@ public final class JsonataRuntime {
     public static JsonNode fn_apply(JsonNode fn, JsonNode arg)
             throws RuntimeEvaluationException {
         return LambdaRegistry.fn_apply(fn, arg);
+    }
+
+    /**
+     * Tail-call variant of {@link #fn_apply}: stores the next call as a pending
+     * tail call and returns a sentinel so the trampoline loop in
+     * {@link LambdaRegistry#fn_apply} can iterate without growing the JVM stack.
+     * Must only be called from strict tail position in a lambda body.
+     */
+    public static JsonNode fn_apply_tco(JsonNode fn, JsonNode arg)
+            throws RuntimeEvaluationException {
+        return LambdaRegistry.fn_apply_tco(fn, arg);
     }
 
     /**
@@ -1716,11 +1829,11 @@ public final class JsonataRuntime {
         if (n.isTextual()) {
             try { return Double.parseDouble(n.textValue()); }
             catch (NumberFormatException e) {
-                throw new RuntimeEvaluationException("Cannot coerce string to number: " + n.textValue());
+                throw new RuntimeEvaluationException("D3020", "Cannot coerce string to number: " + n.textValue());
             }
         }
         if (n.isBoolean()) return n.booleanValue() ? 1 : 0;
-        throw new RuntimeEvaluationException("Cannot coerce " + n.getNodeType() + " to number");
+        throw new RuntimeEvaluationException("D3020", "Cannot coerce " + n.getNodeType() + " to number");
     }
 
     /** Converts a {@link JsonNode} to a String representation. */

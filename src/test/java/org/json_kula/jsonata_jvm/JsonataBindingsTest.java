@@ -193,9 +193,10 @@ class JsonataBindingsTest {
     @Test
     void perEval_unboundFunction_returnsNull() throws Exception {
         JsonataExpression expr = compile("$notRegistered(1)");
-        Exception exception = assertThrows(JsonataEvaluationException.class,
+        JsonataEvaluationException exception = assertThrows(JsonataEvaluationException.class,
                 () -> expr.evaluate(EMPTY_OBJECT, new JsonataBindings()));
-        assertEquals("T1006: The function 'notRegistered' is not defined", exception.getMessage());
+        assertEquals("T1006", exception.getErrorCode());
+        assertEquals("The function 'notRegistered' is not defined", exception.getMessage());
     }
 
     @Test
@@ -204,7 +205,7 @@ class JsonataBindingsTest {
         JsonataBindings b = new JsonataBindings().bindFunction("boom", new JsonataBoundFunction() {
             @Override public String getFunctionSignature() { return "<:j>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) throws JsonataEvaluationException {
-                throw new JsonataEvaluationException("intentional error");
+                throw new JsonataEvaluationException(null, "intentional error");
             }
         });
         assertThrows(JsonataEvaluationException.class, () -> expr.evaluate(EMPTY_OBJECT, b));
@@ -236,9 +237,10 @@ class JsonataBindingsTest {
             @Override public String getFunctionSignature() { return "<:n>"; }
             @Override public JsonNode apply(JsonataFunctionArguments args) { return IntNode.valueOf(1); }
         });
-        Exception exception = assertThrows(JsonataEvaluationException.class,
+        JsonataEvaluationException exception = assertThrows(JsonataEvaluationException.class,
                 () -> e2.evaluate(EMPTY_OBJECT).isMissingNode());
-        assertEquals("T1006: The function 'fn' is not defined", exception.getMessage());
+        assertEquals("T1006", exception.getErrorCode());
+        assertEquals("The function 'fn' is not defined", exception.getMessage());
     }
 
     // =========================================================================

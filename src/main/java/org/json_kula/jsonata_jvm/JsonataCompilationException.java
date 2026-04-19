@@ -14,9 +14,16 @@ import org.json_kula.jsonata_jvm.parser.ParseException;
  *       failed to compile (internal error)</li>
  * </ul>
  */
-public class JsonataCompilationException extends Exception {
+public class JsonataCompilationException extends Exception implements JsonataException {
+    private final String errorCode;
 
-    public JsonataCompilationException(String message, Throwable cause) {
+    public JsonataCompilationException(String errorCode, String message, Throwable cause) {
         super(message, cause);
+        this.errorCode = errorCode;
+    }
+
+    @Override
+    public String getErrorCode() {
+        return errorCode;
     }
 }

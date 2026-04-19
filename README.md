@@ -6,9 +6,7 @@
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
 
-⚠️ Notice
-
-This library is currently under active development and has not been thoroughly tested. It is provided primarily for demonstration and experimentation purposes. The implementation may contain bugs, incomplete features, or breaking changes. Do not use this library in production environments or in systems where reliability is required. Use it at your own risk.
+All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
 ## Requirements
 

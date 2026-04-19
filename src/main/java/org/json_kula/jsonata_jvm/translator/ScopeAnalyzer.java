@@ -190,6 +190,14 @@ final class ScopeAnalyzer {
             case AstNode.Block blk               -> blk.expressions().stream().anyMatch(ScopeAnalyzer::containsParentStep);
             case AstNode.FunctionCall fc         -> fc.args().stream().anyMatch(ScopeAnalyzer::containsParentStep);
             case AstNode.Lambda lam              -> containsParentStep(lam.body());
+            case AstNode.VariableBinding vb      -> containsParentStep(vb.value());
+            case AstNode.SortExpr se             -> containsParentStep(se.source()) ||
+                    se.keys().stream().anyMatch(k -> containsParentStep(k.key()));
+            case AstNode.ForceArray fa            -> containsParentStep(fa.source());
+            case AstNode.GroupByExpr gbe         -> containsParentStep(gbe.source()) ||
+                    gbe.pairs().stream().anyMatch(p -> containsParentStep(p.key()) || containsParentStep(p.value()));
+            case AstNode.UnaryMinus um           -> containsParentStep(um.operand());
+            case AstNode.Parenthesized p         -> containsParentStep(p.inner());
             default                              -> false;
         };
     }

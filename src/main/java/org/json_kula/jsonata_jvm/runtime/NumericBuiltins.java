@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
+import java.text.ParsePosition;
 import java.util.*;
 
 /**
@@ -33,7 +34,7 @@ final class NumericBuiltins {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isNumber()) {
             if (Double.isInfinite(arg.doubleValue()))
-                throw new RuntimeEvaluationException("D3030: $number: value out of range for number type");
+                throw new RuntimeEvaluationException("D3030", "$number: value out of range for number type");
             return arg;
         }
         if (arg.isBoolean()) return JsonataRuntime.numNode(arg.booleanValue() ? 1 : 0);
@@ -41,7 +42,7 @@ final class NumericBuiltins {
         if (arg.isNull() || arg.isArray() || arg.isObject()
                 || LambdaRegistry.isLambdaToken(arg) || RegexRegistry.isRegexToken(arg))
             throw new RuntimeEvaluationException(
-                    "T0410: $number: argument is not a valid value for $number");
+                    "T0410", "$number: argument is not a valid value for $number");
         if (arg.isTextual()) {
             String s = arg.textValue().trim();
             try {
@@ -55,14 +56,14 @@ final class NumericBuiltins {
                 else
                     d = Double.parseDouble(s);
                 if (Double.isInfinite(d))
-                    throw new RuntimeEvaluationException("D3030: $number: value out of range for number type");
+                    throw new RuntimeEvaluationException("D3030", "$number: value out of range for number type");
                 return JsonataRuntime.numNode(d);
             } catch (NumberFormatException e) {
                 throw new RuntimeEvaluationException(
-                        "D3030: $number: unable to cast value to a number: " + s);
+                        "D3030", "$number: unable to cast value to a number: " + s);
             }
         }
-        throw new RuntimeEvaluationException("D3030: $number: unable to cast value to a number");
+        throw new RuntimeEvaluationException("D3030", "$number: unable to cast value to a number");
     }
 
     // =========================================================================
@@ -96,7 +97,7 @@ final class NumericBuiltins {
         long n = Math.round(JsonataRuntime.toNumber(number));
         int r = JsonataRuntime.missing(radix) ? 10 : (int) JsonataRuntime.toNumber(radix);
         if (r < 2 || r > 36)
-            throw new RuntimeEvaluationException("D3100: $formatBase: radix must be between 2 and 36");
+            throw new RuntimeEvaluationException("D3100", "$formatBase: radix must be between 2 and 36");
         return NF.textNode(Long.toString(n, r));
     }
 
@@ -129,7 +130,7 @@ final class NumericBuiltins {
         String negPic = sepIdx >= 0 ? pic.substring(sepIdx + 1) : null;
         if (negPic != null && negPic.indexOf(patternSep) >= 0)
             throw new RuntimeEvaluationException(
-                    "D3080: $formatNumber: the picture string must not contain more than one instance of the pattern separator");
+                    "D3080", "$formatNumber: the picture string must not contain more than one instance of the pattern separator");
         // D3081: multiple decimal separators — detected in formatPicture
 
         // -- Detect percent / per-mille from the positive sub-picture ------
@@ -209,7 +210,7 @@ final class NumericBuiltins {
                         (inCore ? suffix : prefix).append(special);
                     } else if (pastExponent) {
                         throw new RuntimeEvaluationException(
-                                "D3092: $formatNumber: a percent or per-mille character must not appear in the exponent part of the picture string");
+                                "D3092", "$formatNumber: a percent or per-mille character must not appear in the exponent part of the picture string");
                     } else {
                         inSuffix = true;
                         suffix.append(special);
@@ -238,7 +239,7 @@ final class NumericBuiltins {
                     expSpec.append(isMand ? '0' : '#');
                 } else if (isGrp) {
                     throw new RuntimeEvaluationException(
-                            "D3093: $formatNumber: a grouping separator must not appear in the exponent part of the picture string");
+                            "D3093", "$formatNumber: a grouping separator must not appear in the exponent part of the picture string");
                 } else {
                     inSuffix = true; suffix.append(c);
                 }
@@ -258,7 +259,7 @@ final class NumericBuiltins {
                 } else if (isGrp) {
                     if (lastWasGrp)
                         throw new RuntimeEvaluationException(
-                                "D3089: $formatNumber: a grouping separator must not be adjacent to another grouping separator");
+                                "D3089", "$formatNumber: a grouping separator must not be adjacent to another grouping separator");
                     if (fracDigitsSinceLastComma > 0) {
                         fracGroupOffsets.add(fracDigitsSinceLastComma);
                         fracDigitsSinceLastComma = 0;
@@ -268,7 +269,7 @@ final class NumericBuiltins {
                 } else if (isExp) {
                     if (lastWasGrp)
                         throw new RuntimeEvaluationException(
-                                "D3087: $formatNumber: a grouping separator must not be adjacent to a decimal separator");
+                                "D3087", "$formatNumber: a grouping separator must not be adjacent to a decimal separator");
                     pastExponent = true;
                     lastWasGrp = false;
                 } else {
@@ -287,7 +288,7 @@ final class NumericBuiltins {
                 } else if (isGrp) {
                     if (lastWasGrp)
                         throw new RuntimeEvaluationException(
-                                "D3089: $formatNumber: a grouping separator must not be adjacent to another grouping separator");
+                                "D3089", "$formatNumber: a grouping separator must not be adjacent to another grouping separator");
                     if (intDigitsSinceLastComma > 0) {
                         intGroupOffsets.add(intDigitsSinceLastComma);
                         intDigitsSinceLastComma = 0;
@@ -297,7 +298,7 @@ final class NumericBuiltins {
                 } else if (isDec) {
                     if (lastWasGrp)
                         throw new RuntimeEvaluationException(
-                                "D3087: $formatNumber: a grouping separator must not be adjacent to a decimal separator");
+                                "D3087", "$formatNumber: a grouping separator must not be adjacent to a decimal separator");
                     decimalCount++;
                     pastDecimal = true;
                     lastWasGrp = false;
@@ -307,7 +308,7 @@ final class NumericBuiltins {
                 } else if (intDigitCount > 0 || intSawComma) {
                     // Non-core character encountered after digits/grouping in integer part
                     throw new RuntimeEvaluationException(
-                            "D3086: $formatNumber: an invalid character appeared in the sub-picture");
+                            "D3086", "$formatNumber: an invalid character appeared in the sub-picture");
                 } else {
                     inSuffix = true; suffix.append(c);
                     lastWasGrp = false;
@@ -319,29 +320,29 @@ final class NumericBuiltins {
         // --- Post-parse validation (D3080-D3091) ---
         if (decimalCount > 1)
             throw new RuntimeEvaluationException(
-                    "D3081: $formatNumber: there must only be one decimal separator in the picture string");
+                    "D3081", "$formatNumber: there must only be one decimal separator in the picture string");
         if (percentCount > 1)
             throw new RuntimeEvaluationException(
-                    "D3082: $formatNumber: there must only be one percent character in the picture string");
+                    "D3082", "$formatNumber: there must only be one percent character in the picture string");
         if (perMilleCount > 1)
             throw new RuntimeEvaluationException(
-                    "D3083: $formatNumber: there must only be one per-mille character in the picture string");
+                    "D3083", "$formatNumber: there must only be one per-mille character in the picture string");
         if (percentCount > 0 && perMilleCount > 0)
             throw new RuntimeEvaluationException(
-                    "D3084: $formatNumber: a picture string must not contain both a percent and a per-mille character");
+                    "D3084", "$formatNumber: a picture string must not contain both a percent and a per-mille character");
         if (pastExponent && intDigitCount == 0 && fracDigitCount == 0)
             throw new RuntimeEvaluationException(
-                    "D3085: $formatNumber: the picture string must contain at least one digit or zero-digit placeholder");
+                    "D3085", "$formatNumber: the picture string must contain at least one digit or zero-digit placeholder");
         if (intHadOptAfterMand)
             throw new RuntimeEvaluationException(
-                    "D3090: $formatNumber: an optional digit character must not appear after a mandatory digit character in the integer part of the picture string");
+                    "D3090", "$formatNumber: an optional digit character must not appear after a mandatory digit character in the integer part of the picture string");
         if (fracHadOptAfterMand)
             throw new RuntimeEvaluationException(
-                    "D3091: $formatNumber: a mandatory digit character must not appear after an optional digit character in the fractional part of the picture string");
+                    "D3091", "$formatNumber: a mandatory digit character must not appear after an optional digit character in the fractional part of the picture string");
         // Trailing grouping separator (e.g., "0,")
         if (lastWasGrp && !pastDecimal && !pastExponent)
             throw new RuntimeEvaluationException(
-                    "D3088: $formatNumber: a grouping separator must not appear at the end of the integer part of the picture string");
+                    "D3088", "$formatNumber: a grouping separator must not appear at the end of the integer part of the picture string");
         // Grouping separator adjacent to decimal (last char before decimal was grouping): handled by D3087 above
 
         // If no digit pattern was found, treat entire picture as prefix
@@ -850,7 +851,7 @@ final class NumericBuiltins {
                   c == 'w' || c == 'W' || c == 'I' || c == 'i' || c == 'A' || c == 'a' ||
                   (c >= '٠' && c <= '٩') || (c >= '０' && c <= '９') ||
                   (c >= '0' && c <= '9'))) {
-                throw new RuntimeEvaluationException("D3130: $formatInteger: picture string contains invalid character '" + c + "'");
+                throw new RuntimeEvaluationException("D3130", "$formatInteger: picture string contains invalid character '" + c + "'");
             }
         }
         
@@ -899,12 +900,12 @@ final class NumericBuiltins {
         // Check for mixed digit groups (error D3131)
         // Mixed means: Unicode (Arabic-Indic OR Full-Width) AND ASCII '0' in the same picture
         if ((hasArabicIndic || hasFullWidth) && hasAsciiDigits) {
-            throw new RuntimeEvaluationException("D3131: $formatInteger: picture string contains mixed digit groups");
+            throw new RuntimeEvaluationException("D3131", "$formatInteger: picture string contains mixed digit groups");
         }
         
         // Also check for mixing Arabic-Indic and Full-Width
         if (hasArabicIndic && hasFullWidth) {
-            throw new RuntimeEvaluationException("D3131: $formatInteger: picture string contains mixed digit groups");
+            throw new RuntimeEvaluationException("D3131", "$formatInteger: picture string contains mixed digit groups");
         }
         
         if (hasArabicIndic || hasFullWidth) {
@@ -1121,6 +1122,30 @@ final class NumericBuiltins {
     private static long parseInteger(String s, String pic) throws RuntimeEvaluationException {
         boolean ordinal = pic.endsWith(";o");
         String basePic = ordinal ? pic.substring(0, pic.length() - 2) : pic;
+        
+        // Special case: empty string with Roman numeral picture should return 0
+        if (s.isEmpty() && (basePic.equals("I") || basePic.equals("i"))) {
+            return 0;
+        }
+        
+        // Validate picture string - must have at least one digit placeholder (0 or digit)
+        // Also allow Roman numeral pictures (I, i, A, a) and word pictures (w, W, Ww)
+        boolean hasValidFormat = false;
+        if (basePic.equals("I") || basePic.equals("i") || basePic.equals("A") || basePic.equals("a") ||
+            basePic.equals("w") || basePic.equals("W") || basePic.equals("Ww")) {
+            hasValidFormat = true;
+        } else {
+            for (char c : basePic.toCharArray()) {
+                if (c == '0' || Character.isDigit(c)) {
+                    hasValidFormat = true;
+                    break;
+                }
+            }
+        }
+        if (!hasValidFormat) {
+            throw new RuntimeEvaluationException("D3130", "$parseInteger: unsupported picture string");
+        }
+        
         String input = ordinal ? stripOrdinalSuffix(s) : s;
         return switch (basePic) {
             case "w", "W", "Ww" -> parseWords(input);
@@ -1132,29 +1157,199 @@ final class NumericBuiltins {
 
     /** Strip ordinal suffix (st, nd, rd, th) from input string. */
     private static String stripOrdinalSuffix(String s) {
-        if (s.length() >= 2) {
-            String lower = s.toLowerCase();
-            if (lower.endsWith("st") || lower.endsWith("nd") || lower.endsWith("rd") || lower.endsWith("th")) {
-                return s.substring(0, s.length() - 2);
+        String lower = s.toLowerCase().trim();
+        
+        // Get the last word (for handling cases like "one trillion and first")
+        int lastSpace = lower.lastIndexOf(' ');
+        String lastWord = lastSpace >= 0 ? lower.substring(lastSpace + 1) : lower;
+        
+        // Handle special irregular cases - check both full string and last word
+        if (lastWord.equals("twelfth")) {
+            return replaceLastWord(lower, lastSpace, "twelve");
+        }
+        if (lastWord.equals("fifth")) {
+            return replaceLastWord(lower, lastSpace, "five");
+        }
+        if (lastWord.equals("ninth")) {
+            return replaceLastWord(lower, lastSpace, "nine");
+        }
+        if (lastWord.equals("first")) {
+            return replaceLastWord(lower, lastSpace, "one");
+        }
+        if (lastWord.equals("second")) {
+            return replaceLastWord(lower, lastSpace, "two");
+        }
+        if (lastWord.equals("third")) {
+            return replaceLastWord(lower, lastSpace, "three");
+        }
+        
+        // Words ending in "ieth" replace with "y" (twentieth -> twenty)
+        if (lower.endsWith("ieth")) {
+            return lower.replace("ieth", "y");
+        }
+        
+        // Handle hyphenated ordinals like "thirty-fourth" or "FIFTY-FIFTH" or "NINETY-NINTH"
+        if (lower.contains("-")) {
+            String[] parts = lower.split("-");
+            String lastPart = parts[parts.length - 1];
+            
+            // If last part ends with ordinal suffix
+            if (lastPart.endsWith("st") || lastPart.endsWith("nd") || lastPart.endsWith("rd") || lastPart.endsWith("th")) {
+                String root = lastPart.substring(0, lastPart.length() - 2);
+                String cardinalRoot = ordinalToCardinal(root);
+                
+                // Join with space
+                StringBuilder result = new StringBuilder();
+                for (int i = 0; i < parts.length - 1; i++) {
+                    if (i > 0) result.append(" ");
+                    result.append(parts[i]);
+                }
+                if (result.length() > 0) {
+                    result.append(" ").append(cardinalRoot);
+                } else {
+                    result.append(cardinalRoot);
+                }
+                return result.toString();
             }
         }
+        
+        // Standard suffix stripping for single word ordinals
+        if (lower.endsWith("st") || lower.endsWith("nd") || lower.endsWith("rd") || lower.endsWith("th")) {
+            String result = lower.substring(0, lower.length() - 2);
+            return ordinalToCardinal(result);
+        }
         return s;
+    }
+    
+    private static String replaceLastWord(String full, int lastSpace, String replacement) {
+        if (lastSpace >= 0) {
+            return full.substring(0, lastSpace + 1) + replacement;
+        }
+        return replacement;
+    }
+    
+    private static String ordinalToCardinal(String root) {
+        // Handle special cases for ordinal roots -> cardinal forms
+        if (root.equals("nin")) return "nine";
+        if (root.equals("fif")) return "five";
+        if (root.equals("twelf")) return "twelve";
+        if (root.equals("thi")) return "three";  // "third" -> "three"
+        if (root.equals("fir")) return "one";    // "first" -> "one"
+        if (root.equals("secon")) return "two";  // "second" -> "two"
+        if (root.equals("seco")) return "two";   // "second" (after removing 'd') -> "two"
+        return root;
     }
 
     /** Strip grouping separators from {@code s} and parse as a long. */
     private static long parseIntegerDecimal(String s, String pic) throws RuntimeEvaluationException {
-        // Determine grouping separator used in the picture (default ',')
-        char grpSep = ',';
-        for (char c : pic.toCharArray()) {
-            if (c != '#' && c != '0') { grpSep = c; break; }
+        // First find the zero digit in the picture (any digit used as the zero reference)
+        char zeroDigit = findZeroDigit(pic);
+        
+        // Normalize only the INPUT string (not the picture) from Unicode digits to Western digits
+        String normalizedInput = normalizeUnicodeDigits(s, zeroDigit);
+        
+        // For parsing, we don't use DecimalFormat's grouping because it doesn't handle
+        // non-regular groups (different separators in different positions). Instead,
+        // we extract all grouping separators from the picture and remove them from the input.
+        String groupingSeparators = extractGroupingSeparators(pic);
+        String strippedInput = normalizedInput;
+        for (char sep : groupingSeparators.toCharArray()) {
+            strippedInput = strippedInput.replace(String.valueOf(sep), "");
         }
-        String stripped = s.replace(String.valueOf(grpSep), "");
-        try {
-            return Long.parseLong(stripped.trim());
-        } catch (NumberFormatException e) {
-            throw new RuntimeEvaluationException(
+        
+        // Convert picture digits to 0/# format for DecimalFormat (for the number part)
+        // We only use # and 0 now since we're handling grouping separately
+        String pattern = convertPictureToPatternSimple(pic, zeroDigit);
+        
+        DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.ROOT);
+        symbols.setZeroDigit('0');
+        
+        DecimalFormat df = new DecimalFormat(pattern, symbols);
+        df.setParseBigDecimal(true);
+        ParsePosition parsePosition = new ParsePosition(0);
+        Number number = df.parse(strippedInput, parsePosition);
+
+        if (number == null || parsePosition.getIndex() != strippedInput.length()) {
+            throw new RuntimeEvaluationException(null,
                     "$parseInteger: cannot parse \"" + s + "\" with picture \"" + pic + "\"");
         }
+        return number.longValue();
+    }
+
+    private static char findZeroDigit(String pic) {
+        for (char c : pic.toCharArray()) {
+            if (Character.isDigit(c)) {
+                int digitValue = Character.getNumericValue(c);
+                if (digitValue >= 0 && digitValue <= 9) {
+                    return (char) (c - digitValue);
+                }
+            }
+        }
+        return '0';
+    }
+    
+    private static String extractGroupingSeparators(String pic) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : pic.toCharArray()) {
+            if (!Character.isDigit(c) && c != '#' && c != '0') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+    
+    private static String convertPictureToPatternSimple(String pic, char zeroDigit) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : pic.toCharArray()) {
+            if (Character.isDigit(c)) {
+                sb.append('0');
+            } else if (c == '#') {
+                sb.append('#');
+            } else if (c == '0') {
+                sb.append('0');
+            }
+            // Skip grouping separators - we handle them separately
+        }
+        return sb.toString();
+    }
+    
+    private static String normalizeUnicodeDigits(String input, char zeroDigit) {
+        if (zeroDigit == '0') {
+            return input;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            if (Character.isDigit(c)) {
+                int digitValue = Character.getNumericValue(c);
+                if (digitValue >= 0 && digitValue <= 9) {
+                    sb.append((char) ('0' + digitValue));
+                } else {
+                    sb.append(c);
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+    
+    private static String convertPictureToPattern(String pic, char zeroDigit) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : pic.toCharArray()) {
+            if (Character.isDigit(c)) {
+                // This digit is the "zero digit" marker - convert to '0' for the pattern
+                // (DecimalFormat uses '0' for required digits)
+                sb.append('0');
+            } else if (c == '#') {
+                sb.append('#');
+            } else if (c == '0') {
+                sb.append('0');
+            } else {
+                // Grouping separator or other character - keep as is
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     // =========================================================================
@@ -1378,6 +1573,9 @@ final class NumericBuiltins {
         m.put("thousand",  1_000L);
         m.put("million",   1_000_000L);
         m.put("billion",   1_000_000_000L);
+        m.put("trillion",  1_000_000_000_000L);
+        m.put("quadrillion", 1_000_000_000_000_000L);
+        m.put("quintillion", 1_000_000_000_000_000_000L);
         m.put("minus", null); // handled specially
         WORD_VALUES = Collections.unmodifiableMap(m);
     }
@@ -1389,30 +1587,52 @@ final class NumericBuiltins {
         boolean negative = false;
         long total = 0;
         long current = 0;
+        long accumulatedMagnitude = 1;
 
         for (String tok : tokens) {
             if (tok.isEmpty() || tok.equals("and")) continue;
             if (tok.equals("minus")) { negative = true; continue; }
 
             if (!WORD_VALUES.containsKey(tok))
-                throw new RuntimeEvaluationException(
+                throw new RuntimeEvaluationException(null,
                         "$parseInteger: unrecognised word token \"" + tok + "\"");
             long val = WORD_VALUES.get(tok);
 
             if (val == 100L) {
-                // e.g. "three hundred" → current *= 100
                 current = (current == 0 ? 1 : current) * 100;
             } else if (val >= 1000L) {
-                // e.g. "thousand" → flush current into total
-                current = (current == 0 ? 1 : current) * val;
-                total += current;
-                current = 0;
+                try {
+                    if (current > 0) {
+                        total = Math.addExact(total, Math.multiplyExact(Math.multiplyExact(current, accumulatedMagnitude), val));
+                        accumulatedMagnitude = val;
+                    } else if (accumulatedMagnitude > 1) {
+                        total = Math.multiplyExact(total, val);
+                        accumulatedMagnitude = val;
+                    } else {
+                        total = Math.addExact(total, val);
+                        accumulatedMagnitude = val;
+                    }
+                    current = 0;
+                } catch (ArithmeticException e) {
+                    return Long.MAX_VALUE;
+                }
             } else {
                 current += val;
+                accumulatedMagnitude = 1;
             }
         }
-        long result = total + current;
-        return negative ? -result : result;
+        
+        try {
+            long result;
+            if (current > 0 && accumulatedMagnitude > 1) {
+                result = Math.addExact(total, Math.multiplyExact(current, accumulatedMagnitude));
+            } else {
+                result = total + current;
+            }
+            return negative ? -result : result;
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     // =========================================================================
@@ -1425,7 +1645,7 @@ final class NumericBuiltins {
     private static String toRoman(long n) throws RuntimeEvaluationException {
         if (n == 0) return "";  // 0 maps to empty string in Roman numerals
         if (n < 0 || n > 3_999_999)
-            throw new RuntimeEvaluationException(
+            throw new RuntimeEvaluationException(null,
                     "$formatInteger: Roman numerals are only supported for 1–3,999,999");
         StringBuilder sb = new StringBuilder();
         for (int k = 0; k < ROMAN_VALS.length; k++) {
@@ -1441,7 +1661,7 @@ final class NumericBuiltins {
         long result = 0; int prev = 0;
         for (int k = s.length() - 1; k >= 0; k--) {
             int cv = v.getOrDefault(s.charAt(k), -1);
-            if (cv < 0) throw new RuntimeEvaluationException(
+            if (cv < 0) throw new RuntimeEvaluationException(null,
                     "$parseInteger: invalid Roman numeral character '" + s.charAt(k) + "'");
             result += (cv < prev) ? -cv : cv;
             prev = cv;
@@ -1455,7 +1675,7 @@ final class NumericBuiltins {
 
     private static String toAlpha(long n, boolean upper) throws RuntimeEvaluationException {
         if (n <= 0)
-            throw new RuntimeEvaluationException(
+            throw new RuntimeEvaluationException(null,
                     "$formatInteger: alphabetic format requires a positive integer");
         char base = upper ? 'A' : 'a';
         StringBuilder sb = new StringBuilder();
@@ -1472,7 +1692,7 @@ final class NumericBuiltins {
         long result = 0;
         for (char c : s.toCharArray()) {
             if (c < 'A' || c > 'Z')
-                throw new RuntimeEvaluationException(
+                throw new RuntimeEvaluationException(null,
                         "$parseInteger: invalid alphabetic character '" + c + "'");
             result = result * 26 + (c - 'A' + 1);
         }

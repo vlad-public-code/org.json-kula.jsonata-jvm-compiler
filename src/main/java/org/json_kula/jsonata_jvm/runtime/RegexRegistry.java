@@ -55,7 +55,7 @@ final class RegexRegistry {
     static org.joni.Regex lookupRegex(JsonNode n) throws RuntimeEvaluationException {
         String key = n.textValue().substring(REGEX_PREFIX.length());
         org.joni.Regex rx = REGEX_REGISTRY.get(key);
-        if (rx == null) throw new RuntimeEvaluationException("Regex token expired: " + key);
+        if (rx == null) throw new RuntimeEvaluationException(null, "Regex token expired: " + key);
         return rx;
     }
 

@@ -401,6 +401,14 @@ class NumericFunctionsTest {
     }
 
     @Test
+    void test_parseInteger_arabicNumerals() throws Exception {
+        // Test parsing Arabic numerals with a picture - uses Unicode escapes to avoid file encoding issues
+        assertEquals(12340L, eval("$parseInteger('\u0661\u0662\u0663\u0664\u0660', '###\u0661')").longValue());
+        // Also test full-width numerals
+        assertEquals(12340L, eval("$parseInteger('\uff11\uff12\uff13\uff14\uff10', '###\uff10')").longValue());
+    }
+
+    @Test
     void parseInteger_roundtrip_words() throws Exception {
         // format then parse — use field access (v), not variable ($v)
         String words = eval("$formatInteger(42, 'w')").textValue();

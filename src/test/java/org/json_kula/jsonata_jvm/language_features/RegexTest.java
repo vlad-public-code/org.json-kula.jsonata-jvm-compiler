@@ -210,6 +210,14 @@ class RegexTest {
                 eval("$replace(\"acb\", \".\", \"X\")"));
     }
 
+    @Test
+    void replace_nonexistentGroupFallback() throws Exception {
+        // From case028.json: $replace("abcdefghijklmno", /ijk/, "$8$5$12$12$18$123") 
+        // Expected: "abcdefgh22823lmno"
+        String actual = eval("$replace(\"abcdefghijklmno\", /ijk/, \"$8$5$12$12$18$123\")").textValue();
+        assertEquals("abcdefgh22823lmno", actual);
+    }
+
     // =========================================================================
     // Regex in predicate / path
     // =========================================================================

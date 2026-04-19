@@ -3,9 +3,9 @@
 ***The test suite is copied from https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md***
 Summary:
 - 1279 test cases loaded from the official JSONata test suite
-- Passed: 1244
+- Passed: 1279
 
-## Copied spec1
+## Copied spec
 The data contained in this directory is an attempt at a language neutral
 test suite for `jsonata`. The original test suite (written in Javascript)
 was transformed into a series of JSON files.

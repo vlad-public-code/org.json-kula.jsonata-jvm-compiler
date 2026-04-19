@@ -11,6 +11,8 @@ import java.util.Set;
 final class GenState {
     int counter;
     final StringBuilder helperMethods = new StringBuilder();
+    /** Counter-array declarations (final long[] __ctrN = {0};) emitted before the body expression. */
+    final StringBuilder localDeclarations = new StringBuilder();
 
     /**
      * Stack of locally-bound variable name sets, one entry per active scope
@@ -81,12 +83,24 @@ final class GenState {
 
     /**
      * Returns the Java alias for {@code name} in the innermost scope that
-     * defines one, or {@code null} if no alias exists.
+     * <em>defines</em> {@code name}, or {@code null} if no alias exists in that
+     * scope (meaning the default {@code $name} should be used).
+     *
+     * <p>Searches {@code scopeStack} and {@code aliasStack} in lock-step from
+     * innermost to outermost and stops as soon as the defining scope is found.
+     * This prevents an outer alias from leaking through into an inner scope that
+     * re-binds the same name without an alias (e.g. a block that rebinds a lambda
+     * parameter via {@code $step := ...}).
      */
     String getAlias(String name) {
-        for (Map<String, String> scope : aliasStack) {
-            String alias = scope.get(name);
-            if (alias != null) return alias;
+        java.util.Iterator<Set<String>> scopeIt = scopeStack.iterator();
+        java.util.Iterator<Map<String, String>> aliasIt = aliasStack.iterator();
+        while (scopeIt.hasNext() && aliasIt.hasNext()) {
+            Set<String> scope = scopeIt.next();
+            Map<String, String> aliases = aliasIt.next();
+            if (scope.contains(name)) {
+                return aliases.get(name); // null if no alias in the defining scope
+            }
         }
         return null;
     }
