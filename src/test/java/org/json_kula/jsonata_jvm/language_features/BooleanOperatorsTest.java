@@ -114,7 +114,7 @@ class BooleanOperatorsTest {
                 + "{\"title\": \"TAOCP\",  \"authors\": [\"Knuth\"],             \"price\": 60},"
                 + "{\"title\": \"Cheap\",  \"authors\": [\"Aho\"],               \"price\": 10}"
                 + "]}}";
-        JsonNode result = JsonNodeTestHelper.printJavaAndEvaluate(
+        JsonNode result = JsonNodeTestHelper.evaluate(
                 "library.books[\"Aho\" in authors and price < 50].title", json);
         // Dragon (Aho, price=40 <50) and Cheap (Aho, price=10 <50) qualify
         assertTrue(result.isArray());

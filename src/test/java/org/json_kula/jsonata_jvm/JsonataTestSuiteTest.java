@@ -24,38 +24,39 @@ public class JsonataTestSuiteTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String TEST_SUITE_PATH = "jsonata-test-suite";
     private static JsonNode[] DATASETS;
+    private static java.util.Map<String, JsonNode> NAMED_DATASETS;
     private static JsonataExpressionFactory FACTORY;
 
     @BeforeAll
     static void loadDatasets() throws IOException {
         FACTORY = new JsonataExpressionFactory();
-        
+
         Path datasetsDir = Path.of("src/test/resources", TEST_SUITE_PATH, "datasets");
         List<JsonNode> datasetList = new ArrayList<>();
-        
+        NAMED_DATASETS = new java.util.HashMap<>();
+
         Files.list(datasetsDir)
             .filter(p -> p.toString().endsWith(".json"))
             .sorted(Comparator.comparingInt(p -> extractDatasetIndex(p.getFileName().toString())))
             .forEach(p -> {
                 try {
                     JsonNode data = MAPPER.readTree(p.toFile());
+                    String name = p.getFileName().toString().replace(".json", "");
+                    NAMED_DATASETS.put(name, data);
                     datasetList.add(data);
                 } catch (IOException e) {
                     System.err.println("Failed to load dataset: " + p);
                 }
             });
-        
+
         DATASETS = datasetList.toArray(new JsonNode[0]);
     }
-    
+
     private static int extractDatasetIndex(String filename) {
-        // Extract numeric part from dataset name for natural sorting
-        // dataset0.json -> 0, dataset10.json -> 10, employees.json -> 9999
         String numStr = filename.replaceAll(".*dataset(\\d+)\\.json.*", "$1");
         try {
             return Integer.parseInt(numStr);
         } catch (NumberFormatException e) {
-            // For non-dataset files (employees, items, library), put them at the end
             return 9999;
         }
     }
@@ -149,14 +150,9 @@ public class JsonataTestSuiteTest {
                 return MissingNode.getInstance();
             }
             String name = datasetName.asText();
-            if (name.equals("employees")) {
-                return DATASETS[25];
-            } else if (name.equals("items")) {
-                return DATASETS[26];
-            } else if (name.equals("library")) {
-                return DATASETS[27];
+            if (NAMED_DATASETS.containsKey(name)) {
+                return NAMED_DATASETS.get(name);
             }
-            
             int idx = Integer.parseInt(name.replace("dataset", ""));
             return DATASETS[idx];
         }
