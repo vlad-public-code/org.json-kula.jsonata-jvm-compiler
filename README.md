@@ -222,13 +222,12 @@ JsonataExpression expr = loader.load(javaSource);
 
 jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated evaluation is significantly faster than interpreter-based alternatives.
 
-### Benchmark: jsonata-jvm-compiler vs JSONata4Java
-
+### Benchmark: [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) vs [JSONata4Java](https://github.com/IBM/JSONata4Java)
 The benchmark compiles one expression once, then runs 100 000 evaluations against the same JSON document (with a 1 000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
 Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
 
-| Metric | jsonata-jvm-compiler | JSONata4Java  |
+| Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java)  |
 |---|----------------------|---------------|
 | Compilation | 1,519 ms            | 292 ms        |
 | 100 000 evaluations | 4 514 ms            | 84 246 ms     |
