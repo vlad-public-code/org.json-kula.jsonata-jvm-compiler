@@ -24,7 +24,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>org.json_kula</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0-SNAPSHOT</version>
 </dependency>
 ```
 
