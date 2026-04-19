@@ -21,18 +21,56 @@ final class EvaluationContext {
     private EvaluationContext() {}
 
     /**
-     * Holds the active {@link JsonataBindings} for the current evaluation thread.
-     * Set by {@link #beginEvaluation} and cleared by {@link #endEvaluation}.
+     * All per-evaluation thread-local state in one mutable container.
+     * Reused across evaluate() calls on the same thread to avoid per-call allocation.
+     * Fields that are only needed when lambdas are used (evalLambdas, callDepth,
+     * pendingTailCall) are lazily initialised on first access.
      */
-    private static final ThreadLocal<JsonataBindings> CURRENT_BINDINGS = new ThreadLocal<>();
+    static final class EvalState {
+        boolean active;
+        JsonataBindings bindings;
+        long millis;
+        Map<String, JsonataLambda> evalLambdas;
+        Map<String, org.joni.Regex> instanceRegexes;
+        int[] callDepth;
+        LambdaRegistry.TailCallData[] pendingTailCall;
 
-    /**
-     * Captures the wall-clock time at the start of each evaluation, in milliseconds
-     * since the Unix epoch.  Per the JSONata specification, every call to
-     * {@code $now()} and {@code $millis()} within the same expression evaluation
-     * must return this identical timestamp value.
-     */
-    private static final ThreadLocal<Long> EVALUATION_MILLIS = new ThreadLocal<>();
+        void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes) {
+            this.active = true;
+            this.bindings = bindings;
+            this.millis = millis;
+            this.instanceRegexes = instanceRegexes;
+        }
+
+        void end() {
+            this.active = false;
+            this.bindings = null;
+            this.instanceRegexes = null;
+            if (evalLambdas != null) evalLambdas.clear();
+            if (callDepth != null) callDepth[0] = 0;
+            if (pendingTailCall != null) pendingTailCall[0] = null;
+        }
+
+        Map<String, JsonataLambda> evalLambdas() {
+            if (evalLambdas == null) evalLambdas = new java.util.HashMap<>();
+            return evalLambdas;
+        }
+
+        int[] callDepth() {
+            if (callDepth == null) callDepth = new int[]{0};
+            return callDepth;
+        }
+
+        LambdaRegistry.TailCallData[] pendingTailCall() {
+            if (pendingTailCall == null) pendingTailCall = new LambdaRegistry.TailCallData[1];
+            return pendingTailCall;
+        }
+    }
+
+    private static final ThreadLocal<EvalState> CURRENT = ThreadLocal.withInitial(EvalState::new);
+
+    /** Reused for evaluations with no bindings — avoids allocation per evaluate() call. */
+    private static final JsonataBindings EMPTY_BINDINGS = new JsonataBindings();
 
     /**
      * Merges permanent bindings from the generated class with per-evaluation
@@ -43,20 +81,25 @@ final class EvaluationContext {
      * @param permanentValues    permanent named values registered on the expression instance
      * @param permanentFunctions permanent named functions registered on the expression instance
      * @param perEval            per-evaluation bindings, or {@code null}
+     * @param instanceRegexes    per-instance regex cache field from the expression instance
      */
     static void beginEvaluation(Map<String, JsonNode> permanentValues,
                                 Map<String, JsonataBoundFunction> permanentFunctions,
-                                JsonataBindings perEval) {
-        JsonataBindings merged = new JsonataBindings();
-        permanentValues.forEach(merged::bindValue);
-        permanentFunctions.forEach(merged::bindFunction);
-        if (perEval != null) {
-            // Per-evaluation bindings override permanent ones.
-            perEval.getValues().forEach(merged::bindValue);
-            perEval.getFunctions().forEach(merged::bindFunction);
+                                JsonataBindings perEval,
+                                Map<String, org.joni.Regex> instanceRegexes) {
+        JsonataBindings merged;
+        if (permanentValues.isEmpty() && permanentFunctions.isEmpty() && perEval == null) {
+            merged = EMPTY_BINDINGS;
+        } else {
+            merged = new JsonataBindings();
+            permanentValues.forEach(merged::bindValue);
+            permanentFunctions.forEach(merged::bindFunction);
+            if (perEval != null) {
+                perEval.getValues().forEach(merged::bindValue);
+                perEval.getFunctions().forEach(merged::bindFunction);
+            }
         }
-        CURRENT_BINDINGS.set(merged);
-        EVALUATION_MILLIS.set(System.currentTimeMillis());
+        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes);
     }
 
     /**
@@ -64,8 +107,29 @@ final class EvaluationContext {
      * Always call this in a {@code finally} block after {@link #beginEvaluation}.
      */
     static void endEvaluation() {
-        CURRENT_BINDINGS.remove();
-        EVALUATION_MILLIS.remove();
+        CURRENT.get().end();
+    }
+
+    /**
+     * Returns the full eval state for the current thread, or {@code null} if outside
+     * an evaluation. LambdaRegistry uses this to pay only one ThreadLocal.get() per
+     * fn_apply invocation instead of separate lookups for call depth, pending TCO, and lambdas.
+     */
+    static EvalState getState() {
+        EvalState s = CURRENT.get();
+        return s.active ? s : null;
+    }
+
+    /** Returns the per-evaluation lambda map for the current thread, or {@code null} if outside an evaluation. */
+    static Map<String, JsonataLambda> getEvalLambdas() {
+        EvalState s = CURRENT.get();
+        return s.active ? s.evalLambdas() : null;
+    }
+
+    /** Returns the per-instance regex map for the current evaluation thread, or {@code null}. */
+    static Map<String, org.joni.Regex> getInstanceRegexes() {
+        EvalState s = CURRENT.get();
+        return s.active ? s.instanceRegexes : null;
     }
 
     /**
@@ -74,8 +138,8 @@ final class EvaluationContext {
      * current wall-clock time so callers never receive {@code null}.
      */
     static long evaluationMillis() {
-        Long t = EVALUATION_MILLIS.get();
-        return t != null ? t : System.currentTimeMillis();
+        EvalState s = CURRENT.get();
+        return s.active ? s.millis : System.currentTimeMillis();
     }
 
     /**
@@ -85,9 +149,9 @@ final class EvaluationContext {
      * @return the bound {@link JsonNode}, or {@link JsonataRuntime#MISSING} if not bound
      */
     static JsonNode resolveBinding(String name) {
-        JsonataBindings b = CURRENT_BINDINGS.get();
-        if (b == null) return JsonataRuntime.MISSING;
-        JsonNode v = b.getValue(name);
+        EvalState s = CURRENT.get();
+        if (!s.active) return JsonataRuntime.MISSING;
+        JsonNode v = s.bindings.getValue(name);
         return v != null ? v : JsonataRuntime.MISSING;
     }
 
@@ -100,9 +164,9 @@ final class EvaluationContext {
      * @throws RuntimeEvaluationException if the function throws
      */
     static JsonNode callBoundFunction(String name, JsonNode[] args) throws RuntimeEvaluationException {
-        JsonataBindings b = CURRENT_BINDINGS.get();
-        if (b != null) {
-            JsonataBoundFunction fn = b.getFunction(name);
+        EvalState s = CURRENT.get();
+        if (s.active) {
+            JsonataBoundFunction fn = s.bindings.getFunction(name);
             if (fn != null) {
                 List<JsonNode> coerced = FunctionSignature.coerce(
                         fn.getFunctionSignature(), Arrays.asList(args));

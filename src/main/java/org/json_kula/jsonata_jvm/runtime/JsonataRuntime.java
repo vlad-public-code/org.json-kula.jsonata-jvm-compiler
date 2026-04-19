@@ -80,7 +80,7 @@ public final class JsonataRuntime {
     public static JsonNode field(JsonNode node, String name) {
         if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
         if (node.isArray()) {
-            ArrayNode result = NF.arrayNode();
+            ArrayNode result = NF.arrayNode(node.size());
             for (JsonNode elem : node) {
                 JsonNode val = field(elem, name);
                 if (!val.isMissingNode()) appendToSequence(result, val);
@@ -178,7 +178,7 @@ public final class JsonataRuntime {
         if (!seq.isArray()) {
             return isTruthy(predicate.apply(seq)) ? seq : MISSING;
         }
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(seq.size());
         for (JsonNode elem : seq) {
             if (isTruthy(predicate.apply(elem))) result.add(elem);
         }
@@ -703,11 +703,11 @@ public final class JsonataRuntime {
     public static JsonNode collectPosTuples(JsonNode seq, JsonataLambda elemsFn)
             throws RuntimeEvaluationException {
         if (seq == null || seq.isMissingNode()) return MISSING;
-        List<JsonNode> items = new ArrayList<>();
-        if (seq.isArray()) seq.forEach(items::add); else items.add(seq);
+        int size = seq.isArray() ? seq.size() : 1;
         ArrayNode result = NF.arrayNode();
-        for (int i = 0; i < items.size(); i++) {
-            JsonNode elems = elemsFn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)));
+        for (int i = 0; i < size; i++) {
+            JsonNode item = seq.isArray() ? seq.get(i) : seq;
+            JsonNode elems = elemsFn.apply(NF.arrayNode().add(item).add(NF.numberNode(i)));
             if (elems == null || elems.isMissingNode()) continue;
             if (elems.isArray()) {
                 for (JsonNode e : elems) {
@@ -834,7 +834,7 @@ public final class JsonataRuntime {
         long t = (long) td;
         if (t - f >= 10_000_000L)
             throw new RuntimeEvaluationException("D2014", "The range expression generates too many values");
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(t >= f ? (int)(t - f + 1) : 0);
         for (long i = f; i <= t; i++) result.add(i);
         return result;
     }
@@ -1114,6 +1114,182 @@ public final class JsonataRuntime {
         return NF.numberNode(arg.isArray() ? arg.size() : 1);
     }
 
+    /** Fused $count(arr.field): counts elements in all field values without materializing the field array. */
+    public static JsonNode fn_count_field(JsonNode seq, String fieldName) {
+        if (missing(seq)) return NF.numberNode(0);
+        if (!seq.isArray()) {
+            if (!seq.isObject()) return NF.numberNode(0);
+            JsonNode v = seq.get(fieldName);
+            if (v == null || v.isMissingNode()) return NF.numberNode(0);
+            return v.isArray() ? NF.numberNode(v.size()) : NF.numberNode(1);
+        }
+        int count = 0;
+        for (JsonNode elem : seq) {
+            if (!elem.isObject()) continue;
+            JsonNode v = elem.get(fieldName);
+            if (v == null || v.isMissingNode()) continue;
+            count += v.isArray() ? v.size() : 1;
+        }
+        return NF.numberNode(count);
+    }
+
+    /** Fused $count(arr[pred]): counts matching elements without materializing a filtered array. */
+    public static JsonNode fn_count_filter(JsonNode seq, JsonataLambda predicate) throws RuntimeEvaluationException {
+        if (missing(seq)) return NF.numberNode(0);
+        if (!seq.isArray()) return isTruthy(predicate.apply(seq)) ? NF.numberNode(1) : NF.numberNode(0);
+        int count = 0;
+        for (JsonNode elem : seq) { if (isTruthy(predicate.apply(elem))) count++; }
+        return NF.numberNode(count);
+    }
+
+    /** Fused $sum(arr.field): navigates field and sums without an intermediate array. */
+    public static JsonNode fn_sum_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double sum = 0; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v = elem.get(fieldName);
+            if (v == null || v.isMissingNode()) continue;
+            if (v.isArray()) {
+                for (JsonNode sub : v) { requireT0412(sub, "$sum"); sum += sub.doubleValue(); any = true; }
+            } else { requireT0412(v, "$sum"); sum += v.doubleValue(); any = true; }
+        }
+        return any ? numNode(sum) : MISSING;
+    }
+
+    /** Fused $average(arr.field): navigates field and averages without an intermediate array. */
+    public static JsonNode fn_average_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double sum = 0; int count = 0;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v = elem.get(fieldName);
+            if (v == null || v.isMissingNode()) continue;
+            if (v.isArray()) {
+                for (JsonNode sub : v) { requireAverageArg(sub); sum += sub.doubleValue(); count++; }
+            } else { requireAverageArg(v); sum += v.doubleValue(); count++; }
+        }
+        return count == 0 ? MISSING : numNode(sum / count);
+    }
+
+    /** Fused $max(arr.field): navigates field and finds max without an intermediate array. */
+    public static JsonNode fn_max_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double max = Double.NEGATIVE_INFINITY; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v = elem.get(fieldName);
+            if (v == null || v.isMissingNode()) continue;
+            if (v.isArray()) {
+                for (JsonNode sub : v) { requireT0412(sub, "$max"); double d = sub.doubleValue(); if (d > max) max = d; any = true; }
+            } else { requireT0412(v, "$max"); double d = v.doubleValue(); if (d > max) max = d; any = true; }
+        }
+        return any ? numNode(max) : MISSING;
+    }
+
+    /** Fused $sum(arr.f1.f2): two-level field navigation and sum without intermediate arrays. */
+    public static JsonNode fn_sum_field(JsonNode seq, String f1, String f2) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double sum = 0; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v1 = elem.get(f1);
+            if (v1 == null || v1.isMissingNode()) continue;
+            Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
+            for (JsonNode s : sub) {
+                if (!s.isObject()) continue;
+                JsonNode v2 = s.get(f2);
+                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$sum"); sum += n.doubleValue(); any = true; } }
+                else { requireT0412(v2, "$sum"); sum += v2.doubleValue(); any = true; }
+            }
+        }
+        return any ? numNode(sum) : MISSING;
+    }
+
+    /** Fused $average(arr.f1.f2): two-level field navigation and average without intermediate arrays. */
+    public static JsonNode fn_average_field(JsonNode seq, String f1, String f2) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double sum = 0; int count = 0;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v1 = elem.get(f1);
+            if (v1 == null || v1.isMissingNode()) continue;
+            Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
+            for (JsonNode s : sub) {
+                if (!s.isObject()) continue;
+                JsonNode v2 = s.get(f2);
+                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2.isArray()) { for (JsonNode n : v2) { requireAverageArg(n); sum += n.doubleValue(); count++; } }
+                else { requireAverageArg(v2); sum += v2.doubleValue(); count++; }
+            }
+        }
+        return count == 0 ? MISSING : numNode(sum / count);
+    }
+
+    /** Fused $max(arr.f1.f2): two-level field navigation and max without intermediate arrays. */
+    public static JsonNode fn_max_field(JsonNode seq, String f1, String f2) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double max = Double.NEGATIVE_INFINITY; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v1 = elem.get(f1);
+            if (v1 == null || v1.isMissingNode()) continue;
+            Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
+            for (JsonNode s : sub) {
+                if (!s.isObject()) continue;
+                JsonNode v2 = s.get(f2);
+                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$max"); double d = n.doubleValue(); if (d > max) max = d; any = true; } }
+                else { requireT0412(v2, "$max"); double d = v2.doubleValue(); if (d > max) max = d; any = true; }
+            }
+        }
+        return any ? numNode(max) : MISSING;
+    }
+
+    /** Fused $min(arr.f1.f2): two-level field navigation and min without intermediate arrays. */
+    public static JsonNode fn_min_field(JsonNode seq, String f1, String f2) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double min = Double.POSITIVE_INFINITY; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v1 = elem.get(f1);
+            if (v1 == null || v1.isMissingNode()) continue;
+            Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
+            for (JsonNode s : sub) {
+                if (!s.isObject()) continue;
+                JsonNode v2 = s.get(f2);
+                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$min"); double d = n.doubleValue(); if (d < min) min = d; any = true; } }
+                else { requireT0412(v2, "$min"); double d = v2.doubleValue(); if (d < min) min = d; any = true; }
+            }
+        }
+        return any ? numNode(min) : MISSING;
+    }
+
+    /** Fused $min(arr.field): navigates field and finds min without an intermediate array. */
+    public static JsonNode fn_min_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
+        if (missing(seq)) return MISSING;
+        double min = Double.POSITIVE_INFINITY; boolean any = false;
+        Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
+        for (JsonNode elem : items) {
+            if (!elem.isObject()) continue;
+            JsonNode v = elem.get(fieldName);
+            if (v == null || v.isMissingNode()) continue;
+            if (v.isArray()) {
+                for (JsonNode sub : v) { requireT0412(sub, "$min"); double d = sub.doubleValue(); if (d < min) min = d; any = true; }
+            } else { requireT0412(v, "$min"); double d = v.doubleValue(); if (d < min) min = d; any = true; }
+        }
+        return any ? numNode(min) : MISSING;
+    }
+
     public static JsonNode fn_sum(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
         if (!arg.isArray()) {
@@ -1185,14 +1361,41 @@ public final class JsonataRuntime {
     public static JsonNode fn_distinct(JsonNode arg) {
         if (missing(arg)) return MISSING;
         if (!arg.isArray()) return arg;
-        List<JsonNode> seen = new ArrayList<>();
-        for (JsonNode elem : arg) {
-            boolean dup = seen.stream().anyMatch(s -> s.equals(elem));
-            if (!dup) seen.add(elem);
-        }
+        java.util.LinkedHashSet<DistinctKey> seen = new java.util.LinkedHashSet<>();
         ArrayNode result = NF.arrayNode();
-        seen.forEach(result::add);
+        for (JsonNode elem : arg) {
+            if (seen.add(new DistinctKey(elem))) result.add(elem);
+        }
         return result;
+    }
+
+    private record DistinctKey(JsonNode node) {
+        @Override public boolean equals(Object o) {
+            return o instanceof DistinctKey dk && deepEquals(node, dk.node);
+        }
+        @Override public int hashCode() { return deepHashCode(node); }
+    }
+
+    private static int deepHashCode(JsonNode n) {
+        if (n == null || n.isMissingNode() || n.isNull()) return 0;
+        if (n.isNumber())  return Double.hashCode(n.doubleValue());
+        if (n.isTextual()) return n.textValue().hashCode();
+        if (n.isBoolean()) return Boolean.hashCode(n.booleanValue());
+        if (n.isArray()) {
+            int h = 1;
+            for (JsonNode e : n) h = 31 * h + deepHashCode(e);
+            return h;
+        }
+        if (n.isObject()) {
+            int h = 0;
+            java.util.Iterator<java.util.Map.Entry<String, JsonNode>> it = n.fields();
+            while (it.hasNext()) {
+                java.util.Map.Entry<String, JsonNode> e = it.next();
+                h += e.getKey().hashCode() ^ deepHashCode(e.getValue());
+            }
+            return h;
+        }
+        return n.hashCode();
     }
 
     public static JsonNode fn_flatten(JsonNode arg) {
@@ -1308,12 +1511,14 @@ public final class JsonataRuntime {
     public static JsonNode eachIndexed(JsonNode seq, JsonataLambda fn)
             throws RuntimeEvaluationException {
         if (seq == null || seq.isMissingNode()) return MISSING;
-        List<JsonNode> items = new ArrayList<>();
-        if (seq.isArray()) seq.forEach(items::add); else items.add(seq);
         ArrayNode result = NF.arrayNode();
-        for (int i = 0; i < items.size(); i++) {
-            JsonNode pair = NF.arrayNode().add(items.get(i)).add(NF.numberNode(i));
-            JsonNode val = fn.apply(pair);
+        if (seq.isArray()) {
+            for (int i = 0; i < seq.size(); i++) {
+                JsonNode val = fn.apply(NF.arrayNode().add(seq.get(i)).add(NF.numberNode(i)));
+                if (!val.isMissingNode()) appendToSequence(result, val);
+            }
+        } else {
+            JsonNode val = fn.apply(NF.arrayNode().add(seq).add(NF.numberNode(0)));
             if (!val.isMissingNode()) appendToSequence(result, val);
         }
         return unwrap(result);
@@ -1765,11 +1970,13 @@ public final class JsonataRuntime {
      * @param permanentValues    permanent named values registered on the expression instance
      * @param permanentFunctions permanent named functions registered on the expression instance
      * @param perEval            per-evaluation bindings, or {@code null}
+     * @param instanceRegexes    per-instance regex cache from the expression instance
      */
     public static void beginEvaluation(Map<String, JsonNode> permanentValues,
                                        Map<String, JsonataBoundFunction> permanentFunctions,
-                                       JsonataBindings perEval) {
-        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval);
+                                       JsonataBindings perEval,
+                                       Map<String, org.joni.Regex> instanceRegexes) {
+        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes);
     }
 
     /**

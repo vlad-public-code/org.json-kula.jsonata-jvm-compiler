@@ -31,6 +31,9 @@ public class JsonataExpressionLoader {
     private static final Pattern CLASS_PATTERN =
             Pattern.compile("\\bclass\\s+(\\w+)");
 
+    private static final List<String> COMPILE_OPTIONS = List.of(
+            "--release", "21", "-classpath", System.getProperty("java.class.path"));
+
     /**
      * Compiles {@code javaSource} and returns a new instance of the class it defines.
      *
@@ -51,34 +54,36 @@ public class JsonataExpressionLoader {
         String className = extractClassName(javaSource);
 
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
-        InMemoryFileManager fileManager =
-                new InMemoryFileManager(compiler.getStandardFileManager(diagnostics, null, null));
+        Map<String, byte[]> classBytes;
+        try (InMemoryFileManager fileManager = new InMemoryFileManager(
+                compiler.getStandardFileManager(diagnostics, null, null))) {
 
-        List<String> options = List.of(
-                "--release", "21",
-                "-classpath", System.getProperty("java.class.path"));
+            JavaCompiler.CompilationTask task = compiler.getTask(
+                    null,
+                    fileManager,
+                    diagnostics,
+                    COMPILE_OPTIONS,
+                    null,
+                    List.of(new InMemorySourceFile(className, javaSource)));
 
-        JavaCompiler.CompilationTask task = compiler.getTask(
-                null,
-                fileManager,
-                diagnostics,
-                options,
-                null,
-                List.of(new InMemorySourceFile(className, javaSource)));
-
-        if (!task.call()) {
-            StringBuilder sb = new StringBuilder("Compilation failed for class '")
-                    .append(className).append("':\n");
-            for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-                if (d.getKind() == Diagnostic.Kind.ERROR) {
-                    sb.append("  Line ").append(d.getLineNumber())
-                      .append(": ").append(d.getMessage(null)).append('\n');
+            if (!task.call()) {
+                StringBuilder sb = new StringBuilder("Compilation failed for class '")
+                        .append(className).append("':\n");
+                for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+                    if (d.getKind() == Diagnostic.Kind.ERROR) {
+                        sb.append("  Line ").append(d.getLineNumber())
+                          .append(": ").append(d.getMessage(null)).append('\n');
+                    }
                 }
+                throw new JsonataLoadException(sb.toString().stripTrailing());
             }
-            throw new JsonataLoadException(sb.toString().stripTrailing());
+
+            classBytes = fileManager.classBytes();
+        } catch (java.io.IOException e) {
+            throw new JsonataLoadException("Failed to close file manager: " + e.getMessage(), e);
         }
 
-        return instantiate(className, fileManager.classBytes());
+        return instantiate(className, classBytes);
     }
 
     // -------------------------------------------------------------------------
