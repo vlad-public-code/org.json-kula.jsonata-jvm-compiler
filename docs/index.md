@@ -5,6 +5,7 @@ title: jsonata-jvm-compiler
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
+Repeated evaluation of `JsonataExpression` instance is significantly faster than interpreter-based alternatives.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -15,7 +16,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 | Requirement | Version |
 |---|---|
 | Java | 21 (JDK — a JRE is not sufficient; the in-memory compiler needs `javac`) |
-| Jackson Databind | 2.18+ |
+| [Jackson Databind](https://github.com/FasterXML/jackson-databind) | 2.18+ |
 | [joni](https://github.com/jruby/joni) | 2.2+ (Oniguruma regex engine — used for `/pattern/flags` literals and the `$match`, `$replace`, `$split`, `$contains` functions) |
 
 ---
@@ -26,9 +27,9 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 
 ```xml
 <dependency>
-    <groupId>org.json-kula</groupId>
+    <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
