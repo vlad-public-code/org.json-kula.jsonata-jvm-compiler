@@ -206,34 +206,4 @@ class DateTimeFunctionsTest {
         JsonNode result = JsonNodeTestHelper.evaluate("$toMillis('Mon, Twelfth November 2018', '[FNn,*-3], [DWwo] [MNn] [Y]') ~> $fromMillis()");
         assertEquals("2018-11-12T00:00:00.000Z", result.textValue());
     }
-    
-@Test
-    void toMillis_gmtTimezone() throws Exception {
-        // Test +0530
-        JsonNode result1 = JsonNodeTestHelper.evaluate("$toMillis('2020-09-09 12:00:00 +0530', '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01] [Z]') ~> $fromMillis()");
-        System.out.println("+0530 result: " + result1);
-        
-        // Test GMT-5
-        JsonNode result2 = JsonNodeTestHelper.evaluate("$toMillis('2020-09-09 12:00:00 GMT-5', '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01] [z]') ~> $fromMillis()");
-        System.out.println("GMT-5 result: " + result2);
-    }
-    
-    @Test
-    void test_isoWeekDate_fromTestSuite() throws Exception {
-        // Test new regex pattern
-        String[] tests = {
-            "[Y]-[M]-[D]",
-            "[Y0001]-[M01]-[D01]",
-            "[M01]",
-            "[M]",
-            "[MNn]",
-            "[m]"
-        };
-        
-        System.out.println("=== Testing new regex: .*\\[M(?!m).* ===");
-        for (String pic : tests) {
-            boolean hasMonth = pic.matches(".*\\[M(?!m).*");
-            System.out.println("'" + pic + "' -> hasMonth: " + hasMonth);
-        }
-    }
 }
