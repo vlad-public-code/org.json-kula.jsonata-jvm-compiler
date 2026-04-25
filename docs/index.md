@@ -5,7 +5,7 @@ title: jsonata-jvm-compiler
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of `JsonataExpression` instance is significantly faster than interpreter-based alternatives.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **over 25× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -29,7 +29,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -244,10 +244,10 @@ Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | 1,519 ms | 292 ms |
-| 100,000 evaluations | 4,514 ms | 84,246 ms |
-| Throughput | **~22,150 eval/s** | ~1,190 eval/s |
-| **Speedup** | **18.7× faster** | baseline |
+| Compilation | 817 ms | 144 ms |
+| 100,000 evaluations | ~1,740 ms | ~37,400 ms |
+| Throughput | **~57,500 eval/s** | ~2,700 eval/s |
+| **Speedup** | **~25× faster** | baseline |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times, the throughput advantage dominates.
 

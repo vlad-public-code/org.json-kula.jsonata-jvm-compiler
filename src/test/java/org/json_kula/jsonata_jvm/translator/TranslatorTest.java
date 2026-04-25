@@ -91,17 +91,17 @@ class TranslatorTest {
     // =========================================================================
 
     @Test
-    void translate_generatedSource_implementsJsonataExpression() throws Exception {
+    void translate_generatedSource_extendsAbstractJsonataExpression() throws Exception {
         String src = source("42");
-        assertTrue(src.contains("implements JsonataExpression"),
-                "Generated class must implement JsonataExpression");
+        assertTrue(src.contains("extends AbstractJsonataExpression"),
+                "Generated class must extend AbstractJsonataExpression");
     }
 
     @Test
-    void translate_generatedSource_hasEvaluateMethod() throws Exception {
+    void translate_generatedSource_hasDoEvaluateMethod() throws Exception {
         String src = source("42");
-        assertTrue(src.contains("public JsonNode evaluate(JsonNode __input)"),
-                "Generated class must have evaluate(JsonNode) method");
+        assertTrue(src.contains("protected JsonNode doEvaluate(JsonNode __root)"),
+                "Generated class must have doEvaluate(JsonNode) method");
     }
 
     @Test

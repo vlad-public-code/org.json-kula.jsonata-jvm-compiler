@@ -997,8 +997,31 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         String srcExpr  = sourceNode.accept(this, ctx);
         String elemVar  = "__el" + ctx.state.nextId();
         String predExpr = n.predicate().accept(this, ctx.withCtx(elemVar));
-        String r = "dynamicFilter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
+        // Use filter() directly for statically boolean predicates — avoids the probe
+        // call (predicate.apply(MISSING)) that dynamicFilter() uses to detect subscript mode.
+        String filterFn = isStaticBooleanPredicate(n.predicate()) ? "filter" : "dynamicFilter";
+        String r = filterFn + "(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
         return forceArr ? "forceArray(" + r + ")" : r;
+    }
+
+    /**
+     * Returns {@code true} if the predicate is statically guaranteed to produce a boolean
+     * (never a number), so {@code filter()} can be used instead of {@code dynamicFilter()}.
+     */
+    private static boolean isStaticBooleanPredicate(AstNode node) {
+        return switch (node) {
+            case BinaryOp bo -> switch (bo.op()) {
+                case "=", "!=", "<", ">", "<=", ">=", "in", "and", "or" -> true;
+                default -> false;
+            };
+            case BooleanLiteral ignored -> true;
+            case FunctionCall fc -> switch (fc.name()) {
+                case "boolean", "not", "exists", "contains" -> true;
+                default -> false;
+            };
+            case Parenthesized p -> isStaticBooleanPredicate(p.inner());
+            default -> false;
+        };
     }
 
     /**
@@ -1163,10 +1186,78 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     // Visitor — function calls and lambdas
     // =========================================================================
 
+    /**
+     * Attempts to emit a fused runtime call that avoids intermediate ArrayNode allocations.
+     * Returns {@code null} when the pattern is not recognized or is unsafe to fuse.
+     *
+     * <p>Fused patterns:
+     * <ul>
+     *   <li>{@code $count(arr[pred])} → {@code fn_count_filter(arr, elem -> pred)}</li>
+     *   <li>{@code $count(arr.field)} → {@code fn_count_field(arr, "field")}</li>
+     *   <li>{@code $sum/average/max/min(arr.field)} → {@code fn_sum_field(arr, "field")} etc.</li>
+     *   <li>{@code $sum/average/max/min(arr.f1.f2)} → {@code fn_sum_field(arr, "f1", "f2")} etc.</li>
+     * </ul>
+     */
+    private String tryFusedCall(FunctionCall n, GenCtx ctx, GenCtx argCtx) {
+        AstNode arg0 = n.args().get(0);
+
+        if ("count".equals(n.name())) {
+            // $count(arr[pred]) — must not have ForceArray, RangeExpr predicate, or % reference
+            if (arg0 instanceof PredicateExpr pe
+                    && !(pe.source() instanceof ForceArray)
+                    && !(pe.predicate() instanceof RangeExpr)
+                    && !ScopeAnalyzer.containsParentStep(pe.predicate())) {
+                String srcExpr = pe.source().accept(this, argCtx);
+                String elemVar = "__cf" + ctx.state.nextId();
+                String predExpr = pe.predicate().accept(this, argCtx.withCtx(elemVar));
+                return "fn_count_filter(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
+            }
+            // $count(arr.field) — 2-step path, avoids materializing the field array
+            if (arg0 instanceof PathExpr pe
+                    && pe.steps().size() == 2
+                    && pe.steps().get(1) instanceof FieldRef fr
+                    && !ScopeAnalyzer.containsParentStep(pe)) {
+                String srcExpr = pe.steps().get(0).accept(this, argCtx);
+                return "fn_count_field(" + srcExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            }
+        }
+
+        // $sum/average/max/min(src.field) — 2-step path, second step is a plain FieldRef
+        String fusedFn = switch (n.name()) {
+            case "sum"     -> "fn_sum_field";
+            case "average" -> "fn_average_field";
+            case "max"     -> "fn_max_field";
+            case "min"     -> "fn_min_field";
+            default        -> null;
+        };
+        if (fusedFn != null && arg0 instanceof PathExpr pe && !ScopeAnalyzer.containsParentStep(pe)) {
+            if (pe.steps().size() == 2 && pe.steps().get(1) instanceof FieldRef fr) {
+                String srcExpr = pe.steps().get(0).accept(this, argCtx);
+                return fusedFn + "(" + srcExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
+            }
+            // $sum/average/max/min(src.f1.f2) — 3-step path (e.g. $sum($orders.lines.qty))
+            if (pe.steps().size() == 3
+                    && pe.steps().get(1) instanceof FieldRef fr1
+                    && pe.steps().get(2) instanceof FieldRef fr2) {
+                String srcExpr = pe.steps().get(0).accept(this, argCtx);
+                return fusedFn + "(" + srcExpr + ", " + ClassAssembler.javaString(fr1.name())
+                        + ", " + ClassAssembler.javaString(fr2.name()) + ")";
+            }
+        }
+
+        return null;
+    }
+
     @Override
     public String visitFunctionCall(FunctionCall n, GenCtx ctx) {
         // Arguments are never in tail position — only the call site itself may be.
         GenCtx argCtx = ctx.withTailPosition(false);
+        // Fusion: detect patterns that can skip intermediate array allocation.
+        // Must check before args are compiled because fusion generates different code.
+        if (!ctx.state.isLocal(n.name()) && n.args().size() == 1) {
+            String fused = tryFusedCall(n, ctx, argCtx);
+            if (fused != null) return fused;
+        }
         List<String> args = n.args().stream().map(a -> a.accept(this, argCtx)).toList();
         // Local variable bindings shadow built-in function names in JSONata.
         // If the name resolves to a local variable, call it as a user function

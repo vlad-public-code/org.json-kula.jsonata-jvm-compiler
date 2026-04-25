@@ -6,7 +6,7 @@
 
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.1-SNAPSHOT</version>
     <name>jsonata-jvm-compiler</name>
     <description>A Java 21 library that compiles JSONata expressions into native JVM bytecode</description>
     <url>https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler</url>
