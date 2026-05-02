@@ -453,6 +453,93 @@ public final class JsonataRuntime {
         return numNode(-a.doubleValue());
     }
 
+    // =========================================================================
+    // Primitive arithmetic helpers (used by generated numeric-specialised code)
+    // =========================================================================
+
+    /**
+     * Extracts a double from a JsonNode for use in fused arithmetic chains.
+     * Returns {@link Double#NaN} as a "missing" sentinel; throws T2001 if the
+     * node is present but non-numeric. Called for the left operand.
+     */
+    public static double numValL(JsonNode n, String op) throws RuntimeEvaluationException {
+        if (missing(n)) return Double.NaN;
+        if (!n.isNumber()) throw new RuntimeEvaluationException(
+                "T2001", "The left side of the " + op + " operator must evaluate to a number");
+        return n.doubleValue();
+    }
+
+    /**
+     * Like {@link #numValL} but emits T2002 (right-operand error). Called for the right operand.
+     */
+    public static double numValR(JsonNode n, String op) throws RuntimeEvaluationException {
+        if (missing(n)) return Double.NaN;
+        if (!n.isNumber()) throw new RuntimeEvaluationException(
+                "T2002", "The right side of the " + op + " operator must evaluate to a number");
+        return n.doubleValue();
+    }
+
+    /**
+     * Wraps a primitive double result back into a JsonNode.
+     * {@link Double#NaN} (the missing sentinel used inside arithmetic chains) becomes {@link #MISSING}.
+     */
+    public static JsonNode numWrap(double v) {
+        return Double.isNaN(v) ? MISSING : numNode(v);
+    }
+
+    /**
+     * Fused multiply for primitive arithmetic chains.
+     * Propagates NaN (missing sentinel) and enforces the same NaN/Infinity result
+     * checks as {@link #multiply(JsonNode, JsonNode)}.
+     */
+    public static double mul_d(double a, double b) throws RuntimeEvaluationException {
+        if (Double.isNaN(a) || Double.isNaN(b)) return Double.NaN;
+        double result = a * b;
+        if (Double.isNaN(result) || Double.isInfinite(result))
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+        return result;
+    }
+
+    /**
+     * Fused divide for primitive arithmetic chains.
+     * x/0 returns ±Infinity (not an error in JSONata); matches {@link #divide(JsonNode, JsonNode)}.
+     */
+    public static double div_d(double a, double b) throws RuntimeEvaluationException {
+        if (Double.isNaN(a) || Double.isNaN(b)) return Double.NaN;
+        if (b == 0) {
+            if (Double.isInfinite(a))
+                throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+            return a >= 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
+        }
+        if (Double.isInfinite(b))
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+        double result = a / b;
+        if (Double.isNaN(result))
+            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+        return result;
+    }
+
+    /**
+     * Fused modulo for primitive arithmetic chains.
+     * Zero denominator throws D1001 (unlike divide where x/0 = Infinity).
+     */
+    public static double mod_d(double a, double b) throws RuntimeEvaluationException {
+        if (Double.isNaN(a) || Double.isNaN(b)) return Double.NaN;
+        if (b == 0) throw new RuntimeEvaluationException("D1001", "Division by zero");
+        return a % b;
+    }
+
+    /**
+     * Fused negate for a JsonNode operand in a numeric arithmetic chain.
+     * Matches {@link #negate(JsonNode)} semantics.
+     */
+    public static double neg_dn(JsonNode n) throws RuntimeEvaluationException {
+        if (missing(n)) return Double.NaN;
+        if (!n.isNumber()) throw new RuntimeEvaluationException(
+                "D1002", "The operand of the - operator must evaluate to a number");
+        return -n.doubleValue();
+    }
+
     /** Throws the given error message as a RuntimeEvaluationException. Returns {@code JsonNode} so it can be used as an expression. */
     public static JsonNode fn_throw(String code, String message) throws RuntimeEvaluationException {
         throw new RuntimeEvaluationException(code, message);
@@ -835,7 +922,10 @@ public final class JsonataRuntime {
         if (t - f >= 10_000_000L)
             throw new RuntimeEvaluationException("D2014", "The range expression generates too many values");
         ArrayNode result = NF.arrayNode(t >= f ? (int)(t - f + 1) : 0);
-        for (long i = f; i <= t; i++) result.add(i);
+        for (long i = f; i <= t; i++) {
+            if ((i & 0xFFF) == 0) EvaluationContext.checkTimeout();
+            result.add(i);
+        }
         return result;
     }
 
@@ -1975,8 +2065,9 @@ public final class JsonataRuntime {
     public static void beginEvaluation(Map<String, JsonNode> permanentValues,
                                        Map<String, JsonataBoundFunction> permanentFunctions,
                                        JsonataBindings perEval,
-                                       Map<String, org.joni.Regex> instanceRegexes) {
-        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes);
+                                       Map<String, org.joni.Regex> instanceRegexes,
+                                       int timeoutMs) {
+        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes, timeoutMs);
     }
 
     /**

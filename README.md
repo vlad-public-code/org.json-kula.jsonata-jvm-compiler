@@ -25,7 +25,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
 </dependency>
 ```
 
@@ -184,6 +184,25 @@ The signature has the form `<params:return>` where `params` is a sequence of typ
 Example: `$length` has signature `<s-:n>` — accepts a string (using context as focus if omitted) and returns a number.
 
 ## Advanced usage
+
+### Evaluation timeout
+
+Call `setTimeout(int timeoutMs)` on an expression instance to cap how long a single `evaluate()` call may run. If the deadline is exceeded, a `JsonataEvaluationException` with error code `U1001` is thrown.
+
+```java
+JsonataExpression expr = factory.compile("...");
+expr.setTimeout(500);   // 500 ms wall-clock limit per evaluate() call
+
+try {
+    JsonNode result = expr.evaluate(input);
+} catch (JsonataEvaluationException e) {
+    if ("U1001".equals(e.getErrorCode())) {
+        // evaluation exceeded 500 ms
+    }
+}
+```
+
+Pass `0` or a negative value to remove the timeout. The timeout applies to all future `evaluate()` calls on the instance; concurrent calls on the same instance each track their own independent deadline. Setting a timeout has no measurable overhead on evaluations that complete before the deadline.
 
 ### Inspecting the source expression
 

@@ -6,7 +6,7 @@
 
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.1-SNAPSHOT</version>
+    <version>1.0.2-SNAPSHOT</version>
     <name>jsonata-jvm-compiler</name>
     <description>A Java 21 library that compiles JSONata expressions into native JVM bytecode</description>
     <url>https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler</url>
@@ -61,14 +61,55 @@
             <version>2.6.2</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>1.37</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-generator-annprocess</artifactId>
+            <version>1.37</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.openjdk.jmh</groupId>
+                            <artifactId>jmh-generator-annprocess</artifactId>
+                            <version>1.37</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!-- Exclude JMH benchmark classes from the regular test run -->
+                    <excludes>
+                        <exclude>**/benchmark/*Benchmark.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <mainClass>org.json_kula.jsonata_jvm.benchmark.ArithmeticBenchmark</mainClass>
+                    <classpathScope>test</classpathScope>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.sonatype.central</groupId>

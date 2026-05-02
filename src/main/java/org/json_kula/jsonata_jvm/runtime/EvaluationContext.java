@@ -30,16 +30,19 @@ final class EvaluationContext {
         boolean active;
         JsonataBindings bindings;
         long millis;
+        long timeoutDeadline;   // Long.MAX_VALUE = disabled
         Map<String, JsonataLambda> evalLambdas;
         Map<String, org.joni.Regex> instanceRegexes;
         int[] callDepth;
         LambdaRegistry.TailCallData[] pendingTailCall;
 
-        void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes) {
+        void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes,
+                   int timeoutMs) {
             this.active = true;
             this.bindings = bindings;
             this.millis = millis;
             this.instanceRegexes = instanceRegexes;
+            this.timeoutDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
         }
 
         void end() {
@@ -86,7 +89,8 @@ final class EvaluationContext {
     static void beginEvaluation(Map<String, JsonNode> permanentValues,
                                 Map<String, JsonataBoundFunction> permanentFunctions,
                                 JsonataBindings perEval,
-                                Map<String, org.joni.Regex> instanceRegexes) {
+                                Map<String, org.joni.Regex> instanceRegexes,
+                                int timeoutMs) {
         JsonataBindings merged;
         if (permanentValues.isEmpty() && permanentFunctions.isEmpty() && perEval == null) {
             merged = EMPTY_BINDINGS;
@@ -99,7 +103,18 @@ final class EvaluationContext {
                 perEval.getFunctions().forEach(merged::bindFunction);
             }
         }
-        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes);
+        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs);
+    }
+
+    /**
+     * Throws {@link RuntimeEvaluationException} U1001 if the current evaluation has exceeded
+     * its deadline. No-op when no timeout is set ({@code timeoutDeadline == Long.MAX_VALUE}).
+     */
+    static void checkTimeout() throws RuntimeEvaluationException {
+        EvalState s = CURRENT.get();
+        if (s.active && s.timeoutDeadline != Long.MAX_VALUE
+                && System.currentTimeMillis() > s.timeoutDeadline)
+            throw new RuntimeEvaluationException("U1001", "Expression evaluation timeout");
     }
 
     /**

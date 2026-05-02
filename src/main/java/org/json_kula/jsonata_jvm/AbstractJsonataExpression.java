@@ -22,6 +22,12 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
     private final ConcurrentHashMap<String, JsonNode> __values = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, JsonataBoundFunction> __functions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, org.joni.Regex> __regexes = new ConcurrentHashMap<>();
+    private volatile int __timeoutMs = 0;
+
+    @Override
+    public void setTimeout(int timeoutMs) {
+        __timeoutMs = timeoutMs;
+    }
 
     @Override
     public void assign(String name, JsonNode value) {
@@ -41,7 +47,7 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
     @Override
     public final JsonNode evaluate(JsonNode __input, JsonataBindings __perEval)
             throws JsonataEvaluationException {
-        beginEvaluation(__values, __functions, __perEval, __regexes);
+        beginEvaluation(__values, __functions, __perEval, __regexes, __timeoutMs);
         try {
             if (__input == null)
                 throw new JsonataEvaluationException(null, "Input JSON cannot be null");
