@@ -86,6 +86,14 @@ public interface JsonataExpression {
     default void registerFunction(String name, JsonataBoundFunction fnc) {}
 
     /**
+     * Sets a wall-clock timeout for all future evaluations on this instance.
+     * If an evaluation exceeds {@code timeoutMs} milliseconds it is interrupted
+     * and a {@link JsonataEvaluationException} with code {@code U1001} is thrown.
+     * Pass {@code 0} or a negative value to disable the timeout (default).
+     */
+    default void setTimeout(int timeoutMs) {}
+
+    /**
      * Returns the original JSONata expression string that was compiled into this
      * instance.
      *

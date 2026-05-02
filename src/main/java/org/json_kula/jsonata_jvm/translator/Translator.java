@@ -1074,21 +1074,96 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     }
 
     // =========================================================================
+    // Numeric specialisation — TypedExpr
+    // =========================================================================
+
+    /**
+     * A Java expression paired with a type flag.
+     * When {@code numeric=true} the expression evaluates to a {@code double} where
+     * {@link Double#NaN} is the "missing" sentinel.
+     * When {@code numeric=false} the expression evaluates to a {@code JsonNode}.
+     */
+    private record TypedExpr(String code, boolean numeric) {
+
+        /** Returns code that evaluates to a {@code double}, extracting/validating when needed. */
+        String asDouble(String op, boolean isLeft) {
+            if (numeric) return code;
+            return isLeft ? "numValL(" + code + ", \"" + op + "\")"
+                          : "numValR(" + code + ", \"" + op + "\")";
+        }
+
+        /** Returns code that evaluates to a {@code JsonNode}, wrapping when needed. */
+        String asJsonNode() {
+            return numeric ? "numWrap(" + code + ")" : code;
+        }
+    }
+
+    private static boolean isArithOp(String op) {
+        return switch (op) { case "+", "-", "*", "/", "%" -> true; default -> false; };
+    }
+
+    /**
+     * Visits an AST subtree and returns a {@link TypedExpr}.
+     *
+     * <p>Arithmetic nodes ({@link BinaryOp} with any of the five arithmetic operators,
+     * {@link UnaryMinus}, {@link NumberLiteral}) yield {@code numeric=true}: their code
+     * produces a {@code double} where {@link Double#NaN} is the missing sentinel.
+     * All other nodes fall back to the normal visitor and return {@code numeric=false}.
+     *
+     * <p>This avoids allocating an intermediate {@code JsonNode} for every sub-expression
+     * inside an arithmetic tree. Only the outermost boundary needs one {@code numWrap()} call.
+     */
+    private TypedExpr exprTyped(AstNode node, GenCtx ctx) {
+        return switch (node) {
+            case BinaryOp bo when isArithOp(bo.op()) -> {
+                TypedExpr l = exprTyped(bo.left(),  ctx);
+                TypedExpr r = exprTyped(bo.right(), ctx);
+                String lc = l.asDouble(bo.op(), true);
+                String rc = r.asDouble(bo.op(), false);
+                String code = switch (bo.op()) {
+                    case "+" -> "(" + lc + " + " + rc + ")";
+                    case "-" -> "(" + lc + " - " + rc + ")";
+                    case "*" -> "mul_d(" + lc + ", " + rc + ")";
+                    case "/" -> "div_d(" + lc + ", " + rc + ")";
+                    case "%" -> "mod_d(" + lc + ", " + rc + ")";
+                    default  -> throw new IllegalStateException();
+                };
+                yield new TypedExpr(code, true);
+            }
+            case UnaryMinus um -> {
+                TypedExpr inner = exprTyped(um.operand(), ctx);
+                String code = inner.numeric()
+                        ? "(-" + inner.code() + ")"
+                        : "neg_dn(" + inner.code() + ")";
+                yield new TypedExpr(code, true);
+            }
+            case NumberLiteral nl -> {
+                double v = nl.value();
+                if (Double.isNaN(v) || Double.isInfinite(v)) {
+                    yield new TypedExpr(nl.accept(this, ctx), false);
+                }
+                String lit = (v == Math.floor(v) && Math.abs(v) < 1e15)
+                        ? (long) v + "L"
+                        : String.valueOf(v);
+                yield new TypedExpr(lit, true);
+            }
+            default -> new TypedExpr(node.accept(this, ctx), false);
+        };
+    }
+
+    // =========================================================================
     // Visitor — operators
     // =========================================================================
 
     @Override
     public String visitBinaryOp(BinaryOp n, GenCtx ctx) {
-        // Operands of binary operators are never in tail position.
         GenCtx opCtx = ctx.withTailPosition(false);
+        if (isArithOp(n.op())) {
+            return exprTyped(n, opCtx).asJsonNode();
+        }
         String left  = n.left().accept(this, opCtx);
         String right = n.right().accept(this, opCtx);
         return switch (n.op()) {
-            case "+"   -> "add("      + left + ", " + right + ")";
-            case "-"   -> "subtract(" + left + ", " + right + ")";
-            case "*"   -> "multiply(" + left + ", " + right + ")";
-            case "/"   -> "divide("   + left + ", " + right + ")";
-            case "%"   -> "modulo("   + left + ", " + right + ")";
             case "&"   -> "concat("   + left + ", " + right + ")";
             case "="   -> "eq("       + left + ", " + right + ")";
             case "!="  -> "ne("       + left + ", " + right + ")";
@@ -1105,7 +1180,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitUnaryMinus(UnaryMinus n, GenCtx ctx) {
-        return "negate(" + n.operand().accept(this, ctx.withTailPosition(false)) + ")";
+        return exprTyped(n, ctx.withTailPosition(false)).asJsonNode();
     }
 
     // =========================================================================

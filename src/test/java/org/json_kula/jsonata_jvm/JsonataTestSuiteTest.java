@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -88,10 +89,23 @@ public class JsonataTestSuiteTest {
         JsonNode testCase = MAPPER.readTree(testFile.toFile());
         if (testCase.isArray()) {
             for (JsonNode subTestCase : testCase) {
-                runTestCase(testFile, subTestCase);
+                runTestCaseWithTimelimit(testFile, subTestCase);
             }
         }
         else {
+            runTestCaseWithTimelimit(testFile, testCase);
+        }
+    }
+
+    private void runTestCaseWithTimelimit(Path testFile, JsonNode testCase) throws IOException {
+        JsonNode tl = testCase.get("timelimit");
+        if (tl != null && tl.isNumber()) {
+            // Use the spec timelimit as a hard wall-clock deadline.
+            // assertTimeoutPreemptively runs the evaluation on a fresh thread;
+            // EvaluationContext sets up its ThreadLocals inside evaluate() itself, so this is safe.
+            assertTimeoutPreemptively(Duration.ofMillis(tl.longValue()), () -> runTestCase(testFile, testCase),
+                    "Test case exceeded timelimit of " + tl.longValue() + " ms: " + testFile);
+        } else {
             runTestCase(testFile, testCase);
         }
     }

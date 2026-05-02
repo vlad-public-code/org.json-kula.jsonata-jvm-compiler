@@ -4,11 +4,13 @@ import org.json_kula.jsonata_jvm.JsonataExpression;
 
 import javax.tools.*;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.OutputStream;
 import java.net.URI;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,8 +33,37 @@ public class JsonataExpressionLoader {
     private static final Pattern CLASS_PATTERN =
             Pattern.compile("\\bclass\\s+(\\w+)");
 
-    private static final List<String> COMPILE_OPTIONS = List.of(
-            "--release", "21", "-classpath", System.getProperty("java.class.path"));
+    /**
+     * Builds the compilation classpath from all available sources:
+     * the {@code java.class.path} system property (set by surefire, Gradle, etc.)
+     * plus any additional URLs from the thread-context and own classloaders
+     * (needed when running inside exec:java or other embedding environments).
+     */
+    private static String buildClasspath() {
+        Set<String> entries = new LinkedHashSet<>();
+        String sysCp = System.getProperty("java.class.path", "");
+        if (!sysCp.isEmpty()) {
+            Collections.addAll(entries, sysCp.split(Pattern.quote(File.pathSeparator)));
+        }
+        collectUrlClassLoaderEntries(Thread.currentThread().getContextClassLoader(), entries);
+        collectUrlClassLoaderEntries(JsonataExpressionLoader.class.getClassLoader(), entries);
+        return String.join(File.pathSeparator, entries);
+    }
+
+    private static void collectUrlClassLoaderEntries(ClassLoader cl, Set<String> out) {
+        for (ClassLoader c = cl; c != null; c = c.getParent()) {
+            if (c instanceof URLClassLoader ucl) {
+                for (URL url : ucl.getURLs()) {
+                    try { out.add(Paths.get(url.toURI()).toString()); }
+                    catch (Exception e) { out.add(url.getPath()); }
+                }
+            }
+        }
+    }
+
+    // Computed once per class load; the loader is thread-safe and stateless so this is fine.
+    private static final List<String> COMPILE_OPTIONS =
+            List.of("--release", "21", "-classpath", buildClasspath());
 
     /**
      * Compiles {@code javaSource} and returns a new instance of the class it defines.

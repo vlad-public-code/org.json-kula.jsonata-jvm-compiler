@@ -138,6 +138,9 @@ final class LambdaRegistry {
             if (depth[0] >= MAX_CALL_DEPTH)
                 throw new RuntimeEvaluationException(
                         "U1001", "Stack overflow error: Check for circular reference or too many function calls");
+            if (evalState != null && evalState.timeoutDeadline != Long.MAX_VALUE
+                    && System.currentTimeMillis() > evalState.timeoutDeadline)
+                throw new RuntimeEvaluationException("U1001", "Expression evaluation timeout");
             depth[0]++;
             try {
                 // Inline lookup reuses evalState already obtained above
