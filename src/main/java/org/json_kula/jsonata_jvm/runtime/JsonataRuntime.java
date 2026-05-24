@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataBoundFunction;
+import org.json_kula.jsonata_jvm.runtime.numeric.NumericBuiltins;
 
 import java.util.*;
 import java.util.function.Supplier;
@@ -562,7 +563,7 @@ public final class JsonataRuntime {
     }
 
     /** Returns a LongNode when {@code v} is a whole number within long range, else DoubleNode. */
-    static JsonNode numNode(double v) {
+    public static JsonNode numNode(double v) {
         if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.floor(v)
                 && v >= Long.MIN_VALUE && v <= Long.MAX_VALUE) {
             return NF.numberNode((long) v);
@@ -2110,7 +2111,17 @@ public final class JsonataRuntime {
         return n == null || n.isMissingNode();
     }
 
-    static boolean missing(JsonNode n) {
+    /** Returns {@code true} when {@code node} is an internal lambda-registry token. */
+    public static boolean isLambdaToken(JsonNode node) {
+        return LambdaRegistry.isLambdaToken(node);
+    }
+
+    /** Returns {@code true} when {@code node} is an internal regex-registry token. */
+    public static boolean isRegexToken(JsonNode node) {
+        return RegexRegistry.isRegexToken(node);
+    }
+
+    public static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
     }
 
@@ -2135,7 +2146,7 @@ public final class JsonataRuntime {
     }
 
     /** Converts a {@link JsonNode} to a String representation. */
-    static String toText(JsonNode n) throws RuntimeEvaluationException {
+    public static String toText(JsonNode n) throws RuntimeEvaluationException {
         if (n.isTextual()) {
             // Lambda/function tokens serialize as empty string per JSONata spec
             if (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n)) return "";
