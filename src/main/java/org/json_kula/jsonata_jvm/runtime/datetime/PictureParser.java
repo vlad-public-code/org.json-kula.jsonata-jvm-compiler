@@ -30,6 +30,10 @@ public final class PictureParser {
             Pattern.compile("(\\d)(st|nd|rd|th)");
     private static final Pattern LOWERCASE_ROMAN =
             Pattern.compile("\\b([ivxlcdm]+)\\b");
+    private static final String[] MONTH_NAMES = {
+            "january","february","march","april","may","june",
+            "july","august","september","october","november","december"
+    };
 
     // =========================================================================
     // Entry point
@@ -255,8 +259,6 @@ public final class PictureParser {
         StringBuilder sb = new StringBuilder();
 
         boolean hasDWwo = picture.contains("[DWwo]");
-        String[] monthNames = {"january","february","march","april","may","june",
-                "july","august","september","october","november","december"};
 
         for (int i = 0; i < words.length; i++) {
             String word    = words[i];
@@ -297,7 +299,7 @@ public final class PictureParser {
             // Stop at a month name (not for [DWwo])
             if (!hasDWwo) {
                 boolean isMonth = false;
-                for (String m : monthNames)
+                for (String m : MONTH_NAMES)
                     if (lower.startsWith(m.substring(0, Math.min(3, m.length())))) { isMonth = true; break; }
                 if (isMonth) {
                     for (int j = i; j < words.length; j++) {
@@ -347,13 +349,10 @@ public final class PictureParser {
         if (hasDwForYear) {
             // Input has day already converted; find and convert the year portion
             String[] parts = input.split("\\s+");
-            String[] monthNames = {"january","february","march","april","may","june",
-                    "july","august","september","october","november","december"};
-
             int monthIdx = -1, yearStart = -1;
             for (int i = 0; i < parts.length; i++) {
                 String lp = parts[i].toLowerCase();
-                for (String m : monthNames)
+                for (String m : MONTH_NAMES)
                     if (lp.startsWith(m.substring(0, Math.min(3, m.length())))) { monthIdx = i; break; }
                 if (lp.equals("day") && i + 2 < parts.length) { yearStart = i + 2; break; }
                 if (monthIdx >= 0) break;
