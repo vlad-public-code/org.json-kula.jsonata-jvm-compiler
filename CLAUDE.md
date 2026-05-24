@@ -24,6 +24,7 @@ Stack:
 - Runtime support library implemented in package `org.json_kula.jsonata_jvm.runtime`:
   - `JsonataRuntime` — all static helper methods used by generated classes: field navigation with sequence mapping, filter/subscript, arithmetic, string concat, comparisons, boolean logic, array/object constructors, range, sort/reverse/distinct/flatten/map/filter/reduce/each, string functions, numeric functions, date/time, error, and chain-operator support via a lambda registry.
   - `JsonataLambda` — single-argument functional interface (`JsonNode apply(JsonNode) throws JsonataEvaluationException`) used for predicates, map/filter callbacks, and inline lambdas.
+  - `org.json_kula.jsonata_jvm.runtime.datetime` — date/time subsystem (`IsoConverter`, `TimezoneUtils`, `RomanNumerals`, `WordNumbers`, `PictureFormatter`, `PictureParser`); `DateTimeUtils` in `runtime` is a thin facade over this package. See [docs/datetime.md](docs/datetime.md) for the full reference.
 - Class loader which consumes input string containing text of Java21 class implementing `org.json_kula.jsonata_jvm.JsonataExpression` and returns instance of `org.json_kula.jsonata_jvm.JsonataExpression`. Implemented in package `org.json_kula.jsonata_jvm.loader` (`JsonataExpressionLoader`, `JsonataLoadException`).
 
 Generated classes:

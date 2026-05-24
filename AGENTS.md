@@ -52,6 +52,7 @@ mvn clean compile
   - `org.json_kula.jsonata_jvm.optimizer` - AST optimization
   - `org.json_kula.jsonata_jvm.translator` - Java code generation
   - `org.json_kula.jsonata_jvm.runtime` - Runtime helpers
+  - `org.json_kula.jsonata_jvm.runtime.datetime` - Date/time subsystem (see [docs/datetime.md](docs/datetime.md))
   - `org.json_kula.jsonata_jvm.loader` - Class loading
 
 ### Naming Conventions
