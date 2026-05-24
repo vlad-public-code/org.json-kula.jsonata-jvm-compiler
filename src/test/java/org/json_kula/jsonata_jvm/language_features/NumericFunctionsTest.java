@@ -10,8 +10,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * Tests for JSONata numeric functions:
  *   $number, $abs, $floor, $ceil, $round, $power, $sqrt,
  *   $random, $formatNumber, $formatBase, $formatInteger, $parseInteger
- *
- * Spec: https://docs.jsonata.org/numeric-functions
+ * <p>
+ * Spec: <a href="https://docs.jsonata.org/numeric-functions">https://docs.jsonata.org/numeric-functions</a>
  */
 class NumericFunctionsTest {
 
@@ -213,8 +213,7 @@ class NumericFunctionsTest {
         double v1 = eval("$random()").doubleValue();
         double v2 = eval("$random()").doubleValue();
         // They *could* be equal but the probability is negligible; this is a sanity check
-        assertNotNull(v1);
-        assertNotNull(v2);
+        assertNotEquals(v1, v2);
     }
 
     // =========================================================================

@@ -7,13 +7,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests covering every confirmed bug from the DateTimeUtils code review.
- *
+ * <p>
  * Each test is annotated with the bug number and a brief description.
  */
 class DateTimeFormattingTest {
-
-    private static final long MILLIS_2017_11_07 = 1510067557121L; // 2017-11-07T15:12:37.121Z
-    private static final long MILLIS_2018_03_23 = 1521801216617L; // 2018-03-23T07:33:36.617Z (UTC)
 
     private JsonNode eval(String expr) throws Exception {
         return JsonNodeTestHelper.evaluate(expr);

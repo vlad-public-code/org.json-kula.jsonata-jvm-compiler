@@ -4,7 +4,6 @@ import java.time.*;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
 import java.time.format.SignStyle;
-import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
 import java.util.Locale;
@@ -28,8 +27,6 @@ public final class PictureParser {
             Pattern.compile(" ([+-])(\\d{2})(\\d{2})$");
     private static final Pattern ORDINAL_TAIL =
             Pattern.compile("(\\d)(st|nd|rd|th)");
-    private static final Pattern LOWERCASE_ROMAN =
-            Pattern.compile("\\b([ivxlcdm]+)\\b");
     private static final String[] MONTH_NAMES = {
             "january","february","march","april","may","june",
             "july","august","september","october","november","december"
@@ -49,7 +46,7 @@ public final class PictureParser {
         // the DateTimeFormatter accordingly.
         boolean dayWordsConverted = computeDayWordsConverted(picture);
 
-        String processed = preprocess(timestamp, picture, dayWordsConverted);
+        String processed = preprocess(timestamp, picture);
         java.time.format.DateTimeFormatter fmt = buildFormatter(picture, dayWordsConverted);
 
         try {
@@ -96,7 +93,7 @@ public final class PictureParser {
             throw new RuntimeEvaluationException("D3136", "Date/time underspecified");
 
         boolean hasYear      = picture.contains("[Y");
-        boolean hasMonth     = picture.matches(".*\\[M(?!m)[^\\]]*].*");
+        boolean hasMonth     = picture.matches(".*\\[M(?!m)[^]]*].*");
         boolean hasDayMonth  = picture.contains("[D]");
         boolean hasDayYear   = picture.toLowerCase().contains("[d]") && !picture.contains("[D]");
         if (hasYear && hasDayMonth && !hasMonth && !hasDayYear)
@@ -145,7 +142,7 @@ public final class PictureParser {
     // Preprocessing: convert non-numeric representations to numbers
     // =========================================================================
 
-    private static String preprocess(String timestamp, String picture, boolean dayWordsConverted) {
+    private static String preprocess(String timestamp, String picture) {
         String result = timestamp;
         result = stripGmt(result);
         result = normalizeOffset(result);
@@ -180,7 +177,7 @@ public final class PictureParser {
     private static String stripGmt(String s) {
         if (!s.contains("GMT")) return s;
         Matcher m = GMT_PATTERN.matcher(s);
-        StringBuffer sb = new StringBuffer();
+        StringBuilder sb = new StringBuilder();
         while (m.find()) {
             String sign  = m.group(1);
             String hours = m.group(2).length() == 1 ? "0" + m.group(2) : m.group(2);
@@ -230,9 +227,9 @@ public final class PictureParser {
     private static boolean needsDayWordConversion(String picture) {
         String lower = picture.toLowerCase();
         boolean hasDWwo = picture.contains("[DWwo]");
-        boolean hasDW   = picture.matches(".*\\[DW\\].*");
+        boolean hasDW   = picture.matches(".*\\[DW].*");
         boolean hasDwo  = lower.contains("[dwo]") || lower.contains("[dwwo]");
-        boolean hasDwLower = lower.matches(".*\\[dw\\].*");
+        boolean hasDwLower = lower.matches(".*\\[dw].*");
         return hasDWwo || hasDwo || hasDwLower
                 || (hasDW && lower.contains("[yw]"));
     }
@@ -240,7 +237,7 @@ public final class PictureParser {
     private static boolean computeDayWordsConverted(String picture) {
         return picture.contains("[DWwo]")
                 || picture.toLowerCase().contains("[dwo")
-                || (picture.matches(".*\\[DW\\].*") && picture.toLowerCase().contains("[yw]"));
+                || (picture.matches(".*\\[DW].*") && picture.toLowerCase().contains("[yw]"));
     }
 
     private static boolean hasYearWordsOrRoman(String picture) {
@@ -278,7 +275,7 @@ public final class PictureParser {
             }
 
             // For [DWwo]: convert the first convertible word to a number
-            if (hasDWwo && sb.length() > 0) {
+            if (hasDWwo && !sb.isEmpty()) {
                 String converted = WordNumbers.wordsToDigits(clean);
                 if (!converted.equals(clean)) {
                     sb.append(" ").append(converted);
@@ -290,7 +287,7 @@ public final class PictureParser {
             // Stop at "day" or "of" keywords
             if (lower.equals("day") || lower.equals("of")) {
                 for (int j = i; j < words.length; j++) {
-                    if (sb.length() > 0 && !sb.toString().endsWith(" ")) sb.append(" ");
+                    if (!sb.isEmpty() && !sb.toString().endsWith(" ")) sb.append(" ");
                     sb.append(words[j]);
                 }
                 break;
@@ -300,10 +297,10 @@ public final class PictureParser {
             if (!hasDWwo) {
                 boolean isMonth = false;
                 for (String m : MONTH_NAMES)
-                    if (lower.startsWith(m.substring(0, Math.min(3, m.length())))) { isMonth = true; break; }
+                    if (lower.startsWith(m.substring(0, 3))) { isMonth = true; break; }
                 if (isMonth) {
                     for (int j = i; j < words.length; j++) {
-                        if (sb.length() > 0 && !sb.toString().endsWith(" ")) sb.append(" ");
+                        if (!sb.isEmpty() && !sb.toString().endsWith(" ")) sb.append(" ");
                         sb.append(words[j]);
                     }
                     break;
@@ -317,13 +314,13 @@ public final class PictureParser {
                 test.append(words[k].replace(",","").replace(".",""));
             }
             String converted = WordNumbers.wordsToDigits(test.toString());
-            if (!converted.equals(test.toString())) {
+            if (!converted.contentEquals(test)) {
                 sb = new StringBuilder(converted);
             } else if (clean.matches("\\d+")) {
-                if (sb.length() > 0 && !sb.toString().endsWith(" ")) sb.append(" ");
+                if (!sb.isEmpty() && !sb.toString().endsWith(" ")) sb.append(" ");
                 sb.append(word);
             } else {
-                if (sb.length() > 0 && !sb.toString().endsWith(" ")) sb.append(" ");
+                if (!sb.isEmpty() && !sb.toString().endsWith(" ")) sb.append(" ");
                 sb.append(word);
             }
         }
@@ -353,7 +350,7 @@ public final class PictureParser {
             for (int i = 0; i < parts.length; i++) {
                 String lp = parts[i].toLowerCase();
                 for (String m : MONTH_NAMES)
-                    if (lp.startsWith(m.substring(0, Math.min(3, m.length())))) { monthIdx = i; break; }
+                    if (lp.startsWith(m.substring(0, 3))) { monthIdx = i; break; }
                 if (lp.equals("day") && i + 2 < parts.length) { yearStart = i + 2; break; }
                 if (monthIdx >= 0) break;
             }
@@ -365,7 +362,7 @@ public final class PictureParser {
                     yearWords.append(parts[i]);
                 }
                 String convertedYear = WordNumbers.wordsToDigits(yearWords.toString());
-                if (!convertedYear.equals(yearWords.toString())) {
+                if (!convertedYear.contentEquals(yearWords)) {
                     String monthClean = parts[monthIdx].replace(",", "");
                     boolean hasComma  = parts[monthIdx].contains(",");
                     StringBuilder prefix = new StringBuilder();
@@ -382,7 +379,7 @@ public final class PictureParser {
                     yearWords.append(parts[i]);
                 }
                 String convertedYear = WordNumbers.wordsToDigits(yearWords.toString());
-                if (!convertedYear.equals(yearWords.toString())) {
+                if (!convertedYear.contentEquals(yearWords)) {
                     StringBuilder nb = new StringBuilder();
                     for (int i = 0; i < yearStart - 1; i++) {
                         if (i > 0) nb.append(" ");

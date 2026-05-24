@@ -12,8 +12,6 @@ final class TimezoneUtils {
     private static final Pattern GMT_OFFSET =
             Pattern.compile("GMT([+-])(\\d{1,2})(?::(\\d{2}))?");
     // Normalises ±HHMM → ±HH:MM in timestamps (only when no colon is present)
-    private static final Pattern BARE_OFFSET_IN_TIMESTAMP =
-            Pattern.compile(" ([+-])(\\d{2})(\\d{2})$");
 
     /**
      * Parses a timezone string into a {@link ZoneOffset}.

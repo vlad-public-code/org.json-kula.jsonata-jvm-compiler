@@ -96,27 +96,6 @@ public final class JsonataRuntime {
         return MISSING;
     }
 
-    /**
-     * Like {@link #field} but does NOT flatten array results. Used for array/object
-     * constructor steps where we need to preserve each element's result as-is.
-     */
-    public static JsonNode fieldPreserve(JsonNode node, String name) {
-        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
-        if (node.isArray()) {
-            ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : node) {
-                JsonNode val = fieldPreserve(elem, name);
-                if (!val.isMissingNode()) result.add(val);
-            }
-            return unwrap(result);
-        }
-        if (node.isObject()) {
-            JsonNode val = node.get(name);
-            return val != null ? val : MISSING;
-        }
-        return MISSING;
-    }
-
     /** Returns all field values of an object, or maps over an array. */
     public static JsonNode wildcard(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
@@ -151,7 +130,7 @@ public final class JsonataRuntime {
     private static void collectDescendants(JsonNode node, ArrayNode acc) {
         if (node.isArray()) {
             for (JsonNode elem : node) collectDescendants(elem, acc);
-        } else if (node.isObject() && node.size() > 0) {
+        } else if (node.isObject() && !node.isEmpty()) {
             acc.add(node);
             node.fields().forEachRemaining(e -> collectDescendants(e.getValue(), acc));
         }

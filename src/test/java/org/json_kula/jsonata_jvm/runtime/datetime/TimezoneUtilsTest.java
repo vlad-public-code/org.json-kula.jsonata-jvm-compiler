@@ -11,7 +11,7 @@ class TimezoneUtilsTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void parseZoneOffset_utcVariants() throws Exception {
+    void parseZoneOffset_utcVariants() {
         assertEquals(ZoneOffset.UTC, TimezoneUtils.parseZoneOffset(null));
         assertEquals(ZoneOffset.UTC, TimezoneUtils.parseZoneOffset(""));
         assertEquals(ZoneOffset.UTC, TimezoneUtils.parseZoneOffset("Z"));
@@ -22,14 +22,14 @@ class TimezoneUtilsTest {
     }
 
     @Test
-    void parseZoneOffset_hmhmFormat() throws Exception {
+    void parseZoneOffset_hmhmFormat() {
         // Original supported format: ±HHMM
         assertEquals(ZoneOffset.ofHoursMinutes(-5, 0),  TimezoneUtils.parseZoneOffset("-0500"));
         assertEquals(ZoneOffset.ofHoursMinutes(5, 30),  TimezoneUtils.parseZoneOffset("+0530"));
     }
 
     @Test
-    void parseZoneOffset_hmColonFormat() throws Exception {
+    void parseZoneOffset_hmColonFormat() {
         // Fix: ±HH:MM was previously rejected with an exception.
         assertEquals(ZoneOffset.ofHoursMinutes(-5, 0),  TimezoneUtils.parseZoneOffset("-05:00"));
         assertEquals(ZoneOffset.ofHoursMinutes(5, 30),  TimezoneUtils.parseZoneOffset("+05:30"));
@@ -37,7 +37,7 @@ class TimezoneUtilsTest {
     }
 
     @Test
-    void parseZoneOffset_gmtFormat() throws Exception {
+    void parseZoneOffset_gmtFormat() {
         assertEquals(ZoneOffset.UTC,                     TimezoneUtils.parseZoneOffset("GMT"));
         assertEquals(ZoneOffset.ofHoursMinutes(-5, 0),   TimezoneUtils.parseZoneOffset("GMT-05:00"));
         assertEquals(ZoneOffset.ofHoursMinutes(5, 30),   TimezoneUtils.parseZoneOffset("GMT+5:30"));

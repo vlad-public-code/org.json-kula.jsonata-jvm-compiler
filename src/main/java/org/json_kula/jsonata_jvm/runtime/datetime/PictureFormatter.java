@@ -92,11 +92,18 @@ public final class PictureFormatter {
     private static String formatYear(ZonedDateTime dt, String mod)
             throws RuntimeEvaluationException {
         if (!mod.isEmpty()) {
-            if (mod.equals("N") || mod.equals("n"))
-                throw new RuntimeEvaluationException("D3133", "Year name component is not supported");
-            if (mod.equals("I")) return RomanNumerals.toRoman(dt.getYear());
-            if (mod.equals("i")) return RomanNumerals.toRoman(dt.getYear()).toLowerCase(Locale.ENGLISH);
-            if (mod.equals("w") || mod.equals("W")) return WordNumbers.toCardinal(dt.getYear());
+            switch (mod) {
+                case "N", "n" -> throw new RuntimeEvaluationException("D3133", "Year name component is not supported");
+                case "I" -> {
+                    return RomanNumerals.toRoman(dt.getYear());
+                }
+                case "i" -> {
+                    return RomanNumerals.toRoman(dt.getYear()).toLowerCase(Locale.ENGLISH);
+                }
+                case "w", "W" -> {
+                    return WordNumbers.toCardinal(dt.getYear());
+                }
+            }
         }
         return formatInt(dt.getYear(), mod, 4);
     }
@@ -386,7 +393,7 @@ public final class PictureFormatter {
         if (parts.length > 1 && parts[1].contains("-")) {
             try {
                 int maxLen = Integer.parseInt(parts[1].split("-")[0]);
-                String cased = (parts[0].length() > 0 && parts[0].charAt(0) == 'N') ? titleCase(name)
+                String cased = (!parts[0].isEmpty() && parts[0].charAt(0) == 'N') ? titleCase(name)
                         : (parts[0].contains("n") ? name.toLowerCase(Locale.ENGLISH) : name);
                 return cased.substring(0, Math.min(maxLen, cased.length()));
             } catch (NumberFormatException ignored) {}

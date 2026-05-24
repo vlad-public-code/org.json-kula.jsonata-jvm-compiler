@@ -15,14 +15,14 @@ class UrlCodecTest {
     // encode — unreserved / reserved / other
     // =========================================================================
 
-    @Test void encode_unreserved_unchanged() throws Exception {
+    @Test void encode_unreserved_unchanged() {
         // A-Z a-z 0-9 - _ . ~ must pass through untouched
         String unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
         assertEquals(unreserved, UrlCodec.encode(unreserved, false));
         assertEquals(unreserved, UrlCodec.encode(unreserved, true));
     }
 
-    @Test void encodeComponent_encodes_reserved() throws Exception {
+    @Test void encodeComponent_encodes_reserved() {
         // : / ? # etc. must be percent-encoded in component mode
         String result = UrlCodec.encode(":/?#[]@!$&'()*+,;=", false);
         assertFalse(result.contains(":"));
@@ -30,7 +30,7 @@ class UrlCodecTest {
         assertFalse(result.contains("?"));
     }
 
-    @Test void encodeUrl_preserves_reserved() throws Exception {
+    @Test void encodeUrl_preserves_reserved() {
         // Same chars preserved in full-URL mode
         String result = UrlCodec.encode(":/?#[]@!$&'()*+,;=", true);
         assertTrue(result.contains(":"));
@@ -38,38 +38,38 @@ class UrlCodecTest {
         assertTrue(result.contains("?"));
     }
 
-    @Test void encode_space_becomes_percent20() throws Exception {
+    @Test void encode_space_becomes_percent20() {
         assertEquals("hello%20world", UrlCodec.encode("hello world", false));
         assertEquals("hello%20world", UrlCodec.encode("hello world", true));
     }
 
-    @Test void encode_caret_encoded() throws Exception {
+    @Test void encode_caret_encoded() {
         // ^ is neither unreserved nor reserved — must be encoded
         assertEquals("hello%5Eworld", UrlCodec.encode("hello^world", true));
     }
 
-    @Test void encode_multibyte_unicode() throws Exception {
+    @Test void encode_multibyte_unicode() {
         // é = U+00E9 → UTF-8 0xC3 0xA9
         assertEquals("%C3%A9", UrlCodec.encode("é", false));
     }
 
-    @Test void encode_emoji() throws Exception {
+    @Test void encode_emoji() {
         // 😀 = U+1F600 → UTF-8 0xF0 0x9F 0x98 0x80
         assertEquals("%F0%9F%98%80", UrlCodec.encode("😀", false));
     }
 
     @Test void encode_lone_high_surrogate_throws() {
         // Lone high surrogate (no following low surrogate)
-        String s = String.valueOf(new char[]{'\uD83D'});
+        String s = String.valueOf('\uD83D');
         assertThrows(RuntimeEvaluationException.class, () -> UrlCodec.encode(s, false));
     }
 
     @Test void encode_lone_low_surrogate_throws() {
-        String s = String.valueOf(new char[]{'\uDE00'});
+        String s = String.valueOf('\uDE00');
         assertThrows(RuntimeEvaluationException.class, () -> UrlCodec.encode(s, false));
     }
 
-    @Test void encode_valid_surrogate_pair_ok() throws Exception {
+    @Test void encode_valid_surrogate_pair_ok() {
         // 😀 as explicit surrogate pair — valid, should encode to same bytes
         String s = "😀";   // U+1F600
         String result = UrlCodec.encode(s, false);
@@ -80,19 +80,19 @@ class UrlCodecTest {
     // decode
     // =========================================================================
 
-    @Test void decode_percent20_to_space() throws Exception {
+    @Test void decode_percent20_to_space() {
         assertEquals("hello world", UrlCodec.decode("hello%20world"));
     }
 
-    @Test void decode_multibyte_sequence() throws Exception {
+    @Test void decode_multibyte_sequence() {
         assertEquals("é", UrlCodec.decode("%C3%A9"));
     }
 
-    @Test void decode_unreserved_ascii_passthrough() throws Exception {
+    @Test void decode_unreserved_ascii_passthrough() {
         assertEquals("hello-world.test~ok", UrlCodec.decode("hello-world.test~ok"));
     }
 
-    @Test void decode_lowercase_hex() throws Exception {
+    @Test void decode_lowercase_hex() {
         assertEquals(" ", UrlCodec.decode("%20"));
         // lower-case hex digits must also work
         assertEquals(" ", UrlCodec.decode("%20"));
@@ -120,12 +120,12 @@ class UrlCodecTest {
     // roundtrip
     // =========================================================================
 
-    @Test void roundtrip_component() throws Exception {
+    @Test void roundtrip_component() {
         String original = "name=John Doe&city=São Paulo";
         assertEquals(original, UrlCodec.decode(UrlCodec.encode(original, false)));
     }
 
-    @Test void roundtrip_full_url() throws Exception {
+    @Test void roundtrip_full_url() {
         String original = "http://example.com/search?q=hello world&lang=en";
         assertEquals(original, UrlCodec.decode(UrlCodec.encode(original, true)));
     }

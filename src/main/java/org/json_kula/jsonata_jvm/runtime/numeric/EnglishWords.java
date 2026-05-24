@@ -71,7 +71,7 @@ final class EnglishWords {
         }
         String base = toWords(Math.round(work), false);
         StringBuilder sb = new StringBuilder(base);
-        for (int i = 0; i < trillionCount; i++) sb.append(" trillion");
+        sb.append(" trillion".repeat(Math.max(0, trillionCount)));
         return sb.toString();
     }
 
@@ -232,7 +232,7 @@ final class EnglishWords {
                 try {
                     if (lastMagnitude > 0 && val > lastMagnitude) {
                         // Ascending magnitude: "one thousand trillion" → 1000 × 10^12 = 10^15.
-                        long base = Math.addExact(total, subtotal == 0 ? 0 : subtotal);
+                        long base = Math.addExact(total, subtotal);
                         total = Math.multiplyExact(base == 0 ? 1 : base, val);
                     } else {
                         // Descending or first: "one million one thousand" → 10^6 + 1×10^3.
@@ -267,12 +267,26 @@ final class EnglishWords {
         String lastWord = lastSpace >= 0 ? lower.substring(lastSpace + 1) : lower;
 
         // Irregular ordinals
-        if (lastWord.equals("twelfth")) return replaceLastWord(lower, lastSpace, "twelve");
-        if (lastWord.equals("fifth"))   return replaceLastWord(lower, lastSpace, "five");
-        if (lastWord.equals("ninth"))   return replaceLastWord(lower, lastSpace, "nine");
-        if (lastWord.equals("first"))   return replaceLastWord(lower, lastSpace, "one");
-        if (lastWord.equals("second"))  return replaceLastWord(lower, lastSpace, "two");
-        if (lastWord.equals("third"))   return replaceLastWord(lower, lastSpace, "three");
+        switch (lastWord) {
+            case "twelfth" -> {
+                return replaceLastWord(lower, lastSpace, "twelve");
+            }
+            case "fifth" -> {
+                return replaceLastWord(lower, lastSpace, "five");
+            }
+            case "ninth" -> {
+                return replaceLastWord(lower, lastSpace, "nine");
+            }
+            case "first" -> {
+                return replaceLastWord(lower, lastSpace, "one");
+            }
+            case "second" -> {
+                return replaceLastWord(lower, lastSpace, "two");
+            }
+            case "third" -> {
+                return replaceLastWord(lower, lastSpace, "three");
+            }
+        }
 
         // "twentieth" → "twenty", "thirtieth" → "thirty", etc.
         if (lower.endsWith("ieth")) return lower.substring(0, lower.length() - 4) + "y";
@@ -290,7 +304,7 @@ final class EnglishWords {
                     if (i > 0) result.append(" ");
                     result.append(parts[i]);
                 }
-                if (result.length() > 0) result.append(" ");
+                if (!result.isEmpty()) result.append(" ");
                 result.append(cardinal);
                 return result.toString();
             }

@@ -33,14 +33,13 @@ final class IntegerPicture {
     static String formatLarge(double n, String pic) throws RuntimeEvaluationException {
         boolean ordinal = pic.endsWith(";o");
         String basePic  = ordinal ? pic.substring(0, pic.length() - 2) : pic;
-        String words = switch (basePic) {
+        return switch (basePic) {
             case "w"  -> EnglishWords.toWordsDouble(n, ordinal);
             case "W"  -> EnglishWords.toWordsDouble(n, ordinal).toUpperCase();
             case "Ww" -> EnglishWords.titleCase(EnglishWords.toWordsDouble(n, ordinal));
             default   -> throw new RuntimeEvaluationException(null,
                     "$formatInteger: value is not representable as an integer: " + n);
         };
-        return words;
     }
 
     /** Formats {@code n} using the given JSONata integer picture string. */
@@ -177,7 +176,7 @@ final class IntegerPicture {
             if (c == ';') break;
             if (c == '#' || c == '0' || c == ',') pat.append(c);
         }
-        if (pat.length() == 0) pat.append('0');
+        if (pat.isEmpty()) pat.append('0');
 
         DecimalFormatSymbols dfs = new DecimalFormatSymbols(Locale.ROOT);
         DecimalFormat df = new DecimalFormat(pat.toString(), dfs);

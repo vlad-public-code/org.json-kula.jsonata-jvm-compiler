@@ -13,14 +13,10 @@ import static org.junit.jupiter.api.Assertions.*;
  *   $match, $replace, $pad, $eval,
  *   $base64encode, $base64decode,
  *   $encodeUrlComponent, $decodeUrlComponent, $encodeUrl, $decodeUrl
- *
- * Spec: https://docs.jsonata.org/string-functions
+ * <p>
+ * Spec: <a href="https://docs.jsonata.org/string-functions">https://docs.jsonata.org/string-functions</a>
  */
 class StringFunctionsTest {
-
-    private JsonNode eval(String expr, String json) throws Exception {
-        return JsonNodeTestHelper.evaluate(expr, json);
-    }
 
     private JsonNode eval(String expr) throws Exception {
         return JsonNodeTestHelper.evaluate(expr);

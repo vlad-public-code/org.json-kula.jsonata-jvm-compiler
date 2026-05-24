@@ -214,14 +214,14 @@ final class DecimalPicture {
 
         // Build the Java DecimalFormat pattern (numeric part only)
         StringBuilder javaPat = new StringBuilder();
-        javaPat.append(intSpec.length() > 0 ? intSpec : "0");
+        javaPat.append(!intSpec.isEmpty() ? intSpec : "0");
         if (pastDecimal) {
             javaPat.append('.');
             javaPat.append(fracSpec);
         }
         if (pastExponent) {
             javaPat.append('E');
-            javaPat.append(expSpec.length() > 0 ? expSpec : "0");
+            javaPat.append(!expSpec.isEmpty() ? expSpec : "0");
         }
 
         // Format using DecimalFormat (grouping disabled — we apply it manually)
@@ -328,7 +328,7 @@ final class DecimalPicture {
             if (expStr.startsWith("-")) { sb.append('-'); expStr = expStr.substring(1); }
             char padChar = customDig ? (char) digitBase : '0';
             int zeros = Math.max(0, expLen - expStr.length());
-            for (int z = 0; z < zeros; z++) sb.append(padChar);
+            sb.append(String.valueOf(padChar).repeat(zeros));
             appendNumericPart(sb, expStr, customDig, digitBase);
         }
         sb.append(suffix);
