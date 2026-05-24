@@ -54,6 +54,7 @@ mvn clean compile
   - `org.json_kula.jsonata_jvm.runtime` - Runtime helpers
   - `org.json_kula.jsonata_jvm.runtime.datetime` - Date/time subsystem (see [docs/datetime.md](docs/datetime.md))
   - `org.json_kula.jsonata_jvm.runtime.numeric` - Numeric built-ins subsystem (see [docs/numeric.md](docs/numeric.md))
+  - `org.json_kula.jsonata_jvm.runtime.string` - String built-ins subsystem (see [docs/string.md](docs/string.md))
   - `org.json_kula.jsonata_jvm.loader` - Class loading
 
 ### Naming Conventions

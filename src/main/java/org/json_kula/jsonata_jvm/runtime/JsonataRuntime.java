@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataBoundFunction;
 import org.json_kula.jsonata_jvm.runtime.numeric.NumericBuiltins;
+import org.json_kula.jsonata_jvm.runtime.string.StringBuiltins;
 
 import java.util.*;
 import java.util.function.Supplier;
@@ -57,7 +58,7 @@ public final class JsonataRuntime {
     }
 
     /** Returns the currently registered eval delegate, or {@code null} if none. */
-    static EvalDelegate getEvalDelegate() {
+    public static EvalDelegate getEvalDelegate() {
         return EVAL_DELEGATE;
     }
 
@@ -2121,6 +2122,16 @@ public final class JsonataRuntime {
         return RegexRegistry.isRegexToken(node);
     }
 
+    /** Resolves a regex sentinel token to the compiled {@link org.joni.Regex}. */
+    public static org.joni.Regex lookupRegex(JsonNode token) throws RuntimeEvaluationException {
+        return RegexRegistry.lookupRegex(token);
+    }
+
+    /** Builds a regex that matches the literal string {@code pattern} (no special regex chars). */
+    public static org.joni.Regex buildLiteralRegex(String pattern) {
+        return RegexRegistry.buildLiteralRegex(pattern);
+    }
+
     public static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
     }
@@ -2160,7 +2171,7 @@ public final class JsonataRuntime {
     }
 
     /** Replaces lambda/regex tokens with empty string nodes recursively for JSON serialization. */
-    static JsonNode sanitizeForString(JsonNode n) {
+    public static JsonNode sanitizeForString(JsonNode n) {
         if (n.isTextual() && (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n))) {
             return NF.textNode("");
         }
