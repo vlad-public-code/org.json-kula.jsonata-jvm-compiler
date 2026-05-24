@@ -13,14 +13,10 @@ import static org.junit.jupiter.api.Assertions.*;
  *   $match, $replace, $pad, $eval,
  *   $base64encode, $base64decode,
  *   $encodeUrlComponent, $decodeUrlComponent, $encodeUrl, $decodeUrl
- *
- * Spec: https://docs.jsonata.org/string-functions
+ * <p>
+ * Spec: <a href="https://docs.jsonata.org/string-functions">https://docs.jsonata.org/string-functions</a>
  */
 class StringFunctionsTest {
-
-    private JsonNode eval(String expr, String json) throws Exception {
-        return JsonNodeTestHelper.evaluate(expr, json);
-    }
 
     private JsonNode eval(String expr) throws Exception {
         return JsonNodeTestHelper.evaluate(expr);
@@ -421,5 +417,156 @@ assertTrue(result.isArray());
         String encoded = eval("$encodeUrl(\"" + original + "\")").textValue();
         String decoded = eval("$decodeUrl(\"" + encoded + "\")").textValue();
         assertEquals(original, decoded);
+    }
+
+    // =========================================================================
+    // Additional coverage — bugs and edge cases from code review
+    // =========================================================================
+
+    // --- $uppercase / $lowercase: locale-invariant behaviour ---
+
+    @Test
+    void uppercase_locale_invariant() throws Exception {
+        // Must use Locale.ROOT; in a Turkish JVM "i".toUpperCase() → "İ" without ROOT
+        assertEquals("I", eval("$uppercase(\"i\")").textValue());
+    }
+
+    @Test
+    void lowercase_locale_invariant() throws Exception {
+        assertEquals("i", eval("$lowercase(\"I\")").textValue());
+    }
+
+    // --- $trim: non-string argument should throw ---
+
+    @Test
+    void trim_non_string_throws() {
+        assertThrows(Exception.class, () -> eval("$trim(42)"));
+    }
+
+    // --- $length: Unicode codepoint count ---
+
+    @Test
+    void length_emoji_counts_as_one() throws Exception {
+        // 😀 is U+1F600, two Java chars but one codepoint → $length = 1
+        assertEquals(1L, eval("$length(\"😀\")").longValue());
+    }
+
+    @Test
+    void length_combining_character() throws Exception {
+        // "á" = a + combining acute; two codepoints
+        assertEquals(2L, eval("$length(\"a\\u0301\")").longValue());
+    }
+
+    // --- $substring: Unicode / edge cases ---
+
+    @Test
+    void substring_emoji_slice() throws Exception {
+        // "😀abc" — codepoint 0 is emoji, cp 1..3 are 'a','b','c'
+        assertEquals("ab", eval("$substring(\"😀abc\", 1, 2)").textValue());
+    }
+
+    @Test
+    void substring_negative_length_returns_empty() throws Exception {
+        assertEquals("", eval("$substring(\"hello\", 0, -1)").textValue());
+    }
+
+    @Test
+    void substring_start_beyond_end_returns_empty() throws Exception {
+        assertEquals("", eval("$substring(\"hi\", 5)").textValue());
+    }
+
+    // --- $substringBefore / $substringAfter: empty delimiter ---
+
+    @Test
+    void substringBefore_empty_delimiter() throws Exception {
+        // indexOf("") == 0 → substring(0,0) == ""
+        assertEquals("", eval("$substringBefore(\"hello\", \"\")").textValue());
+    }
+
+    @Test
+    void substringAfter_empty_delimiter() throws Exception {
+        // indexOf("") == 0 → substring(0) == "hello"
+        assertEquals("hello", eval("$substringAfter(\"hello\", \"\")").textValue());
+    }
+
+    // --- $contains: wrong-type second arg ---
+
+    @Test
+    void contains_non_string_non_regex_throws() {
+        assertThrows(Exception.class, () -> eval("$contains(\"hello\", 42)"));
+    }
+
+    // --- $split: limit on empty separator ---
+
+    @Test
+    void split_empty_separator_with_limit() throws Exception {
+        JsonNode result = eval("$split(\"hello\", \"\", 3)");
+        assertTrue(result.isArray());
+        assertEquals(3, result.size());
+        assertEquals("h", result.get(0).textValue());
+        assertEquals("e", result.get(1).textValue());
+        assertEquals("l", result.get(2).textValue());
+    }
+
+    @Test
+    void split_limit_zero_returns_empty_array() throws Exception {
+        JsonNode result = eval("$split(\"a,b,c\", \",\", 0)");
+        assertTrue(result.isArray());
+        assertEquals(0, result.size());
+    }
+
+    // --- $join: single non-array string ---
+
+    @Test
+    void join_single_string_passthrough() throws Exception {
+        assertEquals("hello", eval("$join(\"hello\")").textValue());
+    }
+
+    // --- $match: limit argument ---
+
+    @Test
+    void match_with_limit() throws Exception {
+        JsonNode result = eval("$match(\"abab\", /a/, 1)");
+        assertTrue(result.isArray());
+        assertEquals(1, result.size());
+    }
+
+    // --- $replace: group references ---
+
+    @Test
+    void replace_dollar_zero_whole_match() throws Exception {
+        assertEquals("[hello]", eval("$replace(\"hello\", /hello/, \"[$0]\")").textValue());
+    }
+
+    @Test
+    void replace_capture_group_ref() throws Exception {
+        assertEquals("world hello", eval("$replace(\"hello world\", /(hello) (world)/, \"$2 $1\")").textValue());
+    }
+
+    @Test
+    void replace_dollar_dollar_literal() throws Exception {
+        assertEquals("price: $10", eval("$replace(\"price: 10\", /10/, \"$$10\")").textValue());
+    }
+
+    // --- $pad: Unicode content and multi-codepoint pad ---
+
+    @Test
+    void pad_emoji_content_counts_as_one_codepoint() throws Exception {
+        // "😀" is 1 codepoint; pad to width 3 with "-" → "😀--"
+        assertEquals("😀--", eval("$pad(\"😀\", 3, \"-\")").textValue());
+    }
+
+    // --- $base64encode: non-string throws ---
+
+    @Test
+    void base64encode_non_string_throws() {
+        assertThrows(Exception.class, () -> eval("$base64encode(42)"));
+    }
+
+    // --- $base64decode: invalid base64 throws ---
+
+    @Test
+    void base64decode_invalid_throws() {
+        assertThrows(Exception.class, () -> eval("$base64decode(\"!!!not-base64!!!\")"));
     }
 }

@@ -10,8 +10,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * Tests for JSONata numeric functions:
  *   $number, $abs, $floor, $ceil, $round, $power, $sqrt,
  *   $random, $formatNumber, $formatBase, $formatInteger, $parseInteger
- *
- * Spec: https://docs.jsonata.org/numeric-functions
+ * <p>
+ * Spec: <a href="https://docs.jsonata.org/numeric-functions">https://docs.jsonata.org/numeric-functions</a>
  */
 class NumericFunctionsTest {
 
@@ -213,8 +213,7 @@ class NumericFunctionsTest {
         double v1 = eval("$random()").doubleValue();
         double v2 = eval("$random()").doubleValue();
         // They *could* be equal but the probability is negligible; this is a sanity check
-        assertNotNull(v1);
-        assertNotNull(v2);
+        assertNotEquals(v1, v2);
     }
 
     // =========================================================================
@@ -421,5 +420,163 @@ class NumericFunctionsTest {
         String roman = eval("$formatInteger(1066, 'I')").textValue();
         long parsed = JsonNodeTestHelper.evaluate("$parseInteger(v, 'I')", "{\"v\": \"" + roman + "\"}").longValue();
         assertEquals(1066L, parsed);
+    }
+
+    // =========================================================================
+    // $number — additional coverage
+    // =========================================================================
+
+    /** Regression: "NaN" must throw D3030, not silently return a NaN node. */
+    @Test
+    void number_nan_string_throws() {
+        assertThrows(Exception.class, () -> eval("$number('NaN')"));
+    }
+
+    /** Regression: negative hex literal was falling through to Double.parseDouble and throwing. */
+    @Test
+    void number_negative_hex_literal() throws Exception {
+        assertEquals(-26L, eval("$number('-0x1A')").longValue());
+    }
+
+    @Test
+    void number_negative_octal_literal() throws Exception {
+        // -0o17 = -15
+        assertEquals(-15L, eval("$number('-0o17')").longValue());
+    }
+
+    @Test
+    void number_negative_binary_literal() throws Exception {
+        // -0b1010 = -10
+        assertEquals(-10L, eval("$number('-0b1010')").longValue());
+    }
+
+    @Test
+    void number_infinity_string_throws() {
+        // "Infinity" must throw, not return Infinity
+        assertThrows(Exception.class, () -> eval("$number('Infinity')"));
+    }
+
+    // =========================================================================
+    // $formatBase — additional coverage
+    // =========================================================================
+
+    @Test
+    void formatBase_negative_number() throws Exception {
+        assertEquals("-1100100", eval("$formatBase(-100, 2)").textValue());
+    }
+
+    @Test
+    void formatBase_negative_hex() throws Exception {
+        assertEquals("-ff", eval("$formatBase(-255, 16)").textValue());
+    }
+
+    // =========================================================================
+    // $formatInteger — additional coverage
+    // =========================================================================
+
+    /** Spec: $formatInteger(0, 'I') returns "" (zero has no Roman numeral representation). */
+    @Test
+    void formatInteger_zero_roman_returns_empty() throws Exception {
+        assertEquals("", eval("$formatInteger(0, 'I')").textValue());
+    }
+
+    @Test
+    void formatInteger_negative_roman_throws() {
+        assertThrows(Exception.class, () -> eval("$formatInteger(-1, 'I')"));
+    }
+
+    @Test
+    void formatInteger_negative_words() throws Exception {
+        assertEquals("minus one", eval("$formatInteger(-1, 'w')").textValue());
+    }
+
+    @Test
+    void formatInteger_negative_words_titlecase() throws Exception {
+        String result = eval("$formatInteger(-1, 'Ww')").textValue();
+        assertTrue(result.startsWith("Minus"), "Expected 'Minus one', got: " + result);
+    }
+
+    @Test
+    void formatInteger_ordinal_1st() throws Exception {
+        assertEquals("1st", eval("$formatInteger(1, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_ordinal_2nd() throws Exception {
+        assertEquals("2nd", eval("$formatInteger(2, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_ordinal_3rd() throws Exception {
+        assertEquals("3rd", eval("$formatInteger(3, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_ordinal_11th() throws Exception {
+        assertEquals("11th", eval("$formatInteger(11, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_ordinal_21st() throws Exception {
+        assertEquals("21st", eval("$formatInteger(21, '#;o')").textValue());
+    }
+
+    /** Regression: was "-1th" because ordinalSuffix used n % 10 without Math.abs. */
+    @Test
+    void formatInteger_ordinal_negative_1st() throws Exception {
+        assertEquals("-1st", eval("$formatInteger(-1, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_ordinal_negative_11th() throws Exception {
+        assertEquals("-11th", eval("$formatInteger(-11, '#;o')").textValue());
+    }
+
+    @Test
+    void formatInteger_alpha_zero_throws() {
+        assertThrows(Exception.class, () -> eval("$formatInteger(0, 'a')"));
+    }
+
+    @Test
+    void formatInteger_alpha_negative_throws() {
+        assertThrows(Exception.class, () -> eval("$formatInteger(-1, 'a')"));
+    }
+
+    // =========================================================================
+    // $parseInteger — additional coverage
+    // =========================================================================
+
+    /** Regression: prior accumulator bug produced 10^9 instead of 1,001,000. */
+    @Test
+    void parseInteger_one_million_one_thousand() throws Exception {
+        assertEquals(1_001_000L,
+                eval("$parseInteger('one million one thousand', 'w')").longValue());
+    }
+
+    @Test
+    void parseInteger_negative_words() throws Exception {
+        assertEquals(-5L, eval("$parseInteger('minus five', 'w')").longValue());
+    }
+
+    @Test
+    void parseInteger_empty_string_throws() {
+        // empty string with a decimal picture cannot be parsed
+        assertThrows(Exception.class, () -> eval("$parseInteger('', '#')"));
+    }
+
+    @Test
+    void parseInteger_invalid_roman_char_throws() {
+        assertThrows(Exception.class, () -> eval("$parseInteger('IZI', 'I')"));
+    }
+
+    @Test
+    void parseInteger_invalid_alpha_char_throws() {
+        assertThrows(Exception.class, () -> eval("$parseInteger('1', 'A')"));
+    }
+
+    @Test
+    void parseInteger_ordinal_word_forty_second() throws Exception {
+        // "forty-second" with "w;o" ordinal picture → 42
+        assertEquals(42L, eval("$parseInteger('forty-second', 'w;o')").longValue());
     }
 }

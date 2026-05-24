@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
 import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataBoundFunction;
+import org.json_kula.jsonata_jvm.runtime.numeric.NumericBuiltins;
+import org.json_kula.jsonata_jvm.runtime.string.StringBuiltins;
 
 import java.util.*;
 import java.util.function.Supplier;
@@ -56,7 +58,7 @@ public final class JsonataRuntime {
     }
 
     /** Returns the currently registered eval delegate, or {@code null} if none. */
-    static EvalDelegate getEvalDelegate() {
+    public static EvalDelegate getEvalDelegate() {
         return EVAL_DELEGATE;
     }
 
@@ -84,27 +86,6 @@ public final class JsonataRuntime {
             for (JsonNode elem : node) {
                 JsonNode val = field(elem, name);
                 if (!val.isMissingNode()) appendToSequence(result, val);
-            }
-            return unwrap(result);
-        }
-        if (node.isObject()) {
-            JsonNode val = node.get(name);
-            return val != null ? val : MISSING;
-        }
-        return MISSING;
-    }
-
-    /**
-     * Like {@link #field} but does NOT flatten array results. Used for array/object
-     * constructor steps where we need to preserve each element's result as-is.
-     */
-    public static JsonNode fieldPreserve(JsonNode node, String name) {
-        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
-        if (node.isArray()) {
-            ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : node) {
-                JsonNode val = fieldPreserve(elem, name);
-                if (!val.isMissingNode()) result.add(val);
             }
             return unwrap(result);
         }
@@ -149,7 +130,7 @@ public final class JsonataRuntime {
     private static void collectDescendants(JsonNode node, ArrayNode acc) {
         if (node.isArray()) {
             for (JsonNode elem : node) collectDescendants(elem, acc);
-        } else if (node.isObject() && node.size() > 0) {
+        } else if (node.isObject() && !node.isEmpty()) {
             acc.add(node);
             node.fields().forEachRemaining(e -> collectDescendants(e.getValue(), acc));
         }
@@ -562,7 +543,7 @@ public final class JsonataRuntime {
     }
 
     /** Returns a LongNode when {@code v} is a whole number within long range, else DoubleNode. */
-    static JsonNode numNode(double v) {
+    public static JsonNode numNode(double v) {
         if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.floor(v)
                 && v >= Long.MIN_VALUE && v <= Long.MAX_VALUE) {
             return NF.numberNode((long) v);
@@ -2110,7 +2091,27 @@ public final class JsonataRuntime {
         return n == null || n.isMissingNode();
     }
 
-    static boolean missing(JsonNode n) {
+    /** Returns {@code true} when {@code node} is an internal lambda-registry token. */
+    public static boolean isLambdaToken(JsonNode node) {
+        return LambdaRegistry.isLambdaToken(node);
+    }
+
+    /** Returns {@code true} when {@code node} is an internal regex-registry token. */
+    public static boolean isRegexToken(JsonNode node) {
+        return RegexRegistry.isRegexToken(node);
+    }
+
+    /** Resolves a regex sentinel token to the compiled {@link org.joni.Regex}. */
+    public static org.joni.Regex lookupRegex(JsonNode token) throws RuntimeEvaluationException {
+        return RegexRegistry.lookupRegex(token);
+    }
+
+    /** Builds a regex that matches the literal string {@code pattern} (no special regex chars). */
+    public static org.joni.Regex buildLiteralRegex(String pattern) {
+        return RegexRegistry.buildLiteralRegex(pattern);
+    }
+
+    public static boolean missing(JsonNode n) {
         return n == null || n.isMissingNode();
     }
 
@@ -2135,7 +2136,7 @@ public final class JsonataRuntime {
     }
 
     /** Converts a {@link JsonNode} to a String representation. */
-    static String toText(JsonNode n) throws RuntimeEvaluationException {
+    public static String toText(JsonNode n) throws RuntimeEvaluationException {
         if (n.isTextual()) {
             // Lambda/function tokens serialize as empty string per JSONata spec
             if (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n)) return "";
@@ -2149,7 +2150,7 @@ public final class JsonataRuntime {
     }
 
     /** Replaces lambda/regex tokens with empty string nodes recursively for JSON serialization. */
-    static JsonNode sanitizeForString(JsonNode n) {
+    public static JsonNode sanitizeForString(JsonNode n) {
         if (n.isTextual() && (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n))) {
             return NF.textNode("");
         }
