@@ -334,3 +334,8 @@ expression string
 ## License
 
 This project is licensed under the [Apache License 2.0](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE).
+
+## See also
+
+- [tracked-json](https://vlad-public-code.github.io/org.json-kula.tracked-json/) — Jackson JsonNode wrapper that tracks each node's location (JsonPointer) and document root through every navigation — get, path, at, parent(), and JSONPath (RFC 9535). Includes JSON Patch (RFC 6902).
+- [Valem](https://valem.onrender.com/) — deterministic reactive computation runtime for AI-generated structured data models.
