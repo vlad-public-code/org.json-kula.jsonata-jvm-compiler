@@ -42,6 +42,19 @@ JsonataExpression expr = factory.compile("Account.Order.Product.Price * 1.2");
 
 `compile()` runs the full pipeline once and returns a reusable, **thread-safe** object. Compile expressions at startup and reuse them for every request — do not call `compile()` on the hot path.
 
+#### Compiling many expressions at once
+
+When you need to compile a group of expressions up front (e.g. every derivation, constraint, and effect of a model at registration time), use `compileAll` instead of calling `compile` in a loop:
+
+```java
+List<JsonataExpression> exprs = factory.compileAll(List.of(
+        "Account.Order.Product.Price * 1.2",
+        "$sum(items.price)",
+        "status = \"active\""));
+```
+
+`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — on the order of **10–16× for 20 expressions** in the project's own benchmark. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
+
 ### 3. Evaluate against JSON
 
 ```java
