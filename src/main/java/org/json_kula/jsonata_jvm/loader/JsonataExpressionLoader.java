@@ -15,13 +15,17 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Compiles a Java 21 source string into an instance of {@link JsonataExpression}.
+ * Compiles Java 21 source strings into instances of {@link JsonataExpression}.
  *
- * <p>The source must declare exactly one public class that implements
+ * <p>Each source must declare exactly one public top-level class that implements
  * {@link JsonataExpression}. Compilation happens entirely in memory — no
  * temporary files are written to disk.
  *
- * <p>This class is thread-safe: each {@link #load} call is fully independent.
+ * <p>{@link #load} compiles a single source; {@link #loadAll} compiles a whole batch in one
+ * {@code javac} invocation, amortising the compiler's large fixed per-invocation cost across every
+ * expression in the batch rather than paying it once per expression.
+ *
+ * <p>This class is thread-safe: each {@link #load} / {@link #loadAll} call is fully independent.
  *
  * <p>Requires a JDK at runtime (not just a JRE) so that
  * {@link ToolProvider#getSystemJavaCompiler()} returns a non-null compiler.
@@ -76,13 +80,55 @@ public class JsonataExpressionLoader {
      *                              instantiation fails
      */
     public JsonataExpression load(String javaSource) throws JsonataLoadException {
+        return loadAll(List.of(javaSource)).get(0);
+    }
+
+    /**
+     * Compiles a batch of Java sources in a <b>single</b> {@code javac} invocation and returns one
+     * {@link JsonataExpression} per source, in input order.
+     *
+     * <p>Each {@code javac} invocation pays a large fixed cost — bootstrapping the compiler,
+     * reading the platform symbol file, and indexing the (Spring-sized) classpath — that dwarfs the
+     * marginal cost of a single small generated class. Compiling N sources one at a time pays that
+     * fixed cost N times; batching pays it once, which is the dominant win when a model registers
+     * its dozens of expressions up front. See {@code JsonataExpressionFactory#compileAll}.
+     *
+     * <p>Every source must declare a distinctly-named top-level class implementing
+     * {@link JsonataExpression}; the translator guarantees this by minting a globally-unique class
+     * name per expression. All classes produced by the batch share one classloader — safe because
+     * the names do not collide, and cheaper on metaspace than one loader per expression.
+     *
+     * <p>Failure semantics match {@link #load}: any source that cannot be parsed for its class name,
+     * fails to compile, or cannot be instantiated aborts the whole batch with a
+     * {@link JsonataLoadException}. A batch compile error names every class in the batch and each
+     * diagnostic's originating source, so the offending expression is still identifiable.
+     *
+     * @param javaSources full texts of the Java 21 source files to compile together
+     * @return one fresh {@link JsonataExpression} per source, in the same order; empty if the input
+     *         is empty
+     * @throws JsonataLoadException if any source cannot be compiled, does not implement
+     *                              {@link JsonataExpression}, or cannot be instantiated
+     */
+    public List<JsonataExpression> loadAll(List<String> javaSources) throws JsonataLoadException {
+        if (javaSources.isEmpty()) {
+            return List.of();
+        }
+
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             throw new JsonataLoadException(
                     "Java compiler not available — run on a JDK, not a JRE.");
         }
 
-        String className = extractClassName(javaSource);
+        // Extract each source's top-level class name up front (order-preserving) so a source with
+        // no class declaration fails fast, before the compiler is even invoked.
+        List<String> classNames = new ArrayList<>(javaSources.size());
+        List<JavaFileObject> sourceFiles = new ArrayList<>(javaSources.size());
+        for (String javaSource : javaSources) {
+            String className = extractClassName(javaSource);
+            classNames.add(className);
+            sourceFiles.add(new InMemorySourceFile(className, javaSource));
+        }
 
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         Map<String, byte[]> classBytes;
@@ -95,18 +141,10 @@ public class JsonataExpressionLoader {
                     diagnostics,
                     COMPILE_OPTIONS,
                     null,
-                    List.of(new InMemorySourceFile(className, javaSource)));
+                    sourceFiles);
 
             if (!task.call()) {
-                StringBuilder sb = new StringBuilder("Compilation failed for class '")
-                        .append(className).append("':\n");
-                for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-                    if (d.getKind() == Diagnostic.Kind.ERROR) {
-                        sb.append("  Line ").append(d.getLineNumber())
-                          .append(": ").append(d.getMessage(null)).append('\n');
-                    }
-                }
-                throw new JsonataLoadException(sb.toString().stripTrailing());
+                throw new JsonataLoadException(formatCompileErrors(classNames, diagnostics));
             }
 
             classBytes = fileManager.classBytes();
@@ -114,7 +152,14 @@ public class JsonataExpressionLoader {
             throw new JsonataLoadException("Failed to close file manager: " + e.getMessage(), e);
         }
 
-        return instantiate(className, classBytes);
+        // One classloader for the whole batch: the top-level class names are globally unique, so
+        // there is no collision, and a single loader keeps metaspace lower than one per expression.
+        InMemoryClassLoader classLoader = new InMemoryClassLoader(classBytes);
+        List<JsonataExpression> result = new ArrayList<>(classNames.size());
+        for (String className : classNames) {
+            result.add(instantiate(className, classLoader));
+        }
+        return List.copyOf(result);
     }
 
     // -------------------------------------------------------------------------
@@ -135,9 +180,8 @@ public class JsonataExpressionLoader {
     }
 
     private static JsonataExpression instantiate(String className,
-                                                  Map<String, byte[]> classBytes)
+                                                  ClassLoader classLoader)
             throws JsonataLoadException {
-        InMemoryClassLoader classLoader = new InMemoryClassLoader(classBytes);
         try {
             Class<?> clazz = classLoader.loadClass(className);
             Object instance = clazz.getDeclaredConstructor().newInstance();
@@ -150,6 +194,39 @@ public class JsonataExpressionLoader {
             throw new JsonataLoadException(
                     "Failed to instantiate '" + className + "': " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Builds a human-readable message from the ERROR diagnostics of a failed batch compile. Names
+     * every class in the batch and attributes each error to its originating source file so that,
+     * even when many expressions compile together, the offending one is identifiable.
+     */
+    private static String formatCompileErrors(List<String> classNames,
+                                              DiagnosticCollector<JavaFileObject> diagnostics) {
+        StringBuilder sb = new StringBuilder("Compilation failed for ")
+                .append(classNames.size() == 1
+                        ? "class '" + classNames.get(0) + "'"
+                        : classNames.size() + " classes " + classNames)
+                .append(":\n");
+        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+            if (d.getKind() == Diagnostic.Kind.ERROR) {
+                JavaFileObject source = d.getSource();
+                if (source != null) {
+                    sb.append("  ").append(simpleSourceName(source.getName())).append(' ');
+                } else {
+                    sb.append("  ");
+                }
+                sb.append("Line ").append(d.getLineNumber())
+                  .append(": ").append(d.getMessage(null)).append('\n');
+            }
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    /** The trailing {@code File.java} of a generated source URI, for compact error attribution. */
+    private static String simpleSourceName(String uri) {
+        int slash = uri.lastIndexOf('/');
+        return slash >= 0 ? uri.substring(slash + 1) : uri;
     }
 
     // -------------------------------------------------------------------------

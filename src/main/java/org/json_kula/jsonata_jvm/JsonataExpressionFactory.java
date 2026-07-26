@@ -11,6 +11,8 @@ import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
 import org.json_kula.jsonata_jvm.translator.RuntimeTranslatorException;
 import org.json_kula.jsonata_jvm.translator.Translator;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -80,6 +82,61 @@ public class JsonataExpressionFactory {
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
                     null, "Failed to load generated class for expression: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Compiles a batch of expressions and returns one {@link JsonataExpression} per input, in the
+     * same order.
+     *
+     * <p>Functionally equivalent to calling {@link #compile} on each expression, but the expensive
+     * {@code javac} step runs <b>once</b> for the whole batch instead of once per expression. Since
+     * that step's cost is dominated by a fixed per-invocation overhead (compiler bootstrap, platform
+     * symbol loading, classpath indexing) that a single small generated class barely adds to,
+     * batching many expressions is markedly faster than compiling them one by one — the typical case
+     * when a model registers all of its derivations, constraints, and effects at creation time.
+     *
+     * <p>Parsing and translation still happen per expression (they are cheap and let a syntactically
+     * invalid expression be pinpointed by its index); only the compile-and-load step is batched. Any
+     * expression that fails to parse, translate, compile, or instantiate aborts the whole batch.
+     *
+     * <p>Each returned instance's {@link JsonataExpression#getSourceJsonata()} returns its own
+     * original expression string unchanged.
+     *
+     * @param expressions the JSONata expressions to compile; must not be {@code null} and must
+     *                    contain no {@code null} elements
+     * @return one compiled, reusable {@link JsonataExpression} per input, in order; empty if the
+     *         input is empty
+     * @throws JsonataCompilationException if any expression is syntactically invalid or if the
+     *         generated Java code cannot be compiled; the message identifies the offending
+     *         expression
+     */
+    public List<JsonataExpression> compileAll(List<String> expressions) throws JsonataCompilationException {
+        if (expressions.isEmpty()) {
+            return List.of();
+        }
+
+        List<String> sources = new ArrayList<>(expressions.size());
+        for (int i = 0; i < expressions.size(); i++) {
+            String expression = expressions.get(i);
+            try {
+                sources.add(translate(expression));
+            } catch (JsonataCompilationException e) {
+                // Re-attribute to the failing element while preserving the original error code and
+                // root cause (e.g. the ParseException), so batch failures are as diagnosable as
+                // single-expression ones.
+                throw new JsonataCompilationException(
+                        e.getErrorCode(),
+                        "Failed to compile expression [" + i + "] (" + expression + "): " + e.getMessage(),
+                        e.getCause() != null ? e.getCause() : e);
+            }
+        }
+
+        try {
+            return loader.loadAll(sources);
+        } catch (JsonataLoadException e) {
+            throw new JsonataCompilationException(
+                    null, "Failed to load generated classes for batch: " + e.getMessage(), e);
         }
     }
 

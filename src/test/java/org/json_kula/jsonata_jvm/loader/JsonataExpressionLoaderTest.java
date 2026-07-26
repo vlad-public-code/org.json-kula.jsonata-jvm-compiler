@@ -473,6 +473,66 @@ class JsonataExpressionLoaderTest {
                 description);
     }
 
+    // -----------------------------------------------------------------------
+    // Batch loading (loadAll)
+    // -----------------------------------------------------------------------
+
+    /** A minimal valid source that returns the given int literal, in a uniquely-named class. */
+    private static String intSource(int classIndex, int value) {
+        return """
+            import org.json_kula.jsonata_jvm.JsonataExpression;
+            import org.json_kula.jsonata_jvm.JsonataEvaluationException;
+            import com.fasterxml.jackson.databind.JsonNode;
+            import com.fasterxml.jackson.databind.node.IntNode;
+            public class Batch%d implements JsonataExpression {
+                public JsonNode evaluate(JsonNode input) throws JsonataEvaluationException {
+                    return new IntNode(%d);
+                }
+            }
+            """.formatted(classIndex, value);
+    }
+
+    @org.junit.jupiter.api.Test
+    void loadAll_empty_returnsEmptyList() throws Exception {
+        assertTrue(new JsonataExpressionLoader().loadAll(java.util.List.of()).isEmpty());
+    }
+
+    @org.junit.jupiter.api.Test
+    void loadAll_compilesBatch_returnsResultsInOrder() throws Exception {
+        java.util.List<String> sources = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            sources.add(intSource(i, i * 10));
+        }
+        java.util.List<JsonataExpression> exprs = new JsonataExpressionLoader().loadAll(sources);
+
+        assertEquals(5, exprs.size());
+        for (int i = 0; i < 5; i++) {
+            assertEquals(String.valueOf(i * 10), exprs.get(i).evaluate(EMPTY_OBJ).toString());
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void loadAll_oneInvalidSource_abortsWholeBatch() {
+        java.util.List<String> sources = java.util.List.of(
+                intSource(100, 1),
+                // missing semicolon → compile error for the whole batch
+                intSource(101, 2).replace("return new IntNode(2);", "return new IntNode(2)"),
+                intSource(102, 3));
+        JsonataLoadException ex = assertThrows(JsonataLoadException.class,
+                () -> new JsonataExpressionLoader().loadAll(sources));
+        // The batch error names the offending source so the bad expression is still identifiable.
+        assertTrue(ex.getMessage().contains("Batch101"),
+                "message should attribute the error to the failing source: " + ex.getMessage());
+    }
+
+    @org.junit.jupiter.api.Test
+    void loadAll_singleton_behavesLikeLoad() throws Exception {
+        java.util.List<JsonataExpression> exprs =
+                new JsonataExpressionLoader().loadAll(java.util.List.of(intSource(200, 42)));
+        assertEquals(1, exprs.size());
+        assertEquals("42", exprs.get(0).evaluate(EMPTY_OBJ).toString());
+    }
+
     static Stream<Arguments> invalidSources() {
         return Stream.of(
 
