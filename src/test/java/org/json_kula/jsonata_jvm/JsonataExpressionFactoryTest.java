@@ -8,6 +8,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+
 import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -353,5 +355,92 @@ class JsonataExpressionFactoryTest {
         JsonataCompilationException ex = assertThrows(
                 JsonataCompilationException.class, () -> FACTORY.compile("1 +"));
         assertInstanceOf(ParseException.class, ex.getCause());
+    }
+
+    // =========================================================================
+    // Batch compilation (compileAll)
+    // =========================================================================
+
+    @Test
+    void compileAll_empty_returnsEmptyList() throws Exception {
+        assertTrue(FACTORY.compileAll(List.of()).isEmpty());
+    }
+
+    @Test
+    void compileAll_returnsOneExpressionPerInput_inOrder() throws Exception {
+        List<String> exprs = List.of("a + b", "a * b", "a - b");
+        List<JsonataExpression> compiled = FACTORY.compileAll(exprs);
+
+        assertEquals(3, compiled.size());
+        JsonNode in = json("{\"a\":6,\"b\":2}");
+        assertEquals(8.0,  compiled.get(0).evaluate(in).doubleValue(), 1e-9);
+        assertEquals(12.0, compiled.get(1).evaluate(in).doubleValue(), 1e-9);
+        assertEquals(4.0,  compiled.get(2).evaluate(in).doubleValue(), 1e-9);
+    }
+
+    @Test
+    void compileAll_singleton_matchesCompile() throws Exception {
+        List<JsonataExpression> compiled = FACTORY.compileAll(List.of("$sum(items.price) * 1.1"));
+        assertEquals(1, compiled.size());
+        JsonNode in = json("{\"items\":[{\"price\":10},{\"price\":20}]}");
+        assertEquals(33.0, compiled.get(0).evaluate(in).doubleValue(), 1e-9);
+    }
+
+    @Test
+    void compileAll_eachInstanceIsDistinct() throws Exception {
+        List<JsonataExpression> compiled = FACTORY.compileAll(List.of("1", "1"));
+        assertNotSame(compiled.get(0), compiled.get(1));
+    }
+
+    @Test
+    void compileAll_getSourceJsonata_mapsEachInstanceToItsOwnSource() throws Exception {
+        List<String> exprs = List.of(
+                "Account.Order.Product.Price",
+                "$sum(items.price) * 1.1",
+                "status = \"active\"");
+        List<JsonataExpression> compiled = FACTORY.compileAll(exprs);
+        for (int i = 0; i < exprs.size(); i++) {
+            assertEquals(exprs.get(i), compiled.get(i).getSourceJsonata());
+        }
+    }
+
+    @Test
+    void compileAll_expressionsAreIndependentlyReusable() throws Exception {
+        List<JsonataExpression> compiled = FACTORY.compileAll(List.of("x * 2", "x + 100"));
+        assertEquals(4.0,   compiled.get(0).evaluate(json("{\"x\":2}")).doubleValue(), 1e-9);
+        assertEquals(102.0, compiled.get(1).evaluate(json("{\"x\":2}")).doubleValue(), 1e-9);
+        // Re-evaluate against a different input to confirm no shared mutable state leaked.
+        assertEquals(20.0,  compiled.get(0).evaluate(json("{\"x\":10}")).doubleValue(), 1e-9);
+    }
+
+    @Test
+    void compileAll_mixedFeatures_allCompileTogether() throws Exception {
+        List<String> exprs = List.of(
+                "[1..5]",
+                "$map([1,2,3], function($v){ $v * $v })",
+                "score >= 60 ? \"pass\" : \"fail\"",
+                "($a := \"hello\"; $b := \" world\"; $a & $b)");
+        List<JsonataExpression> compiled = FACTORY.compileAll(exprs);
+
+        assertJsonEqual("[1,2,3,4,5]", compiled.get(0).evaluate(EMPTY_OBJECT));
+        assertJsonEqual("[1,4,9]",     compiled.get(1).evaluate(EMPTY_OBJECT));
+        assertEquals(json("\"pass\""), compiled.get(2).evaluate(json("{\"score\":75}")));
+        assertEquals(json("\"hello world\""), compiled.get(3).evaluate(EMPTY_OBJECT));
+    }
+
+    @Test
+    void compileAll_invalidExpression_throwsJsonataCompilationException() {
+        List<String> exprs = List.of("a + b", "1 +", "a * b");
+        assertThrows(JsonataCompilationException.class, () -> FACTORY.compileAll(exprs));
+    }
+
+    @Test
+    void compileAll_invalidExpression_causeIsParseException_andMessageIdentifiesIndex() {
+        List<String> exprs = List.of("a + b", "1 +", "a * b");
+        JsonataCompilationException ex = assertThrows(
+                JsonataCompilationException.class, () -> FACTORY.compileAll(exprs));
+        assertInstanceOf(ParseException.class, ex.getCause());
+        assertTrue(ex.getMessage().contains("[1]"),
+                "message should identify the failing expression's index: " + ex.getMessage());
     }
 }
