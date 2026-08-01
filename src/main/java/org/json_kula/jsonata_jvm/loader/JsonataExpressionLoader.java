@@ -148,6 +148,20 @@ public class JsonataExpressionLoader {
             }
 
             classBytes = fileManager.classBytes();
+
+            // Fail loud on a degraded compile: a resource-exhausted in-process javac can return
+            // success from task.call() yet emit no bytecode for a class. Left unchecked, the class
+            // load fails later with an opaque error — or, worse, a partially-written class evaluates
+            // wrongly. Verify every expected top-level class produced non-empty bytecode up front.
+            for (String expected : classNames) {
+                byte[] bytes = classBytes.get(expected);
+                if (bytes == null || bytes.length == 0) {
+                    throw new JsonataLoadException(
+                            "Compiler reported success but produced no bytecode for class '" + expected
+                            + "' (batch of " + classNames.size() + "). This usually means the in-process "
+                            + "javac ran out of resources — run on a JVM with more metaspace/heap.");
+                }
+            }
         } catch (java.io.IOException e) {
             throw new JsonataLoadException("Failed to close file manager: " + e.getMessage(), e);
         }
