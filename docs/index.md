@@ -352,4 +352,4 @@ This project is licensed under the [Apache License 2.0](https://github.com/vlad-
 
 - [tracked-json](https://vlad-public-code.github.io/org.json-kula.tracked-json/) — Jackson JsonNode wrapper that tracks each node's location (JsonPointer) and document root through every navigation — get, path, at, parent(), and JSONPath (RFC 9535). Includes JSON Patch (RFC 6902).
 - [Valem](https://vlad-public-code.github.io/org.json-kula.valem/) — deterministic reactive computation runtime for AI-generated structured data models.
-- [Valem Sandbox](https://valem.onrender.com/)
+- [Valem Sandbox](https://valem.run/)

@@ -48,4 +48,4 @@ Key facts:
 
 - [tracked-json](https://vlad-public-code.github.io/org.json-kula.tracked-json/): a Jackson `JsonNode` wrapper that tracks each node's absolute `JsonPointer` through every navigation; includes RFC 9535 JSONPath and RFC 6902 JSON Patch.
 - [Valem](https://vlad-public-code.github.io/org.json-kula.valem/): a deterministic reactive computation runtime for AI-generated structured data models, built on this compiler. [llms.txt](https://vlad-public-code.github.io/org.json-kula.valem/llms.txt).
-- [Valem sandbox](https://valem.onrender.com/): the hosted, zero-install demo.
+- [Valem sandbox](https://valem.run/): the hosted, zero-install demo.
