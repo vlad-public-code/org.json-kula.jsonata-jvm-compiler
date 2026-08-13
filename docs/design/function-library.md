@@ -8,15 +8,13 @@ Affects: `org.json_kula.jsonata_jvm` (public API), `…runtime` (lambda registry
 
 ## 1. Goal
 
-Let a caller turn a JSONata *definition expression* — an expression whose only purpose is to
-bind named lambdas — into Java-callable `JsonataBoundFunction` objects, selected by name:
+Let a caller turn a JSONata *definition expression* — an expression that binds named lambdas and
+returns the names of the ones to export — into Java-callable `JsonataBoundFunction` objects:
 
 ```java
 JsonataExpressionFactory factory = new JsonataExpressionFactory();
 
-Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
-        List.of("$sin", "$cos"),
-        """
+Map<String, JsonataBoundFunction> trig = factory.compileFunctions("""
         (
           $pi := 3.1415926535897932384626;
           $product := function($a, $b) { $a * $b };
@@ -26,6 +24,8 @@ Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
             $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
               $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
           };
+
+          ["sin", "cos"]
         )
         """);
 
@@ -34,13 +34,18 @@ JsonataExpression report = factory.compile("payload.angles.$sin($)");
 trig.forEach(report::registerFunction);
 ```
 
-The definition expression "returns nothing" useful — its value is discarded. Only the named
-lambdas matter. Helper bindings (`$pi`, `$product`, `$factorial`) are *not* exported but must stay
-reachable from the exported ones.
+**The definition is ordinary JSONata and nothing else.** Evaluated in any JSONata engine it returns
+`["sin", "cos"]` — the export list is the expression's own result, not an out-of-band parameter and
+not a dialect extension. This is the constraint that shapes the whole design: a definition file can
+be linted, tested, and evaluated by tools that know nothing about this library.
+
+Helper bindings (`$pi`, `$product`, `$factorial`) are *not* exported but must stay reachable from
+the exported ones.
 
 ### Non-goals
 
-* No new JSONata syntax. The definition expression is plain JSONata, parsed by the existing parser.
+* No new JSONata syntax. The definition expression is plain JSONata, parsed by the existing parser,
+  and valid input to any other JSONata implementation.
 * No sharing of *values* (`$pi`) as bindings. Only functions are exported.
 * No cross-JVM / serializable function handles.
 
@@ -79,9 +84,12 @@ already — we only need to get it *out* and keep it *alive*.
 Three gaps separate "the definition expression evaluates fine" from "here is a
 `Map<String, JsonataBoundFunction>`".
 
-**G1 — no export path.** The value of the block is its last expression. For the example above that
-is the `$cos` binding, i.e. a single token; `$sin` is unreachable from outside. Nothing in the API
-exposes "the value of local `$name` after evaluation".
+**G1 — no export path.** The value of the block is its last expression, and that expression is the
+export *list* — the strings `["sin", "cos"]`, not the functions. The lambdas themselves are Java
+locals of a generated helper method; nothing in the API exposes "the value of local `$name` after
+evaluation". Worse, which locals to look at is only known *after* the expression has run, so the
+naive answer — compile once to read the names, then compile again to fetch those values — costs a
+second `javac` round-trip per library. §4.1 gets both in one pass.
 
 **G2 — token lifetime.** Even with a token in hand, it dies with the defining evaluation. Measured
 against the current build (see Appendix A):
@@ -107,15 +115,16 @@ Build-time pipeline, run once per library:
 
 ```
 definition string
-  → Parser.parse                          (existing)
-  → ExportRewriter.rewrite(ast, names)    (new)  — append {"sin": $sin, …} to the top-level block
-  → Optimizer.optimize                    (existing)
-  → Translator.translate                  (existing, unchanged)
-  → JsonataExpressionLoader.load          (existing, unchanged)
-  → evaluate once in "library-defining" mode  (new mode flag on the evaluation frame)
+  → Parser.parse                                (existing)
+  → FunctionExportRewriter.topLevelBindings     (new)  — every $name the definition binds
+  → FunctionExportRewriter.rewrite              (new)  — capture the result, add the values
+  → Optimizer.optimize                          (existing)
+  → Translator.translate                        (existing, unchanged)
+  → JsonataExpressionLoader.load                (existing, unchanged)
+  → evaluate once in "library-defining" mode    (new mode flag on the evaluation frame)
       · every lambdaNode() call is written into a durable LambdaScope instead of EvalState
-  → read the returned ObjectNode: name → lambda token
-  → wrap each token in ExportedJsonataFunction implements JsonataBoundFunction
+  → read {"names": […], "functions": {name → token}}
+  → wrap the named tokens in ExportedJsonataFunction implements JsonataBoundFunction
 ```
 
 Nothing in the translator changes. The two new runtime concepts are the **export rewrite** (§4.1)
@@ -123,29 +132,40 @@ and the **durable lambda scope** (§4.2).
 
 ### 4.1 Export rewrite
 
-Append one `ObjectConstructor` as the last expression of the outermost `Block`, mapping each
-requested name to a `VariableRef` of the same name:
+The definition's last expression *is* the export list, so it must be evaluated and kept — and the
+values must be collected in the same pass, before it is known which of them are wanted. The rewrite
+therefore binds the trailing expression to a synthetic variable and appends one object constructor
+that carries both halves:
 
-```java
-// {"sin": $sin, "cos": $cos}
-new AstNode.ObjectConstructor(names.stream()
-        .map(n -> new AstNode.KeyValuePair(new AstNode.StringLiteral(n), new AstNode.VariableRef(n)))
-        .toList());
+```
+(                                          (
+  $pi := 3.14159;                            $pi := 3.14159;
+  $product := function($a, $b){ … };         $product := function($a, $b){ … };
+  $sin := function($x){ … };          →      $sin := function($x){ … };
+  $cos := function($x){ … };                 $cos := function($x){ … };
+                                             $__exportNames := ["sin", "cos"];
+  ["sin", "cos"]                             {"names": $__exportNames,
+)                                             "functions": {"pi": $pi, "product": $product,
+                                                            "sin": $sin, "cos": $cos}}
+                                           )
 ```
 
-* If the parsed root is a `Block`, append to a copy of its expression list.
-* Otherwise wrap: `new Block(List.of(root, exportNode))`.
+* Collecting **every** top-level binding is what makes one compilation enough. The values are cheap
+  — object fields referencing nodes and lambda tokens that already exist — and the export list is
+  applied to them afterwards, in Java.
+* Building the object **inside** the block is required: top-level bindings become Java locals of the
+  generated `__blockN` method, so only an expression in the same block can read them. It also gives
+  the right failure mode for a name bound in a nested block — it is simply not among the collected
+  bindings, which §6 turns into a precise error.
+* The trailing expression is *moved*, not copied, so it is evaluated exactly once even if it is not
+  a literal array (`$withDec ? $exports : $exports[0]` is a valid export list).
+* The synthetic name is `__exportNames`, or `__exportNames2`, `…3` if the definition already binds
+  it — checked against the collected bindings.
 * The rewrite runs **before** `Optimizer.optimize`, so block-unwrapping and constant folding see the
   final shape.
 
-Why appending inside the block (rather than wrapping around it) is required: top-level bindings
-become Java locals of the generated `__blockN` method. Only an expression *inside the same block*
-can reference them. This also gives the correct failure mode for a name bound in a nested block —
-the translator resolves it as an unknown variable, which we turn into a build-time error (§6).
-
-Verified: the rewritten expression evaluates to
-`{"sin":"__λ:7","cos":"__λ:8"}` — a plain `ObjectNode` of tokens, no sanitisation applied on the way
-out (Appendix A).
+Object construction skips absent values, so a name bound to nothing is missing from `functions` and
+is reported as such rather than silently exporting a broken function.
 
 ### 4.2 Durable lambda scope
 
@@ -232,9 +252,26 @@ built-ins, the timeout deadline, and binding resolution inside the body. When ca
 consumer's evaluation we deliberately do **not** nest a frame: the body then observes the consumer's
 bindings, depth counter, and timeout (§5).
 
-### 4.4 Signature derivation
+### 4.4 Reading the export list
 
-Walk the rewritten AST's top-level bindings once; for each requested name whose value is a `Lambda`:
+`{"names": …}` carries whatever the definition returned. It is accepted as:
+
+* an array of strings — the normal form;
+* a single string — JSONata collapses one-element sequences, so `"sin"` is a valid list of one;
+* nothing else. A number, an object, or a lambda token yields
+  `must return an array of function names, but one element is <type>`. The lambda-token case is the
+  one users will actually hit — it is what a definition that forgets its export list and ends with
+  its last `$name := function…` binding returns.
+
+Names may carry the leading `$` or not; keys are normalised to the bare form. An empty array, an
+empty name, or the same name twice is a build-time error (§6).
+
+Only after this list is read does Java pick the matching entries out of `{"functions": …}` — which
+is why the rewrite has to collect all of them.
+
+### 4.5 Signature derivation
+
+Look each exported name up in the AST's top-level bindings; when the bound value is a `Lambda`:
 
 * if the lambda declares a signature (`function($x)<n:n>{…}`), report it verbatim;
 * otherwise synthesise one optional `j` per parameter — `$sin` → `<j?:j>`, `$product` → `<j?j?:j>`.
@@ -244,44 +281,48 @@ declares, binding the rest to *undefined*. A required-argument signature (`<jj:j
 `callBoundFunction` throw where the same call inside JSONata succeeds. `j` applies no coercion, so
 the boundary stays lossless.
 
-An optional `Map<String, String> signatureOverrides` argument lets a caller tighten this
-(e.g. `"sin" → "<n:n>"`) to get numeric coercion and arity checking at the Java boundary.
+A `signature(name, sig)` option lets a caller tighten this (e.g. `"sin" → "<n:n>"`) to get numeric
+coercion and arity checking at the Java boundary. Nothing about a function's arity is recoverable
+when the binding's value is computed (`$twice($add3)`, `$uppercase ~> $trim`,
+`$substring(?, 0, 5)`): those report no signature, and the adapter packs according to how many
+arguments the caller actually supplies.
 
-### 4.5 API surface
+### 4.6 API surface
 
 ```java
 package org.json_kula.jsonata_jvm;
 
 public class JsonataExpressionFactory {
 
-    /** Compiles a definition expression and exports the named functions. */
-    public Map<String, JsonataBoundFunction> compileFunctions(List<String> functionNames,
-                                                              String functionDefinition)
+    /** Compiles a definition expression and exports the functions it names. */
+    public Map<String, JsonataBoundFunction> compileFunctions(String functionDefinition)
             throws JsonataCompilationException;
 
     /** As above, with control over the definition-time input, bindings and signatures. */
-    public JsonataFunctionLibrary compileFunctionLibrary(List<String> functionNames,
-                                                         String functionDefinition,
+    public JsonataFunctionLibrary compileFunctionLibrary(String functionDefinition,
                                                          JsonataFunctionLibraryOptions options)
             throws JsonataCompilationException;
 }
 
 /** Owns the durable lambda scope and the generated class of one definition expression. */
 public final class JsonataFunctionLibrary implements AutoCloseable {
-    public Map<String, JsonataBoundFunction> asMap();      // immutable, insertion-ordered
-    public JsonataBoundFunction get(String name);          // null if not exported
+    public Map<String, JsonataBoundFunction> asMap();      // immutable, in export-list order
+    public JsonataBoundFunction get(String name);          // null if not exported; $ optional
     public String getSourceJsonata();
     @Override public void close();                         // drops the scope; exported fns stop resolving
 }
 ```
 
-`compileFunctions` is the 90 % case and returns exactly what the requirement asks for. It leaks no
-lifetime control — the library is kept alive by the exported functions' strong reference to it, and
-released when the last one is dropped.
+The signature is one argument: the definition. Which functions come out is a property of the
+definition, not of the call site — the same file yields the same library everywhere it is loaded,
+and there is no way for a caller's name list to drift out of sync with the file it names.
 
-**Name normalisation.** Inputs may be written with or without the `$` (`"$sin"` and `"sin"` are the
-same request). Map **keys are without `$`**, matching `JsonataExpression.registerFunction` and
-`JsonataBindings.bindFunction`, so the map can be fed straight into either. Worth adding a
+`compileFunctions` is the 90 % case. It leaks no lifetime control — the library is kept alive by the
+exported functions' strong reference to it, and released when the last one is dropped.
+
+**Name normalisation.** Export lists may be written with or without the `$` (`"$sin"` and `"sin"`
+are the same export). Map **keys are without `$`**, matching `JsonataExpression.registerFunction`
+and `JsonataBindings.bindFunction`, so the map can be fed straight into either. Worth adding a
 convenience while we are here:
 
 ```java
@@ -336,16 +377,21 @@ All raised as `JsonataCompilationException` at build time, before any function i
 
 | Condition | Message / behaviour |
 |---|---|
-| Duplicate name in `functionNames` | reject; ambiguous map keys |
-| Empty `functionNames` | reject; nothing to export |
-| Name not bound at the top level of the definition | "`$foo` is not defined at the top level of the definition expression" — this is what the translator's unknown-variable path already detects |
-| Name bound to a non-lambda (e.g. `$pi`) | "`$pi` is bound to a number, not a function" — checked twice: statically on the AST, and on the exported node via `isLambdaToken` |
-| Definition expression fails to parse / translate | propagate the existing exception unchanged |
-| Definition expression throws during the single defining evaluation | wrap: "definition expression failed to evaluate" |
+| Definition returns nothing | "must return an array of function names to export, but it returned nothing" |
+| Definition returns a non-string element | "must return an array of function names, but one element is *type*: *value*" — covers the common slip of ending on the last `$name := function…` binding, which returns a *function* |
+| Definition returns an empty array | "must name at least one function to export" |
+| The same name twice | "the definition expression names `$sin` twice" — ambiguous map keys |
+| An empty name | rejected |
+| Name not bound at the top level | "`$tan` is exported but not defined at the top level of the definition expression (it binds: `$pi`, `$product`, …)" — the binding list makes typos and nested-block bindings obvious |
+| Name bound to something absent at runtime | "`$foo` is exported but evaluated to nothing" |
+| Name bound to a non-function (e.g. `$pi`) | "`$pi` is not a function; the definition expression bound it to number 3.14159" — checked on the exported node via `isLambdaToken`, so computed values are caught too |
+| Definition fails to parse / translate | propagate the existing exception unchanged |
+| Definition throws during the single defining evaluation | wrap: "Definition expression failed to evaluate: …" |
 
-Calling an exported function after `close()` yields the existing
-`"Lambda expired or not found"` runtime error; the message should be improved to name the closed
-library.
+Any failure closes the scope before propagating, so a rejected library leaves nothing registered.
+
+Calling an exported function after `close()` yields a `JsonataEvaluationException` naming the
+function: `Error calling exported function $sin: Lambda expired or not found: s3/7`.
 
 ---
 
@@ -357,7 +403,7 @@ library.
 | 2 | Scope-qualified keys in `lambdaNode`; a single `resolve()` used by `lookupLambda`, `fn_apply`, `fn_apply_tco` | `LambdaRegistry` |
 | 3 | `definingScope` on `EvalState`; `beginEvaluation` overload; `isEvaluationActive()` accessor | `EvaluationContext`, `JsonataRuntime` |
 | 4 | `evaluateDefining(...)` package-private sibling of `evaluate`, plus accessors for the permanent bindings and regex cache | `AbstractJsonataExpression` |
-| 5 | `FunctionExportRewriter` — append the export `ObjectConstructor`, recover per-name arity/signature, normalise names | new, `org.json_kula.jsonata_jvm` |
+| 5 | `FunctionExportRewriter` — collect top-level bindings, rewrite the tail, read the export list, recover per-name arity/signature | new, `org.json_kula.jsonata_jvm` |
 | 6 | `JsonataFunctionLibrary`, `JsonataFunctionLibraryOptions`, `ExportedJsonataFunction`, factory methods | new + `JsonataExpressionFactory` |
 | 7 | `JsonataBindings.bindFunctions(Map)` convenience | `JsonataBindings` |
 | 8 | Docs: a "Function libraries" section in `README.md` and `docs/index.md`, `llms.txt` entries, `CLAUDE.md` | docs |
@@ -367,38 +413,54 @@ changes behaviour.
 
 **As built** (v1.1.0): the registry lives inside `LambdaScope` rather than in a separate
 `LambdaScopes` class, and `JsonataFunctionLibrary` additionally exposes `lambdaCount()` and
-`isOpen()`. Everything else matches the design above. The full suite (2 608 tests) passes unchanged,
-alongside 43 new ones.
+`isOpen()`. Everything else matches the design above. The full suite (2 616 tests) passes, including
+51 new ones.
 
 ---
 
 ## 8. Testing plan
 
-Unit tests in `src/test/java/org/json_kula/jsonata_jvm/JsonataFunctionLibraryTest.java`:
+Unit tests in `src/test/java/org/json_kula/jsonata_jvm/JsonataFunctionLibraryTest.java`. The
+definitions are the lambda samples from `ProgrammingTest` / `HigherOrderFunctionsTest` with their
+trailing invocation replaced by an export list — the invocation now comes from Java or from another
+expression, which is the point.
 
-1. **The motivating example.** Export `$sin`/`$cos` from the definition in §1; assert
-   `sin(1) == Math.sin(1)` to within 1e-12 (prototype produced `0.8414709848078965`, bit-identical to
-   `Math.sin(1)`), `sin(0) ≈ 0`, `cos(0) == 1`.
-2. **Cross-expression use.** Register the exported map on an unrelated `JsonataExpression` and
-   evaluate `[ $sin(1), $sin(0) ]` — prototype: `[0.8414709848078965, 4.25e-17]`.
-3. **Helper reachability.** `$factorial` and `$product` are *not* exported but are still reachable
-   from `$cos`.
-4. **Multi-arg export.** Export `$product`; assert `$mul(3, 4) == 12` through a consumer expression
-   and through a direct Java call.
-5. **Lifetime.** Evaluate the consumer 1 000 times, and from 8 threads concurrently — no
-   "Lambda expired", no cross-talk.
-6. **Standalone call.** Call an exported function directly from Java outside any evaluation
-   (this is the case that fails today, see Appendix A).
-7. **Declared signature.** `$f := function($x)<n:n>{ $x * 2 }` reports `<n:n>`; a string argument is
-   coerced.
-8. **Errors.** Unknown name; name bound to a number; name bound only inside a nested block;
-   duplicate names; use after `close()`.
-9. **Regression.** Full existing suite, plus an explicit assertion that ordinary (non-library)
-   lambda tokens keep their unqualified key format.
+1. **The motivating example.** Export `$sin`/`$cos`; assert `sin(1) == Math.sin(1)` to within 1e-12
+   (measured `0.8414709848078965`, bit-identical to `Math.sin(1)`), `sin(0) ≈ 0`, `cos(0) == 1`.
+2. **The definition is plain JSONata.** Compile the same string with `compile()` and assert it
+   evaluates to `["sin","cos"]` — the property that motivates the whole design.
+3. **Cross-expression use.** Register the exported map on an unrelated expression and evaluate
+   `angles.$sin($)`.
+4. **Helper reachability.** Export only `$sin`; `$cos`, `$factorial` and `$product` stay internal
+   and still work.
+5. **Every lambda shape.** Multi-parameter, closure over a block local, recursive, tail-recursive
+   (trampoline), `λ`, higher-order result (`$twice($add3)`), `~>` chain, partial application, and
+   `$map`/`$filter`/`$reduce` inside an exported body.
+6. **The export list.** `$`-prefixed names; a single unwrapped string; a computed list; order
+   preserved; a definition that itself binds `$__exportNames`.
+7. **Signatures.** Declared `<n:n>` reported and coerced; synthesised `<j?j?j?:j>`; override;
+   missing argument becomes undefined; an array argument is not flattened.
+8. **Bindings.** Per-evaluation, permanent, definition-time bindings, definition input, and both
+   sides of free-variable late binding.
+9. **Lifetime.** 200 sequential evaluations, 8 threads × 50 concurrent calls, `close()`,
+   idempotent close, two independent libraries.
+10. **Errors.** Every row of §6.
+11. **Regression.** Full existing suite, plus an explicit assertion that ordinary (non-library)
+    lambda tokens keep their unqualified key format.
 
 ---
 
 ## 9. Alternatives considered
+
+**A0. Pass the export list to Java: `compileFunctions(List.of("$sin", "$cos"), definition)`.**
+The first cut of this design, and the reason the rest of it exists. It let the definition be *almost*
+JSONata — it typically ended on a binding, so evaluating it elsewhere returned a stray function
+value, and the set of exports lived in the calling code rather than in the file that defines them.
+Two owners of one fact: rename a function in the definition and the Java call site silently stops
+matching; ship the definition to a colleague and it does not say what it provides. Rejected in favour
+of the definition returning its own export list, which costs the rewrite in §4.1 (the values must be
+collected before the names are known) and buys a definition that is valid, self-describing JSONata
+anywhere it is loaded.
 
 **A. Re-evaluate the definition on every call.** Compile one expression per exported name —
 `( <definitions>; $sin($__a0) )` — and implement the bound function as
@@ -439,16 +501,22 @@ key is the 5 % of that change that solves this problem.
 
 Run against `target/classes` at commit `e1acd91`.
 
-**Probe 1 — export rewrite and token lifetime.** Definition from §1, with
-`{"sin": $sin, "cos": $cos}` appended as the last expression of the block:
+**Probe 1 — export rewrite and token lifetime.** The definition of §1 ending on its `$cos` binding,
+then the same definition with `{"sin": $sin, "cos": $cos}` appended as the last expression of the
+block (an early, simpler form of the rewrite in §4.1 — enough to measure whether an appended object
+constructor can reach the block's bindings at all, and what the tokens are worth afterwards):
 
 ```
 as-is result:  "__λ:4"                                  ← block value = last binding, $sin unreachable
-export result: {"sin":"__λ:7","cos":"__λ:8"}            ← G1 solved by the rewrite
+export result: {"sin":"__λ:7","cos":"__λ:8"}            ← an in-block export can reach them (G1)
 sin token isLambdaToken = true
 post-eval fn_apply(sin, 1.0)  → RuntimeEvaluationException: Lambda expired or not found: 7   ← G2
 consumer expression using it  → JsonataEvaluationException: Error calling bound function     ← G2
 ```
+
+The first line is also why a definition must return its export list explicitly: ending on a binding
+yields one function value, which is neither a useful result for a plain JSONata engine nor a way to
+reach the other functions.
 
 **Probe 2 — nested evaluation clobbers the outer frame** (motivates rejecting alternative A, and
 open question 3):

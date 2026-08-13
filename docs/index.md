@@ -210,14 +210,12 @@ Example: `$length` has signature `<s-:n>` — accepts a string (using context as
 
 ## Function libraries
 
-A **function library** turns a JSONata *definition expression* — one whose job is to bind named lambdas, not to compute a result — into ready-to-use `JsonataBoundFunction`s. Write the function once in JSONata, then call it from Java or register it on any expression.
+A **function library** turns a JSONata *definition expression* into ready-to-use `JsonataBoundFunction`s. The definition binds named functions and **returns the names of the ones to export** — it is ordinary JSONata, and evaluating it in any JSONata engine simply yields that list.
 
 ```java
 JsonataExpressionFactory factory = new JsonataExpressionFactory();
 
-Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
-        List.of("$sin", "$cos"),
-        """
+Map<String, JsonataBoundFunction> trig = factory.compileFunctions("""
         (
           $pi := 3.1415926535897932384626;
 
@@ -230,6 +228,8 @@ Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
             $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
               $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
           };
+
+          ["sin", "cos"]
         )
         """);
 
@@ -240,12 +240,14 @@ expr.evaluate(mapper.readTree("{\"angles\": [0, 1, 2]}"));
 // → [0, 0.8414709848078965, 0.9092974268256817]
 ```
 
-The definition expression is compiled and evaluated **once**, inside `compileFunctions`; its own result is discarded. What matters is what it bound:
+The definition is compiled and evaluated **once**, inside `compileFunctions`. What matters is what it bound and what it named:
 
-- **Only the requested names are exported** — `$pi`, `$product` and `$factorial` stay internal, yet the exported functions still reach them. Helpers do not have to be exported to be usable.
+- **Only the names in the export list are exported.** `$pi`, `$product` and `$factorial` stay internal, yet the exported functions still reach them — helpers do not have to be exported to be usable.
+- **The export list lives with the functions**, not at the call site, so a definition file says what it provides and stays in step with itself when a function is renamed.
 - **Mutual recursion works**: `$sin` calls `$cos`, which calls itself and `$factorial`.
-- **Names may be written with or without the `$`.** Map keys never carry it, so the map drops straight into `registerFunction` or `bindFunction`.
+- **Names may be written with or without the `$`.** Map keys never carry it, so the map drops straight into `registerFunction` or `bindFunction`. The map preserves the order of the export list.
 - **Any lambda shape works**: multi-parameter, recursive, tail-recursive, `λ`, a function returned by another function (`$twice($add3)`), a `~>` chain (`$uppercase ~> $trim`), or a partial application (`$substring(?, 0, 5)`).
+- **The export list is an expression** like any other — `["sin", "cos"]` is the usual form, a single `"sin"` works, and so does a list computed at definition time.
 
 Exported functions can also be called straight from Java, with no expression involved:
 
@@ -253,6 +255,8 @@ Exported functions can also be called straight from Java, with no expression inv
 JsonataBoundFunction sin = trig.get("sin");
 JsonNode result = sin.apply(new JsonataFunctionArguments(List.of(DoubleNode.valueOf(1.0))));
 ```
+
+> A definition that ends on its last `$name := function…` binding returns *that function* rather than a list of names, and is rejected with `must return an array of function names`. Finish it with the export list.
 
 ### Signatures
 
@@ -268,7 +272,7 @@ The synthesised form is deliberately permissive: JSONata lets a lambda be called
 
 ```java
 JsonataFunctionLibrary lib = factory.compileFunctionLibrary(
-        List.of("$twice"), "($twice := function($x){ $x * 2 };)",
+        "($twice := function($x){ $x * 2 }; [\"twice\"])",
         new JsonataFunctionLibraryOptions().signature("$twice", "<n:n>"));
 
 // "<n:n>" coerces at the boundary: $twice("21") → 42

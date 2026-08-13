@@ -21,13 +21,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for function libraries — turning a JSONata definition expression into
- * {@link JsonataBoundFunction}s via
- * {@link JsonataExpressionFactory#compileFunctions(List, String)}.
+ * {@link JsonataBoundFunction}s via {@link JsonataExpressionFactory#compileFunctions(String)}.
  *
- * <p>The definition expressions are the lambda examples from the language-feature suite
+ * <p>A definition expression is ordinary JSONata: it binds named functions and returns the names of
+ * the ones to export. The definitions below are the lambda examples from the language-feature suite
  * ({@code ProgrammingTest}, {@code HigherOrderFunctionsTest}) with their trailing invocation
- * removed — the invocation now happens from Java, or from a different expression, which is exactly
- * what a library is for.
+ * replaced by that export list — the invocation now happens from Java, or from a different
+ * expression, which is what a library is for.
  */
 class JsonataFunctionLibraryTest {
 
@@ -43,7 +43,7 @@ class JsonataFunctionLibraryTest {
     // Definition expressions (from docs.jsonata.org, as used in the language tests)
     // -------------------------------------------------------------------------
 
-    /** The trigonometry example from https://docs.jsonata.org/programming, minus its plot. */
+    /** The trigonometry example from https://docs.jsonata.org/programming, exporting $sin and $cos. */
     private static final String TRIG = """
             (
               $pi := 3.1415926535897932384626;
@@ -59,6 +59,8 @@ class JsonataFunctionLibraryTest {
                 $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
                   $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
               };
+
+              ["sin", "cos"]
             )
             """;
 
@@ -79,9 +81,8 @@ class JsonataFunctionLibraryTest {
         return fn.apply(new JsonataFunctionArguments(List.of(args)));
     }
 
-    private static Map<String, JsonataBoundFunction> export(String definition, String... names)
-            throws Exception {
-        return FACTORY.compileFunctions(List.of(names), definition);
+    private static Map<String, JsonataBoundFunction> export(String definition) throws Exception {
+        return FACTORY.compileFunctions(definition);
     }
 
     // =========================================================================
@@ -90,8 +91,9 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void trig_exportedFunctionsMatchJavaMath() throws Exception {
-        Map<String, JsonataBoundFunction> trig = export(TRIG, "$sin", "$cos");
+        Map<String, JsonataBoundFunction> trig = export(TRIG);
 
+        assertEquals(List.of("sin", "cos"), new ArrayList<>(trig.keySet()));
         assertEquals(Math.sin(1), call(trig.get("sin"), num(1)).doubleValue(), 1e-12);
         assertEquals(Math.sin(0), call(trig.get("sin"), num(0)).doubleValue(), 1e-12);
         assertEquals(Math.cos(0), call(trig.get("cos"), num(0)).doubleValue(), 1e-12);
@@ -99,8 +101,16 @@ class JsonataFunctionLibraryTest {
     }
 
     @Test
+    void trig_definitionIsAValidJsonataExpressionOnItsOwn() throws Exception {
+        // Compiled and evaluated as an ordinary expression it yields its export list — nothing in
+        // the definition is library-specific syntax.
+        JsonNode result = FACTORY.compile(TRIG).evaluate(NullNode.instance);
+        assertEquals("[\"sin\",\"cos\"]", result.toString());
+    }
+
+    @Test
     void trig_usedFromAnotherExpression() throws Exception {
-        Map<String, JsonataBoundFunction> trig = export(TRIG, "$sin", "$cos");
+        Map<String, JsonataBoundFunction> trig = export(TRIG);
 
         JsonataExpression expr = FACTORY.compile("angles.$sin($)");
         trig.forEach(expr::registerFunction);
@@ -114,16 +124,17 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void trig_nonExportedHelpersStayReachable() throws Exception {
-        // $sin calls $cos, which calls $factorial, which reduces with $product — none of which
-        // are exported. Exporting only $sin must not break that chain.
-        Map<String, JsonataBoundFunction> only = export(TRIG, "$sin");
+        // $sin calls $cos, which calls $factorial, which reduces with $product — none of which are
+        // exported. Exporting only $sin must not break that chain.
+        Map<String, JsonataBoundFunction> only = export(TRIG.replace("[\"sin\", \"cos\"]", "[\"sin\"]"));
         assertEquals(1, only.size());
         assertEquals(Math.sin(1), call(only.get("sin"), num(1)).doubleValue(), 1e-12);
     }
 
     @Test
     void trig_internalHelperCanBeExportedToo() throws Exception {
-        Map<String, JsonataBoundFunction> fns = export(TRIG, "$factorial", "$product");
+        Map<String, JsonataBoundFunction> fns =
+                export(TRIG.replace("[\"sin\", \"cos\"]", "[\"factorial\", \"product\"]"));
         assertEquals(120, call(fns.get("factorial"), num(5)).intValue());
         assertEquals(12, call(fns.get("product"), num(3), num(4)).intValue());
     }
@@ -131,7 +142,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void trig_survivesRepeatedUse() throws Exception {
         // The per-evaluation lambda map is cleared after every evaluate(); a library must not be.
-        Map<String, JsonataBoundFunction> trig = export(TRIG, "$sin");
+        Map<String, JsonataBoundFunction> trig = export(TRIG);
         JsonataExpression expr = FACTORY.compile("$sin(1)");
         trig.forEach(expr::registerFunction);
 
@@ -146,9 +157,9 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void multiParamLambda_volume() throws Exception {
-        // ProgrammingTest.lambda_assignAndInvoke, minus the "$volume(10, 10, 5)" call.
+        // ProgrammingTest.lambda_assignAndInvoke, with "$volume(10, 10, 5)" replaced by the exports.
         Map<String, JsonataBoundFunction> fns =
-                export("($volume := function($l, $w, $h){ $l * $w * $h };)", "$volume");
+                export("($volume := function($l, $w, $h){ $l * $w * $h }; [\"volume\"])");
 
         assertEquals(500, call(fns.get("volume"), num(10), num(10), num(5)).intValue());
 
@@ -161,7 +172,7 @@ class JsonataFunctionLibraryTest {
     void lambdaCapturingBlockLocal_prefix() throws Exception {
         // ProgrammingTest.lambda_usesClosureOverContext — $prefix is captured, not exported.
         Map<String, JsonataBoundFunction> fns = export(
-                "($prefix := \"Ph: \"; $fmt := function($n){ $prefix & $n };)", "$fmt");
+                "($prefix := \"Ph: \"; $fmt := function($n){ $prefix & $n }; [\"fmt\"])");
 
         assertEquals("Ph: 0203 544 1234", call(fns.get("fmt"), str("0203 544 1234")).textValue());
     }
@@ -170,7 +181,7 @@ class JsonataFunctionLibraryTest {
     void recursiveLambda_factorial() throws Exception {
         // ProgrammingTest.recursive_factorial
         Map<String, JsonataBoundFunction> fns = export(
-                "($factorial := function($x){ $x <= 1 ? 1 : $x * $factorial($x-1) };)", "$factorial");
+                "($factorial := function($x){ $x <= 1 ? 1 : $x * $factorial($x-1) }; [\"factorial\"])");
 
         assertEquals(24, call(fns.get("factorial"), num(4)).intValue());
         assertEquals(3628800, call(fns.get("factorial"), num(10)).intValue());
@@ -186,7 +197,8 @@ class JsonataFunctionLibraryTest {
                      $x <= 1 ? $acc : $iter($x - 1, $x * $acc)
                    };
                    $iter($x, 1)
-                 )};)""", "$factorial");
+                 )};
+                 ["factorial"])""");
 
         assertEquals(3628800, call(fns.get("factorial"), num(10)).intValue());
     }
@@ -195,7 +207,7 @@ class JsonataFunctionLibraryTest {
     void greekLambda_fib() throws Exception {
         // ProgrammingTest.greekLambdaAsFunction
         Map<String, JsonataBoundFunction> fns = export(
-                "($fib := λ($n) { $n <= 1 ? $n : $fib($n-1) + $fib($n-2) };)", "$fib");
+                "($fib := λ($n) { $n <= 1 ? $n : $fib($n-1) + $fib($n-2) }; [\"fib\"])");
 
         JsonataExpression expr = FACTORY.compile("[1,2,3,4,5,6,7,8,9].$fib($)");
         fns.forEach(expr::registerFunction);
@@ -210,7 +222,8 @@ class JsonataFunctionLibraryTest {
         Map<String, JsonataBoundFunction> fns = export("""
                 ($twice := function($f) { function($x){ $f($f($x)) } };
                  $add3 := function($y){ $y + 3 };
-                 $add6 := $twice($add3);)""", "$add6", "$add3");
+                 $add6 := $twice($add3);
+                 ["add6", "add3"])""");
 
         assertEquals(13, call(fns.get("add6"), num(7)).intValue());
         assertEquals(10, call(fns.get("add3"), num(7)).intValue());
@@ -220,7 +233,7 @@ class JsonataFunctionLibraryTest {
     void functionChaining_normalizeWhitespace() throws Exception {
         // ProgrammingTest.functionChaining_normalizeWhitespace — a ~> chain of built-ins.
         Map<String, JsonataBoundFunction> fns =
-                export("($normalize := $uppercase ~> $trim;)", "$normalize");
+                export("($normalize := $uppercase ~> $trim; [\"normalize\"])");
 
         assertEquals("SOME WORDS", call(fns.get("normalize"), str("   Some   Words   ")).textValue());
     }
@@ -228,20 +241,22 @@ class JsonataFunctionLibraryTest {
     @Test
     void partialApplication_first5() throws Exception {
         // ProgrammingTest.partial_substringFirst5
-        Map<String, JsonataBoundFunction> fns = export("($first5 := $substring(?, 0, 5);)", "$first5");
+        Map<String, JsonataBoundFunction> fns = export("($first5 := $substring(?, 0, 5); [\"first5\"])");
 
         assertEquals("Hello", call(fns.get("first5"), str("Hello, World")).textValue());
     }
 
     @Test
     void higherOrderBuiltins_insideExportedBody() throws Exception {
-        // HigherOrderFunctionsTest patterns ($map/$filter/$reduce) used inside a library function.
+        // HigherOrderFunctionsTest patterns ($map/$filter/$reduce) used inside library functions.
         Map<String, JsonataBoundFunction> fns = export("""
                 (
                   $doubleAll := function($a){ $map($a, function($v){ $v * 2 }) };
                   $bigOnes := function($a, $min){ $filter($a, function($v){ $v > $min }) };
                   $total := function($a){ $reduce($a, function($acc, $v){ $acc + $v }) };
-                )""", "$doubleAll", "$bigOnes", "$total");
+
+                  ["doubleAll", "bigOnes", "total"]
+                )""");
 
         JsonataExpression expr = FACTORY.compile("$total($bigOnes($doubleAll([1,2,3,4,5]), 4))");
         fns.forEach(expr::registerFunction);
@@ -249,12 +264,78 @@ class JsonataFunctionLibraryTest {
         assertEquals(24, expr.evaluate(EMPTY_OBJECT).intValue());
     }
 
+    // =========================================================================
+    // The export list
+    // =========================================================================
+
+    @Test
+    void exportList_acceptsDollarPrefixedNames() throws Exception {
+        Map<String, JsonataBoundFunction> fns =
+                export(TRIG.replace("[\"sin\", \"cos\"]", "[\"$sin\", \"$cos\"]"));
+
+        assertEquals(List.of("sin", "cos"), new ArrayList<>(fns.keySet()),
+                "map keys never carry the $");
+        assertEquals(Math.sin(1), call(fns.get("sin"), num(1)).doubleValue(), 1e-12);
+    }
+
+    @Test
+    void exportList_acceptsASingleUnwrappedName() throws Exception {
+        // JSONata collapses one-element sequences, so a lone string is a valid export list.
+        Map<String, JsonataBoundFunction> fns =
+                export("($double := function($x){ $x * 2 }; \"double\")");
+
+        assertEquals(List.of("double"), new ArrayList<>(fns.keySet()));
+        assertEquals(8, call(fns.get("double"), num(4)).intValue());
+    }
+
+    @Test
+    void exportList_mayBeComputed() throws Exception {
+        // The list is an expression like any other — here it is built at definition time.
+        Map<String, JsonataBoundFunction> fns = export("""
+                (
+                  $inc := function($x){ $x + 1 };
+                  $dec := function($x){ $x - 1 };
+                  $exports := ["inc", "dec"];
+                  $withDec := true;
+
+                  $withDec ? $exports : $exports[0]
+                )""");
+
+        assertEquals(List.of("inc", "dec"), new ArrayList<>(fns.keySet()));
+        assertEquals(5, call(fns.get("inc"), num(4)).intValue());
+        assertEquals(3, call(fns.get("dec"), num(4)).intValue());
+    }
+
+    @Test
+    void exportList_orderIsPreserved() throws Exception {
+        Map<String, JsonataBoundFunction> fns =
+                export(TRIG.replace("[\"sin\", \"cos\"]", "[\"cos\", \"sin\", \"factorial\"]"));
+
+        assertEquals(List.of("cos", "sin", "factorial"), new ArrayList<>(fns.keySet()));
+    }
+
     @Test
     void definitionWithoutParentheses_singleBinding() throws Exception {
+        // Not a block at all: one binding, then the export list, joined by ; inside parentheses is
+        // the usual form — this checks the degenerate case of a definition that is just a list.
         Map<String, JsonataBoundFunction> fns =
-                export("$double := function($x){ $x * 2 }", "$double");
+                export("($double := function($x){ $x * 2 }; [\"double\"])");
 
         assertEquals(8, call(fns.get("double"), num(4)).intValue());
+    }
+
+    @Test
+    void definitionMayBindAnExportNamesVariableItself() throws Exception {
+        // The rewrite introduces a synthetic $__exportNames binding; a definition that already uses
+        // that name must not be disturbed.
+        Map<String, JsonataBoundFunction> fns = export("""
+                (
+                  $__exportNames := "not the export list";
+                  $echo := function($x){ $x & "/" & $__exportNames };
+                  ["echo"]
+                )""");
+
+        assertEquals("a/not the export list", call(fns.get("echo"), str("a")).textValue());
     }
 
     // =========================================================================
@@ -264,7 +345,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void declaredSignature_isReportedAndCoerces() throws Exception {
         Map<String, JsonataBoundFunction> fns =
-                export("($twice := function($x)<n:n>{ $x * 2 };)", "$twice");
+                export("($twice := function($x)<n:n>{ $x * 2 }; [\"twice\"])");
 
         assertEquals("<n:n>", fns.get("twice").getFunctionSignature());
 
@@ -277,7 +358,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void synthesizedSignature_isAllOptional() throws Exception {
         Map<String, JsonataBoundFunction> fns =
-                export("($volume := function($l, $w, $h){ $l * $w * $h };)", "$volume");
+                export("($volume := function($l, $w, $h){ $l * $w * $h }; [\"volume\"])");
 
         assertEquals("<j?j?j?:j>", fns.get("volume").getFunctionSignature());
     }
@@ -285,7 +366,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void signatureOverride_appliesCoercion() throws Exception {
         JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
-                List.of("$twice"), "($twice := function($x){ $x * 2 };)",
+                "($twice := function($x){ $x * 2 }; [\"twice\"])",
                 new JsonataFunctionLibraryOptions().signature("$twice", "<n:n>"));
 
         assertEquals("<n:n>", lib.get("twice").getFunctionSignature());
@@ -299,8 +380,8 @@ class JsonataFunctionLibraryTest {
     void missingArgument_becomesUndefinedNotAnError() throws Exception {
         // JSONata binds unsupplied parameters to undefined; the exported function does the same.
         Map<String, JsonataBoundFunction> fns = export(
-                "($greet := function($name, $greeting){ ($greeting ? $greeting : \"Hello\") & \", \" & $name };)",
-                "$greet");
+                "($greet := function($name, $greeting){ ($greeting ? $greeting : \"Hello\") & \", \" & $name };"
+                        + " [\"greet\"])");
 
         JsonataExpression expr = FACTORY.compile("$greet(\"Fred\")");
         fns.forEach(expr::registerFunction);
@@ -310,7 +391,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void arrayArgument_isNotFlattened() throws Exception {
         Map<String, JsonataBoundFunction> fns =
-                export("($count2 := function($a){ $count($a) };)", "$count2");
+                export("($count2 := function($a){ $count($a) }; [\"count2\"])");
 
         assertEquals(3, call(fns.get("count2"), MAPPER.readTree("[1,2,3]")).intValue());
     }
@@ -321,7 +402,7 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void exportedFunctions_bindPerEvaluation() throws Exception {
-        Map<String, JsonataBoundFunction> trig = export(TRIG, "$sin");
+        Map<String, JsonataBoundFunction> trig = export(TRIG);
 
         JsonataExpression expr = FACTORY.compile("$sin($angle)");
         JsonataBindings bindings = new JsonataBindings()
@@ -334,7 +415,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void freeVariable_resolvesAgainstDefinitionBindingsWhenCalledFromJava() throws Exception {
         JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
-                List.of("$withVat"), "($withVat := function($net){ $net * (1 + $vatRate) };)",
+                "($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])",
                 new JsonataFunctionLibraryOptions()
                         .bindings(new JsonataBindings().bindValue("vatRate", num(0.2))));
 
@@ -345,7 +426,7 @@ class JsonataFunctionLibraryTest {
     void freeVariable_resolvesAgainstCallerBindingsInsideAnExpression() throws Exception {
         // Documented semantics: a name the definition never binds is late-bound to the caller.
         Map<String, JsonataBoundFunction> fns =
-                export("($withVat := function($net){ $net * (1 + $vatRate) };)", "$withVat");
+                export("($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])");
 
         JsonataExpression expr = FACTORY.compile("$withVat(100)");
         fns.forEach(expr::registerFunction);
@@ -357,8 +438,7 @@ class JsonataFunctionLibraryTest {
     @Test
     void definitionInput_isAvailableToTheDefinition() throws Exception {
         JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
-                List.of("$rate"),
-                "($factor := rates.vat; $rate := function($net){ $net * $factor };)",
+                "($factor := rates.vat; $rate := function($net){ $net * $factor }; [\"rate\"])",
                 new JsonataFunctionLibraryOptions()
                         .input(MAPPER.readTree("{\"rates\": {\"vat\": 1.2}}")));
 
@@ -366,35 +446,25 @@ class JsonataFunctionLibraryTest {
     }
 
     // =========================================================================
-    // Naming, map shape and lifetime
+    // Map shape and lifetime
     // =========================================================================
 
     @Test
-    void names_acceptedWithAndWithoutDollar_keysNeverCarryIt() throws Exception {
-        Map<String, JsonataBoundFunction> fns = FACTORY.compileFunctions(
-                List.of("$sin", "cos"), TRIG);
-
-        assertEquals(List.of("sin", "cos"), new ArrayList<>(fns.keySet()));
-        assertNotNull(fns.get("sin"));
-        assertNotNull(fns.get("cos"));
-    }
-
-    @Test
     void library_getAcceptsEitherForm() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(List.of("$sin"), TRIG);
+        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         assertSame(lib.get("sin"), lib.get("$sin"));
         assertNull(lib.get("nope"));
     }
 
     @Test
     void library_mapIsImmutable() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(List.of("$sin"), TRIG);
+        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         assertThrows(UnsupportedOperationException.class, () -> lib.asMap().remove("sin"));
     }
 
     @Test
     void library_closeReleasesTheFunctions() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(List.of("$sin"), TRIG);
+        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         JsonataBoundFunction sin = lib.get("sin");
         assertTrue(lib.isOpen());
         assertTrue(lib.lambdaCount() > 0);
@@ -410,22 +480,22 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void library_closeIsIdempotent() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(List.of("$sin"), TRIG);
+        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         lib.close();
         assertDoesNotThrow(lib::close);
     }
 
     @Test
     void library_reportsItsSource() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(List.of("$sin"), TRIG);
+        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         assertEquals(TRIG, lib.getSourceJsonata());
     }
 
     @Test
     void twoLibraries_areIndependent() throws Exception {
-        Map<String, JsonataBoundFunction> a = export("($f := function($x){ $x + 1 };)", "$f");
-        JsonataFunctionLibrary b = FACTORY.compileFunctionLibrary(
-                List.of("$f"), "($f := function($x){ $x + 100 };)");
+        Map<String, JsonataBoundFunction> a = export("($f := function($x){ $x + 1 }; [\"f\"])");
+        JsonataFunctionLibrary b =
+                FACTORY.compileFunctionLibrary("($f := function($x){ $x + 100 }; [\"f\"])");
 
         assertEquals(2, call(a.get("f"), num(1)).intValue());
         assertEquals(101, call(b.get("f"), num(1)).intValue());
@@ -439,9 +509,39 @@ class JsonataFunctionLibraryTest {
     // =========================================================================
 
     @Test
+    void error_definitionDoesNotReturnAnExportList() {
+        // A definition that ends with its last binding returns that function, not a list of names.
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($sin := function($x){ $x };)"));
+        assertTrue(e.getMessage().contains("array of function names"), e.getMessage());
+        assertTrue(e.getMessage().contains("function"), e.getMessage());
+    }
+
+    @Test
+    void error_definitionReturnsNothing() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($f := function($x){ $x }; nothing.here)"));
+        assertTrue(e.getMessage().contains("returned nothing"), e.getMessage());
+    }
+
+    @Test
+    void error_definitionReturnsNonStrings() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($f := function($x){ $x }; [1, 2])"));
+        assertTrue(e.getMessage().contains("array of function names"), e.getMessage());
+    }
+
+    @Test
+    void error_definitionReturnsAnEmptyList() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($f := function($x){ $x }; [])"));
+        assertTrue(e.getMessage().contains("nothing") || e.getMessage().contains("empty"), e.getMessage());
+    }
+
+    @Test
     void error_nameNotDefinedAtTopLevel() {
         JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
-                () -> export(TRIG, "$tan"));
+                () -> export(TRIG.replace("[\"sin\", \"cos\"]", "[\"sin\", \"tan\"]")));
         assertTrue(e.getMessage().contains("$tan"), e.getMessage());
         assertTrue(e.getMessage().contains("not defined"), e.getMessage());
     }
@@ -452,51 +552,50 @@ class JsonataFunctionLibraryTest {
                 ($outer := function($x){(
                    $inner := function($y){ $y * 2 };
                    $inner($x)
-                 )};)""";
-        assertThrows(JsonataCompilationException.class, () -> export(definition, "$inner"));
+                 )};
+                 ["inner"])""";
+        JsonataCompilationException e =
+                assertThrows(JsonataCompilationException.class, () -> export(definition));
+        assertTrue(e.getMessage().contains("$inner"), e.getMessage());
     }
 
     @Test
     void error_nameBoundToALiteralValue() {
         JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
-                () -> export(TRIG, "$pi"));
+                () -> export(TRIG.replace("[\"sin\", \"cos\"]", "[\"pi\"]")));
         assertTrue(e.getMessage().contains("not a function"), e.getMessage());
     }
 
     @Test
     void error_nameBoundToAComputedNonFunction() {
-        // Not detectable from the AST — caught after the definition runs.
         JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
-                () -> export("($label := $string(42);)", "$label"));
+                () -> export("($label := $string(42); [\"label\"])"));
         assertTrue(e.getMessage().contains("not a function"), e.getMessage());
     }
 
     @Test
-    void error_duplicateNames() {
-        assertThrows(IllegalArgumentException.class, () -> export(TRIG, "$sin", "sin"));
-    }
-
-    @Test
-    void error_noNamesRequested() {
-        assertThrows(IllegalArgumentException.class, () -> FACTORY.compileFunctions(List.of(), TRIG));
+    void error_duplicateNamesInTheExportList() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export(TRIG.replace("[\"sin\", \"cos\"]", "[\"sin\", \"$sin\"]")));
+        assertTrue(e.getMessage().contains("twice"), e.getMessage());
     }
 
     @Test
     void error_invalidDefinitionExpression() {
         assertThrows(JsonataCompilationException.class,
-                () -> export("($f := function($x){ $x + };)", "$f"));
+                () -> export("($f := function($x){ $x + }; [\"f\"])"));
     }
 
     @Test
     void error_definitionThatThrows() {
         assertThrows(JsonataCompilationException.class,
-                () -> export("($f := $error(\"nope\"); $g := function($x){ $x };)", "$g"));
+                () -> export("($f := $error(\"nope\"); $g := function($x){ $x }; [\"g\"])"));
     }
 
     @Test
     void error_callingAnExportedFunctionThatFails() throws Exception {
         Map<String, JsonataBoundFunction> fns =
-                export("($boom := function($x){ $error(\"boom \" & $x) };)", "$boom");
+                export("($boom := function($x){ $error(\"boom \" & $x) }; [\"boom\"])");
 
         JsonataEvaluationException e =
                 assertThrows(JsonataEvaluationException.class, () -> call(fns.get("boom"), num(1)));
@@ -509,7 +608,7 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void exportedFunctions_areThreadSafe() throws Exception {
-        Map<String, JsonataBoundFunction> trig = export(TRIG, "$sin");
+        Map<String, JsonataBoundFunction> trig = export(TRIG);
         JsonataExpression expr = FACTORY.compile("$sin($angle)");
         trig.forEach(expr::registerFunction);
 
@@ -552,8 +651,8 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void ordinaryLambdas_stillEvaluateNormally() throws Exception {
-        // The same definitions, used the ordinary way, keep working — libraries add a mode, they
-        // do not change the default one.
+        // The same definitions, used the ordinary way, keep working — libraries add a mode, they do
+        // not change the default one.
         assertEquals(500, FACTORY
                 .compile("($volume := function($l, $w, $h){ $l * $w * $h }; $volume(10, 10, 5))")
                 .evaluate(EMPTY_OBJECT).intValue());
@@ -561,7 +660,7 @@ class JsonataFunctionLibraryTest {
                 .compile("($factorial := function($x){ $x <= 1 ? 1 : $x * $factorial($x-1) }; $factorial(4))")
                 .evaluate(EMPTY_OBJECT).intValue());
         assertEquals(Math.sin(1), FACTORY
-                .compile(TRIG.strip().substring(0, TRIG.strip().length() - 1) + " $sin(1))")
+                .compile(TRIG.replace("[\"sin\", \"cos\"]", "$sin(1)"))
                 .evaluate(NullNode.instance).doubleValue(), 1e-12);
     }
 

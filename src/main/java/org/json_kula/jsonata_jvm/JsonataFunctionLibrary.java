@@ -11,7 +11,8 @@ import java.util.Map;
  * A set of JSONata functions compiled from a <em>definition expression</em> and exposed to Java as
  * {@link JsonataBoundFunction}s.
  *
- * <p>A definition expression binds named lambdas and returns nothing of interest:
+ * <p>A definition expression binds named functions and returns the names of the ones to export. It
+ * is ordinary JSONata — evaluated in any JSONata engine it simply yields that list:
  *
  * <pre>{@code
  * (
@@ -20,17 +21,18 @@ import java.util.Map;
  *   $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
  *   $sin := function($x){ $cos($x - $pi/2) };
  *   $cos := function($x){ ... };
+ *
+ *   ["sin", "cos"]
  * )
  * }</pre>
  *
- * <p>Requesting {@code ["$sin", "$cos"]} from it yields two bound functions that can be registered
- * on any expression, or called directly from Java. Bindings the exported functions depend on
- * ({@code $pi}, {@code $product}, {@code $factorial}) stay reachable through the exported closures
- * without being exported themselves, and mutual recursion between exported functions works.
+ * <p>The two named functions come back as bound functions that can be registered on any expression
+ * or called directly from Java. Bindings they depend on ({@code $pi}, {@code $product},
+ * {@code $factorial}) stay reachable through the exported closures without being exported
+ * themselves, and mutual recursion between exported functions works.
  *
  * <pre>{@code
- * Map<String, JsonataBoundFunction> trig =
- *         factory.compileFunctions(List.of("$sin", "$cos"), definition);
+ * Map<String, JsonataBoundFunction> trig = factory.compileFunctions(definition);
  *
  * JsonataExpression report = factory.compile("angles.$sin($)");
  * trig.forEach(report::registerFunction);

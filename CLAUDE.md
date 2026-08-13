@@ -94,18 +94,24 @@ Class JsonataFunctionArguments represents a list of JsonNode.
 
 # Function libraries
 Besides implementing JsonataBoundFunction in Java, a bound function can be written in JSONata itself.
-`JsonataExpressionFactory.compileFunctions(List<String> functionNames, String functionDefinition)`
-takes a definition expression — one that binds named lambdas and whose own result is discarded — and
-returns `Map<String, JsonataBoundFunction>` keyed by name without the leading `$`.
+`JsonataExpressionFactory.compileFunctions(String functionDefinition)` takes a definition expression
+and returns `Map<String, JsonataBoundFunction>` keyed by name without the leading `$`.
 
-Only the requested names are exported; other bindings in the definition (helper values and helper
-functions) stay internal but remain reachable from the exported closures, and mutual recursion
+A definition expression must be a valid JSONata expression that binds named functions and returns an
+array of strings — the names of the functions to export. There is no name list on the Java side: the
+definition is self-describing and evaluates in any JSONata engine, where its result is that array.
+A single string is accepted as a one-element list, and names may carry the leading `$` or not.
+
+Only the names in the export list are exported; other bindings in the definition (helper values and
+helper functions) stay internal but remain reachable from the exported closures, and mutual recursion
 between exported functions works.
 
 How it works:
-1. `FunctionExportRewriter` appends `{"name": $name, ...}` to the outermost block of the parsed
-   definition, so the requested lambdas are returned to the caller. It also recovers each function's
-   arity and signature from the AST.
+1. `FunctionExportRewriter` binds the definition's last expression (the export list) to a synthetic
+   `$__exportNames` variable and appends `{"names": $__exportNames, "functions": {...every top-level
+   binding...}}` to the outermost block. Collecting all bindings is what keeps this to one
+   compilation: which of them are wanted is only known once the export list has been evaluated.
+   The rewriter also recovers each exported function's arity and signature from the AST.
 2. The rewritten expression is optimised, translated and loaded exactly like any other expression.
 3. It is evaluated once with a `LambdaScope` installed (`AbstractJsonataExpression.evaluateDefining`).
    While a scope is installed, `LambdaRegistry.lambdaNode` mints scope-qualified token keys

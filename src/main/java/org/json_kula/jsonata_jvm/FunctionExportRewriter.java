@@ -1,6 +1,8 @@
 package org.json_kula.jsonata_jvm;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
+import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -8,25 +10,51 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Turns a JSONata <em>definition expression</em> — one whose purpose is to bind named lambdas —
- * into an expression that hands those lambdas back to the caller.
+ * Turns a JSONata <em>definition expression</em> — one that binds named lambdas and returns the
+ * names of the ones to export — into an expression that also hands those lambdas back to the caller.
  *
- * <p>The rewrite appends a single object constructor as the last expression of the outermost block:
+ * <p>A definition expression is ordinary JSONata and evaluates on its own in any JSONata engine; its
+ * result is the export list:
  *
  * <pre>{@code
- * ( $pi := 3.14159; $sin := function($x){ ... }; $cos := function($x){ ... } )
- * ( $pi := 3.14159; $sin := function($x){ ... }; $cos := function($x){ ... };
- *   {"sin": $sin, "cos": $cos} )                                    ← appended
+ * (
+ *   $pi := 3.14159;
+ *   $product := function($a, $b) { $a * $b };
+ *   $sin := function($x){ ... };
+ *   $cos := function($x){ ... };
+ *   ["sin", "cos"]                      ← the expression's own result
+ * )
  * }</pre>
  *
- * <p>Appending <em>inside</em> the block is what makes this work: the translator emits a block's
- * variable bindings as Java locals of a private helper method, so only an expression in the same
- * block can read them. It also gives the right failure mode — a name bound only inside a nested
- * block is simply not in scope, which {@link #analyze} reports before any code is generated.
+ * <p>The rewrite keeps that result and adds the values beside it. The trailing expression is bound
+ * to a synthetic variable and a final object constructor collects it together with every variable
+ * the definition bound at its top level:
+ *
+ * <pre>{@code
+ * (
+ *   $pi := 3.14159; $product := …; $sin := …; $cos := …;
+ *   $__exportNames := ["sin", "cos"];
+ *   {"names": $__exportNames,
+ *    "functions": {"pi": $pi, "product": $product, "sin": $sin, "cos": $cos}}
+ * )
+ * }</pre>
+ *
+ * <p>Collecting <em>all</em> top-level bindings is what allows a single compilation and a single
+ * evaluation: which of them to export is only known once the names expression has been evaluated,
+ * and by then the values are already in hand. Building the object <em>inside</em> the block is what
+ * makes it work at all — the translator emits a block's bindings as Java locals of a private helper
+ * method, so only an expression in the same block can read them.
  */
 final class FunctionExportRewriter {
 
     private FunctionExportRewriter() {}
+
+    /** Field of the export object holding the definition's own result — the export list. */
+    static final String NAMES_FIELD = "names";
+    /** Field of the export object holding every top-level binding, keyed by name. */
+    static final String FUNCTIONS_FIELD = "functions";
+
+    private static final String NAMES_VAR_BASE = "__exportNames";
 
     /**
      * What the export wrapper needs to know about one exported function, recovered from the AST.
@@ -40,93 +68,18 @@ final class FunctionExportRewriter {
     record ExportInfo(int arity, String signature) {}
 
     /**
-     * Strips a leading {@code $} so that {@code "$sin"} and {@code "sin"} name the same function.
-     * Map keys use the bare form, matching {@link JsonataExpression#registerFunction} and
+     * Strips a leading {@code $} so that a definition may list its exports either way. Map keys use
+     * the bare form, matching {@link JsonataExpression#registerFunction} and
      * {@link JsonataBindings#bindFunction}.
      */
     static String normalize(String name) {
-        if (name == null || name.isBlank())
-            throw new IllegalArgumentException("Function name must not be null or blank");
         String trimmed = name.strip();
         return trimmed.startsWith("$") ? trimmed.substring(1) : trimmed;
     }
 
-    /** Normalises every name, rejecting duplicates and blanks. */
-    static List<String> normalizeAll(List<String> names) {
-        if (names == null || names.isEmpty())
-            throw new IllegalArgumentException("At least one function name must be requested");
-        List<String> result = new ArrayList<>(names.size());
-        for (String name : names) {
-            String normalized = normalize(name);
-            if (normalized.isEmpty())
-                throw new IllegalArgumentException("Function name must not be just \"$\"");
-            if (result.contains(normalized))
-                throw new IllegalArgumentException("Duplicate function name: $" + normalized);
-            result.add(normalized);
-        }
-        return result;
-    }
-
-    /**
-     * Returns {@code root} with an export object constructor appended to the outermost block.
-     *
-     * @param names normalised function names (no leading {@code $})
-     */
-    static AstNode rewrite(AstNode root, List<String> names) {
-        List<AstNode.KeyValuePair> pairs = new ArrayList<>(names.size());
-        for (String name : names) {
-            pairs.add(new AstNode.KeyValuePair(
-                    new AstNode.StringLiteral(name), new AstNode.VariableRef(name)));
-        }
-        return append(root, new AstNode.ObjectConstructor(pairs));
-    }
-
-    private static AstNode append(AstNode root, AstNode export) {
-        // "( … )" parses as Parenthesized(Block(…)); keep the wrapper, append inside it.
-        if (root instanceof AstNode.Parenthesized parenthesized) {
-            return new AstNode.Parenthesized(append(parenthesized.inner(), export));
-        }
-        if (root instanceof AstNode.Block block) {
-            List<AstNode> expressions = new ArrayList<>(block.expressions());
-            expressions.add(export);
-            return new AstNode.Block(expressions);
-        }
-        // A definition that is a single binding rather than a sequence, e.g.
-        // "$sin := function($x){ ... }" — wrap it so the binding and the export share a scope.
-        return new AstNode.Block(List.of(root, export));
-    }
-
-    /**
-     * Inspects the definition's top-level bindings and returns one {@link ExportInfo} per requested
-     * name, in request order.
-     *
-     * @throws JsonataCompilationException if a requested name is not bound at the top level of the
-     *                                     definition expression, or is bound to a value that
-     *                                     plainly cannot be a function
-     */
-    static Map<String, ExportInfo> analyze(AstNode root, List<String> names)
-            throws JsonataCompilationException {
-        Map<String, AstNode> bound = new LinkedHashMap<>();
-        collectTopLevelBindings(root, bound);
-
-        Map<String, ExportInfo> infos = new LinkedHashMap<>();
-        for (String name : names) {
-            AstNode value = bound.get(name);
-            if (value == null) {
-                throw new JsonataCompilationException(null,
-                        "$" + name + " is not defined at the top level of the definition expression"
-                                + (bound.isEmpty()
-                                        ? " (it binds no variables at all)"
-                                        : " (it binds: $" + String.join(", $", bound.keySet()) + ")"),
-                        null);
-            }
-            infos.put(name, describe(name, value));
-        }
-        return infos;
-    }
-
-    /** Collects {@code name → value} for every binding at the top level of {@code root}. */
-    private static void collectTopLevelBindings(AstNode root, Map<String, AstNode> out) {
+    /** Collects {@code name → value expression} for every binding at the top level of {@code root}. */
+    static Map<String, AstNode> topLevelBindings(AstNode root) {
+        Map<String, AstNode> bindings = new LinkedHashMap<>();
         AstNode unwrapped = root;
         while (unwrapped instanceof AstNode.Parenthesized parenthesized) {
             unwrapped = parenthesized.inner();
@@ -135,26 +88,123 @@ final class FunctionExportRewriter {
                 ? block.expressions()
                 : List.of(unwrapped);
         for (AstNode expr : expressions) {
-            // Chained assignment ($a := $b := value) binds every name in the chain.
+            // Chained assignment ($a := $b := value) binds every name in the chain; a later
+            // re-binding of the same name wins, matching evaluation order.
             AstNode current = expr;
             while (current instanceof AstNode.VariableBinding binding) {
-                // A later re-binding of the same name wins, matching evaluation order.
-                out.put(binding.name(), binding.value());
+                bindings.put(binding.name(), binding.value());
                 current = binding.value();
             }
         }
+        return bindings;
     }
 
-    private static ExportInfo describe(String name, AstNode value) throws JsonataCompilationException {
+    /**
+     * Returns {@code root} rewritten to yield {@code {"names": …, "functions": {…}}}.
+     *
+     * @param boundNames the top-level binding names, as returned by {@link #topLevelBindings}
+     */
+    static AstNode rewrite(AstNode root, Iterable<String> boundNames) {
+        String namesVar = freshNamesVar(boundNames);
+
+        List<AstNode.KeyValuePair> functionPairs = new ArrayList<>();
+        for (String name : boundNames) {
+            functionPairs.add(new AstNode.KeyValuePair(
+                    new AstNode.StringLiteral(name), new AstNode.VariableRef(name)));
+        }
+        AstNode exportObject = new AstNode.ObjectConstructor(List.of(
+                new AstNode.KeyValuePair(
+                        new AstNode.StringLiteral(NAMES_FIELD), new AstNode.VariableRef(namesVar)),
+                new AstNode.KeyValuePair(
+                        new AstNode.StringLiteral(FUNCTIONS_FIELD),
+                        new AstNode.ObjectConstructor(functionPairs))));
+
+        return replaceTail(root, namesVar, exportObject);
+    }
+
+    /**
+     * Binds the definition's last expression to {@code namesVar} and appends {@code exportObject}
+     * after it, so the original result is computed exactly once and stays available.
+     */
+    private static AstNode replaceTail(AstNode root, String namesVar, AstNode exportObject) {
+        if (root instanceof AstNode.Parenthesized parenthesized) {
+            return new AstNode.Parenthesized(replaceTail(parenthesized.inner(), namesVar, exportObject));
+        }
+        if (root instanceof AstNode.Block block && !block.expressions().isEmpty()) {
+            List<AstNode> expressions = new ArrayList<>(block.expressions());
+            int lastIndex = expressions.size() - 1;
+            expressions.set(lastIndex, new AstNode.VariableBinding(namesVar, expressions.get(lastIndex)));
+            expressions.add(exportObject);
+            return new AstNode.Block(expressions);
+        }
+        // A definition that is a single expression rather than a sequence, e.g. just "['sin']"
+        // (which exports nothing and is reported as such) or a lone binding.
+        return new AstNode.Block(List.of(new AstNode.VariableBinding(namesVar, root), exportObject));
+    }
+
+    /** Picks a synthetic variable name that the definition does not already bind. */
+    private static String freshNamesVar(Iterable<String> boundNames) {
+        List<String> taken = new ArrayList<>();
+        boundNames.forEach(taken::add);
+        String candidate = NAMES_VAR_BASE;
+        for (int suffix = 2; taken.contains(candidate); suffix++) {
+            candidate = NAMES_VAR_BASE + suffix;
+        }
+        return candidate;
+    }
+
+    /**
+     * Reads the export list the definition returned: an array of strings, or a single string.
+     *
+     * @throws JsonataCompilationException if the result is not a usable list of names
+     */
+    static List<String> exportedNames(JsonNode names) throws JsonataCompilationException {
+        if (names == null || names.isMissingNode()) {
+            throw error("The definition expression must return an array of function names to export,"
+                    + " but it returned nothing");
+        }
+        List<JsonNode> elements = new ArrayList<>();
+        if (names.isArray()) {
+            names.forEach(elements::add);
+        } else {
+            // A single name may be returned unwrapped, as JSONata collapses one-element sequences.
+            elements.add(names);
+        }
+        if (elements.isEmpty()) {
+            throw error("The definition expression returned an empty array; it must name at least"
+                    + " one function to export");
+        }
+
+        List<String> result = new ArrayList<>(elements.size());
+        for (JsonNode element : elements) {
+            if (!element.isTextual() || JsonataRuntime.isLambdaToken(element)) {
+                throw error("The definition expression must return an array of function names, but"
+                        + " one element is " + JsonataRuntime.fn_type(element).asText()
+                        + ": " + JsonataRuntime.sanitizeForString(element));
+            }
+            String name = normalize(element.textValue());
+            if (name.isEmpty()) {
+                throw error("The definition expression returned an empty function name");
+            }
+            if (result.contains(name)) {
+                throw error("The definition expression names $" + name + " twice");
+            }
+            result.add(name);
+        }
+        return result;
+    }
+
+    /**
+     * Recovers the arity and signature of one exported function from the AST.
+     *
+     * @param value the bound value expression, or {@code null} if the definition has no top-level
+     *              binding of that name
+     */
+    static ExportInfo describe(AstNode value) {
         if (value instanceof AstNode.Lambda lambda) {
             int arity = lambda.params().size();
             String declared = lambda.signature();
             return new ExportInfo(arity, declared != null ? declared : synthesizeSignature(arity));
-        }
-        if (isPlainlyNotAFunction(value)) {
-            throw new JsonataCompilationException(null,
-                    "$" + name + " is bound to " + describeValue(value)
-                            + ", not a function, in the definition expression", null);
         }
         // Computed function values — $twice($add3), $uppercase ~> $trim, $substring(?, 0, 5),
         // a conditional choosing between two lambdas … The value is checked for real after the
@@ -173,24 +223,7 @@ final class FunctionExportRewriter {
         return "<" + "j?".repeat(arity) + ":j>";
     }
 
-    private static boolean isPlainlyNotAFunction(AstNode value) {
-        return value instanceof AstNode.NumberLiteral
-                || value instanceof AstNode.StringLiteral
-                || value instanceof AstNode.BooleanLiteral
-                || value instanceof AstNode.NullLiteral
-                || value instanceof AstNode.ArrayConstructor
-                || value instanceof AstNode.ObjectConstructor;
-    }
-
-    private static String describeValue(AstNode value) {
-        return switch (value) {
-            case AstNode.NumberLiteral ignored  -> "a number";
-            case AstNode.StringLiteral ignored  -> "a string";
-            case AstNode.BooleanLiteral ignored -> "a boolean";
-            case AstNode.NullLiteral ignored    -> "null";
-            case AstNode.ArrayConstructor ignored  -> "an array";
-            case AstNode.ObjectConstructor ignored -> "an object";
-            default                             -> "a value";
-        };
+    private static JsonataCompilationException error(String message) {
+        return new JsonataCompilationException(null, message, null);
     }
 }

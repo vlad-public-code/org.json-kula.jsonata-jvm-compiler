@@ -26,9 +26,10 @@ Key facts:
 - **Bindings:** inject `$name` values and `$name(...)` functions per-evaluation
   (`JsonataBindings`) or permanently (`assign` / `registerFunction`); per-evaluation wins on a name
   clash.
-- **Function libraries:** `factory.compileFunctions(List.of("$sin", "$cos"), definitionExpression)`
-  → `Map<String, JsonataBoundFunction>`. Write functions once in JSONata — recursive, mutually
-  recursive, closing over helper bindings — and call them from Java or register them on any
+- **Function libraries:** `factory.compileFunctions(definitionExpression)` →
+  `Map<String, JsonataBoundFunction>`. The definition is ordinary JSONata that binds named functions
+  and returns the names to export (`["sin", "cos"]`); write functions once in JSONata — recursive,
+  mutually recursive, closing over helper bindings — and call them from Java or register them on any
   expression.
 - **Two exceptions:** `JsonataCompilationException` (bad expression) and `JsonataEvaluationException`
   (bad input / runtime error, including the `U1001` timeout from `setTimeout`).
@@ -38,7 +39,7 @@ Key facts:
 - [Documentation]({{ '/' | absolute_url }}): overview, requirements, getting started, bindings, performance, thread safety, and the compile→optimize→translate→load architecture.
 - [Getting started]({{ '/#getting-started' | absolute_url }}): add the dependency, compile an expression (single or batch), and evaluate against JSON.
 - [Bindings]({{ '/#bindings' | absolute_url }}): per-evaluation vs permanent bindings, `JsonataBoundFunction`, and the function-signature syntax.
-- [Function libraries]({{ '/#function-libraries' | absolute_url }}): compile a JSONata definition expression into `JsonataBoundFunction`s — exported names, captured helpers, signatures, and lifetime.
+- [Function libraries]({{ '/#function-libraries' | absolute_url }}): compile a JSONata definition expression — one that binds functions and returns the names to export — into `JsonataBoundFunction`s; captured helpers, signatures, and lifetime.
 - [Performance]({{ '/#performance' | absolute_url }}): the ~25× benchmark vs JSONata4Java and how to reproduce it.
 - [Architecture]({{ '/#architecture' | absolute_url }}): the pipeline and package structure (`parser`, `optimizer`, `translator`, `runtime`, `loader`).
 - [Source on GitHub](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler): code and README. Apache-2.0.
