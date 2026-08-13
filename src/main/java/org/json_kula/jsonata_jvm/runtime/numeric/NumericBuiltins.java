@@ -87,9 +87,36 @@ public final class NumericBuiltins {
         double v = JsonataRuntime.toNumber(number);
         if (Double.isNaN(v) || Double.isInfinite(v)) return NF.numberNode(v);
         int p = JsonataRuntime.missing(precision) ? 0 : (int) JsonataRuntime.toNumber(precision);
+        Double fast = roundWithoutDecimalArithmetic(v, p);
+        if (fast != null) return JsonataRuntime.numNode(fast);
         BigDecimal bd = new BigDecimal(Double.toString(v)).setScale(p, RoundingMode.HALF_EVEN);
         return JsonataRuntime.numNode(bd.doubleValue());
     }
+
+    /**
+     * Rounds half-to-even in binary floating point, or returns {@code null} when the exact decimal
+     * answer might differ.
+     *
+     * <p>The reference implementation rounds the <em>decimal</em> form of the value, which needs
+     * {@code BigDecimal} — the value 2.675 is really 2.67499…, so decimal rounding gives 2.68 where
+     * binary rounding gives 2.67. That only matters when the scaled value sits on a tie; everywhere
+     * else {@link Math#rint} gives the same answer for a fraction of the cost, and {@code $round} is
+     * common enough in reporting expressions to be worth the branch.
+     */
+    private static Double roundWithoutDecimalArithmetic(double v, int p) {
+        if (p < 0 || p > 15) return null;
+        double factor = POWERS_OF_TEN[p];
+        double scaled = v * factor;
+        if (Math.abs(scaled) >= 1e15) return null;              // precision no longer exact
+        double fraction = Math.abs(scaled - Math.floor(scaled));
+        if (Math.abs(fraction - 0.5) < 1e-9) return null;       // too close to a tie to guess
+        return Math.rint(scaled) / factor;
+    }
+
+    private static final double[] POWERS_OF_TEN = {
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
+        1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15
+    };
 
     // =========================================================================
     // $random — ThreadLocalRandom avoids contention under parallel evaluation

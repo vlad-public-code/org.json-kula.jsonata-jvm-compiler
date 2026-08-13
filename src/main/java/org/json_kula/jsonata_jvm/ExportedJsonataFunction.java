@@ -19,7 +19,7 @@ final class ExportedJsonataFunction implements JsonataBoundFunction {
     private final JsonNode token;
     private final String signature;
     private final int arity;
-    /** Keeps the library — and therefore the lambda scope and generated class — reachable. */
+    /** Keeps the library — and therefore the closure graph and generated class — reachable. */
     private final JsonataFunctionLibrary owner;
 
     ExportedJsonataFunction(String name, JsonNode token, String signature, int arity,
@@ -38,6 +38,7 @@ final class ExportedJsonataFunction implements JsonataBoundFunction {
 
     @Override
     public JsonNode apply(JsonataFunctionArguments args) throws JsonataEvaluationException {
+        owner.checkOpen(name);
         JsonNode arg = packArguments(args);
 
         // Inside a caller's evaluation we deliberately reuse its frame, so the function observes

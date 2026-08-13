@@ -8,7 +8,6 @@ import org.json_kula.jsonata_jvm.parser.ParseException;
 import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
-import org.json_kula.jsonata_jvm.runtime.LambdaScope;
 import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
 import org.json_kula.jsonata_jvm.translator.RuntimeTranslatorException;
 import org.json_kula.jsonata_jvm.translator.Translator;
@@ -16,6 +15,7 @@ import org.json_kula.jsonata_jvm.translator.Translator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -45,12 +45,32 @@ public class JsonataExpressionFactory {
     private static final AtomicInteger CLASS_COUNTER = new AtomicInteger();
     private static final String GEN_PACKAGE = "org.json_kula.jsonata_jvm.gen";
 
+    /**
+     * Compiled expressions for {@code $eval}, keyed by expression text.
+     *
+     * <p>{@code $eval} compiles at evaluation time, and compilation costs ~85 ms — orders of
+     * magnitude more than evaluating the result. Almost every real use evaluates the same handful of
+     * expression strings repeatedly (often the same one per element of a sequence), so caching turns
+     * all but the first into a map lookup. Bounded because the key comes from the data and could
+     * otherwise grow without limit; the eviction order is arbitrary, which only costs a recompile.
+     */
+    private static final int EVAL_CACHE_LIMIT = 256;
+    private final Map<String, JsonataExpression> evalCache = new ConcurrentHashMap<>();
+
     private final JsonataExpressionLoader loader = new JsonataExpressionLoader();
 
+    /** This factory pipeline, as used by {@code $eval} inside expressions it compiled. */
+    private final JsonataRuntime.EvalDelegate evalDelegate;
+
     public JsonataExpressionFactory() {
-        JsonataRuntime.registerEvalDelegate((expr, ctx) -> {
+        this.evalDelegate = ((expr, ctx) -> {
             try {
-                JsonataExpression compiled = compile(expr);
+                JsonataExpression compiled = evalCache.get(expr);
+                if (compiled == null) {
+                    compiled = compile(expr);
+                    if (evalCache.size() >= EVAL_CACHE_LIMIT) evalCache.clear();
+                    evalCache.put(expr, compiled);
+                }
                 if (ctx != null && !ctx.isMissingNode()) {
                     return compiled.evaluate(ctx);
                 }
@@ -64,6 +84,20 @@ public class JsonataExpressionFactory {
                 throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated");
             }
         });
+        // Also the process-wide fallback, for hand-written expression classes that open an
+        // evaluation frame without a delegate of their own.
+        JsonataRuntime.registerEvalDelegate(evalDelegate);
+    }
+
+    /**
+     * Attaches this factory to a freshly loaded instance, so that {@code $eval} inside it runs
+     * through this pipeline for the rest of the instance lifetime.
+     */
+    private JsonataExpression attach(JsonataExpression expression) {
+        if (expression instanceof AbstractJsonataExpression generated) {
+            generated.setEvalDelegate(evalDelegate);
+        }
+        return expression;
     }
 
     /**
@@ -80,8 +114,9 @@ public class JsonataExpressionFactory {
      */
     public JsonataExpression compile(String expression) throws JsonataCompilationException {
         try {
-            String src = translate(expression);
-            return loader.load(src);
+            String className = nextClassName();
+            String src = translate(expression, className);
+            return attach(loader.load(className, src));
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
                     null, "Failed to load generated class for expression: " + e.getMessage(), e);
@@ -120,10 +155,13 @@ public class JsonataExpressionFactory {
         }
 
         List<String> sources = new ArrayList<>(expressions.size());
+        List<String> classNames = new ArrayList<>(expressions.size());
         for (int i = 0; i < expressions.size(); i++) {
             String expression = expressions.get(i);
             try {
-                sources.add(translate(expression));
+                String className = nextClassName();
+                classNames.add(className);
+                sources.add(translate(expression, className));
             } catch (JsonataCompilationException e) {
                 // Re-attribute to the failing element while preserving the original error code and
                 // root cause (e.g. the ParseException), so batch failures are as diagnosable as
@@ -136,7 +174,9 @@ public class JsonataExpressionFactory {
         }
 
         try {
-            return loader.loadAll(sources);
+            List<JsonataExpression> compiled = loader.loadAll(classNames, sources);
+            compiled.forEach(this::attach);
+            return compiled;
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
                     null, "Failed to load generated classes for batch: " + e.getMessage(), e);
@@ -222,11 +262,12 @@ public class JsonataExpressionFactory {
         Map<String, AstNode> topLevelBindings = FunctionExportRewriter.topLevelBindings(ast);
 
         String source;
+        String libraryClassName;
         try {
             AstNode rewritten = FunctionExportRewriter.rewrite(ast, topLevelBindings.keySet());
-            String className = "CompiledFunctionLibrary" + CLASS_COUNTER.incrementAndGet();
-            source = Translator.translate(
-                    Optimizer.optimize(rewritten), GEN_PACKAGE, className, functionDefinition);
+            libraryClassName = GEN_PACKAGE + ".CompiledFunctionLibrary" + CLASS_COUNTER.incrementAndGet();
+            source = Translator.translate(Optimizer.optimize(rewritten), GEN_PACKAGE,
+                    simpleName(libraryClassName), functionDefinition);
         } catch (RuntimeTranslatorException e) {
             throw new JsonataCompilationException(
                     e.getErrorCode(), "Failed to translate definition expression: " + e.getMessage(), e);
@@ -234,7 +275,7 @@ public class JsonataExpressionFactory {
 
         JsonataExpression compiled;
         try {
-            compiled = loader.load(source);
+            compiled = attach(loader.load(libraryClassName, source));
         } catch (JsonataLoadException e) {
             throw new JsonataCompilationException(
                     null, "Failed to load generated class for definition expression: " + e.getMessage(), e);
@@ -244,12 +285,13 @@ public class JsonataExpressionFactory {
                     null, "Generated class does not extend AbstractJsonataExpression", null);
         }
 
-        LambdaScope scope = LambdaScope.create();
         JsonataFunctionLibrary library = new JsonataFunctionLibrary(
-                functionDefinition, definition, scope, opts.getBindings());
+                functionDefinition, definition, opts.getBindings());
 
         try {
-            JsonNode exported = definition.evaluateDefining(opts.getInput(), opts.getBindings(), scope);
+            // The definition runs exactly once. Its function values are ordinary nodes, so the
+            // exported functions stay callable for as long as the library is referenced.
+            JsonNode exported = definition.evaluate(opts.getInput(), opts.getBindings());
             JsonNode values = exported != null
                     ? exported.get(FunctionExportRewriter.FUNCTIONS_FIELD) : null;
             JsonNode names = exported != null
@@ -258,12 +300,8 @@ public class JsonataExpressionFactory {
                 library.export(name, wrap(name, values, topLevelBindings, opts, library));
             }
         } catch (JsonataEvaluationException e) {
-            scope.close();
             throw new JsonataCompilationException(
                     e.getErrorCode(), "Definition expression failed to evaluate: " + e.getMessage(), e);
-        } catch (JsonataCompilationException | RuntimeException e) {
-            scope.close();
-            throw e;
         }
         return library;
     }
@@ -301,11 +339,24 @@ public class JsonataExpressionFactory {
                 name, token, override != null ? override : info.signature(), info.arity(), library);
     }
 
+    /** Mints the fully-qualified name of the next generated class. */
+    private static String nextClassName() {
+        return GEN_PACKAGE + ".CompiledExpr" + CLASS_COUNTER.incrementAndGet();
+    }
+
+    private static String simpleName(String qualifiedName) {
+        return qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1);
+    }
+
     public String translate(String expression) throws JsonataCompilationException {
+        return translate(expression, nextClassName());
+    }
+
+    /** Translates {@code expression} into a class with the given fully-qualified name. */
+    private String translate(String expression, String className) throws JsonataCompilationException {
         try {
             AstNode ast = Optimizer.optimize(Parser.parse(expression));
-            String className = "CompiledExpr" + CLASS_COUNTER.incrementAndGet();
-            return Translator.translate(ast, GEN_PACKAGE, className, expression);
+            return Translator.translate(ast, GEN_PACKAGE, simpleName(className), expression);
         } catch (ParseException e) {
             throw new JsonataCompilationException(
                     e.getErrorCode(), "Invalid JSONata expression: " + e.getMessage(), e);

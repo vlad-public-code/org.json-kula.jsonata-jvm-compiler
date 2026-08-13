@@ -69,9 +69,6 @@ public class JsonataTestSuiteTest {
         
         Files.walk(groupsDir)
             .filter(p -> p.toString().endsWith(".json"))
-            .filter(p -> !p.toString().endsWith(".jsonata"))
-            .filter(p -> !p.getFileName().toString().contains("sequences"))
-            .filter(p -> !p.getFileName().toString().contains("large.json"))
             .sorted()
             .forEach(testFile -> {
                 String testName = groupsDir.relativize(testFile).toString().replace('\\', '/');
@@ -147,7 +144,9 @@ public class JsonataTestSuiteTest {
             if (expectedCode != null) {
                 String actualCode = e.getErrorCode();
                 assertEquals(expectedCode, actualCode, "Error code mismatch for expression: " + expression);
-            } else if (undefinedResult || expectedResult != null) {
+            } else {
+                // Covers both "expected a result" and "the case declares no expectation at all" —
+                // the latter must not pass silently just because the expression happened to throw.
                 fail("Expected success but got error: " + e.getMessage() +  " for expression: " + expression);
             }
         }

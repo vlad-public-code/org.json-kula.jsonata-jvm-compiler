@@ -5,7 +5,7 @@ title: jsonata-jvm-compiler
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **over 25× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **over 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -361,12 +361,14 @@ Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | 817 ms | 144 ms |
-| 100,000 evaluations | ~1,740 ms | ~37,400 ms |
-| Throughput | **~57,500 eval/s** | ~2,700 eval/s |
-| **Speedup** | **~25× faster** | baseline |
+| Compilation | ~760 ms | ~145 ms |
+| 100,000 evaluations | ~1,000 ms | ~41,600 ms |
+| Throughput | **~100,000 eval/s** | ~2,400 eval/s |
+| **Speedup** | **~41× faster** | baseline |
 
-> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times, the throughput advantage dominates.
+> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times, the throughput advantage dominates. Compiling several expressions? Use `compileAll` — one `javac` invocation for the batch is around 35× faster than one per expression.
+
+Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys build an exactly-sized map in one pass; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; and the runtime hot type checks are single dispatches rather than chains of megamorphic calls.
 
 The benchmark is reproducible via:
 

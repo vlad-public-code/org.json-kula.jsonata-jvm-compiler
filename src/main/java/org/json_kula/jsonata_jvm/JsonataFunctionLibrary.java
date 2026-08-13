@@ -1,7 +1,6 @@
 package org.json_kula.jsonata_jvm;
 
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
-import org.json_kula.jsonata_jvm.runtime.LambdaScope;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -53,25 +52,24 @@ import java.util.Map;
  *       rule as any lambda created mid-expression.</li>
  * </ul>
  *
- * <p>A library owns one generated class and one {@link LambdaScope}; build it once and keep it.
- * {@link #close()} releases the scope, after which the exported functions stop working. Letting the
- * library become unreachable releases it too.
+ * <p>A library owns one generated class; build it once and keep it. {@link #close()} retires the
+ * exported functions for callers that want the lifetime to be explicit; otherwise simply dropping
+ * every reference to them releases everything.
  */
 public final class JsonataFunctionLibrary implements AutoCloseable {
 
     private final String sourceJsonata;
     private final AbstractJsonataExpression definition;
-    private final LambdaScope scope;
     private final JsonataBindings definitionBindings;
+    private volatile boolean closed;
     private final Map<String, JsonataBoundFunction> functions = new LinkedHashMap<>();
     private final Map<String, JsonataBoundFunction> functionsView =
             Collections.unmodifiableMap(functions);
 
     JsonataFunctionLibrary(String sourceJsonata, AbstractJsonataExpression definition,
-                           LambdaScope scope, JsonataBindings definitionBindings) {
+                           JsonataBindings definitionBindings) {
         this.sourceJsonata = sourceJsonata;
         this.definition = definition;
-        this.scope = scope;
         this.definitionBindings = definitionBindings;
     }
 
@@ -103,23 +101,27 @@ public final class JsonataFunctionLibrary implements AutoCloseable {
         return sourceJsonata;
     }
 
-    /** Returns the number of lambdas held alive by this library, including internal helpers. */
-    public int lambdaCount() {
-        return scope.size();
-    }
-
     /** Returns {@code true} until {@link #close()} is called. */
     public boolean isOpen() {
-        return scope.isOpen();
+        return !closed;
     }
 
     /**
-     * Releases the lambda scope. Exported functions fail with a {@link JsonataEvaluationException}
-     * afterwards. Idempotent.
+     * Retires the exported functions: calling one afterwards throws a
+     * {@link JsonataEvaluationException}. Idempotent, and never required — a library that simply
+     * becomes unreachable is collected like any other object.
      */
     @Override
     public void close() {
-        scope.close();
+        closed = true;
+    }
+
+    /** Throws if this library has been closed; called before every exported invocation. */
+    void checkOpen(String functionName) throws JsonataEvaluationException {
+        if (closed)
+            throw new JsonataEvaluationException(null,
+                    "Error calling exported function $" + functionName
+                            + ": its function library has been closed");
     }
 
     /**
@@ -128,8 +130,8 @@ public final class JsonataFunctionLibrary implements AutoCloseable {
      * value the definition did not bind still resolves it.
      */
     void beginStandaloneFrame() {
-        JsonataRuntime.beginEvaluation(definition.permanentValues(), definition.permanentFunctions(),
-                definitionBindings, definition.instanceRegexes(), 0);
+        JsonataRuntime.beginEvaluation(definition.permanentBindingSet(), definitionBindings,
+                definition.instanceRegexes(), 0);
     }
 
     @Override

@@ -109,8 +109,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
         String bodyExpr = ast.accept(t, ctx);
 
+        // Constants are collected while the body is generated, so they are read afterwards.
         return ClassAssembler.buildClass(pkg, className, bodyExpr, state.helperMethods.toString(),
-                state.localDeclarations.toString(), sourceExpression);
+                state.localDeclarations.toString(), sourceExpression, state.constantDeclarations());
     }
 
     /**
@@ -132,14 +133,14 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitStringLiteral(StringLiteral n, GenCtx ctx) {
-        return "text(" + ClassAssembler.javaString(n.value()) + ")";
+        return ctx.state.constant("text(" + ClassAssembler.javaString(n.value()) + ")");
     }
 
     @Override
     public String visitNumberLiteral(NumberLiteral n, GenCtx ctx) {
         double v = n.value();
         if (v == Math.floor(v) && !Double.isInfinite(v) && Math.abs(v) < 1e15) {
-            return "number(" + (long) v + "L)";
+            return ctx.state.constant("number(" + (long) v + "L)");
         }
         return "number(" + v + ")";
     }
@@ -181,11 +182,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // Built-in function used as a first-class value (e.g. in a ~> chain):
         // wrap it as an inline lambda so it can be stored / applied later.
         String wrapper = BUILTIN_LAMBDA_WRAPPERS.get(n.name());
-        if (wrapper != null) return "lambdaNode((__bArg -> " + wrapper + "(__bArg)))";
+        if (wrapper != null) return "lambdaNode((__bArg -> " + wrapper + "(__bArg)), 1)";
         String binaryWrapper = BUILTIN_BINARY_LAMBDA_WRAPPERS.get(n.name());
         if (binaryWrapper != null) return "lambdaNode((__bArg -> " + binaryWrapper
                 + "(__bArg.isArray() ? __bArg.get(0) : __bArg,"
-                + " __bArg.isArray() && __bArg.size() > 1 ? __bArg.get(1) : MISSING)))";
+                + " __bArg.isArray() && __bArg.size() > 1 ? __bArg.get(1) : MISSING)), 2)";
         return "resolveBinding(\"" + n.name() + "\")";
     }
 
@@ -1254,7 +1255,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         ctx.state.partialPhNeedIdx = savedNeedIdx;
         ctx.state.partialPhIdx    = savedPhIdx;
 
-        return "lambdaNode((" + phVar + " -> " + callBody + "))";
+        return "lambdaNode((" + phVar + " -> " + callBody + "), 1)";
     }
 
     // =========================================================================
@@ -1273,6 +1274,12 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      *   <li>{@code $sum/average/max/min(arr.f1.f2)} → {@code fn_sum_field(arr, "f1", "f2")} etc.</li>
      * </ul>
      */
+    /** True for literal nodes, whose value cannot depend on the element being tested. */
+    private static boolean isLiteral(AstNode node) {
+        return node instanceof StringLiteral || node instanceof NumberLiteral
+                || node instanceof BooleanLiteral || node instanceof NullLiteral;
+    }
+
     private String tryFusedCall(FunctionCall n, GenCtx ctx, GenCtx argCtx) {
         AstNode arg0 = n.args().get(0);
 
@@ -1282,6 +1289,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     && !(pe.source() instanceof ForceArray)
                     && !(pe.predicate() instanceof RangeExpr)
                     && !ScopeAnalyzer.containsParentStep(pe.predicate())) {
+                // $count(seq[field = <literal>]) — collapses to a field read and a comparison.
+                if (pe.predicate() instanceof BinaryOp op && "=".equals(op.op())
+                        && op.left() instanceof FieldRef field && isLiteral(op.right())) {
+                    return "fn_count_field_eq(" + pe.source().accept(this, argCtx) + ", "
+                            + ClassAssembler.javaString(field.name()) + ", "
+                            + op.right().accept(this, argCtx) + ")";
+                }
                 String srcExpr = pe.source().accept(this, argCtx);
                 String elemVar = "__cf" + ctx.state.nextId();
                 String predExpr = pe.predicate().accept(this, argCtx.withCtx(elemVar));
@@ -1323,6 +1337,20 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         return null;
     }
 
+    /**
+     * Built-ins that take a callback and generate it themselves (see {@link FunctionCallCodeGen}),
+     * so the generic argument pass must leave a literal lambda alone.
+     */
+    private static final java.util.Set<String> CALLBACK_BUILTINS =
+            java.util.Set.of("map", "filter", "single", "sift", "each", "sort", "reduce");
+
+    /**
+     * Placeholder for a callback argument the built-in generator translates itself. It is never
+     * read; were it ever emitted, the generated class would fail to compile rather than
+     * misbehave quietly.
+     */
+    private static final String UNTRANSLATED_CALLBACK = "__callback_translated_by_builtin__";
+
     @Override
     public String visitFunctionCall(FunctionCall n, GenCtx ctx) {
         // Arguments are never in tail position — only the call site itself may be.
@@ -1333,7 +1361,17 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             String fused = tryFusedCall(n, ctx, argCtx);
             if (fused != null) return fused;
         }
-        List<String> args = n.args().stream().map(a -> a.accept(this, argCtx)).toList();
+        // The higher-order built-ins translate their callback themselves — from the AST, with the
+        // arity and tuple shape they need. Translating it here as well would emit a second copy of
+        // every helper method the callback needs, and only one copy would ever be called.
+        boolean callbackTranslatedByBuiltin =
+                !ctx.state.isLocal(n.name()) && CALLBACK_BUILTINS.contains(n.name());
+        List<String> args = new ArrayList<>(n.args().size());
+        for (AstNode arg : n.args()) {
+            args.add(callbackTranslatedByBuiltin && arg instanceof Lambda
+                    ? UNTRANSLATED_CALLBACK
+                    : arg.accept(this, argCtx));
+        }
         // Local variable bindings shadow built-in function names in JSONata.
         // If the name resolves to a local variable, call it as a user function
         // rather than falling through to the built-in dispatch switch below.
@@ -1517,7 +1555,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         // Generate as an inline Java lambda so enclosing block-local variables
         // are captured as closures — fixing the "cannot find symbol" errors that
         // arise when lambdas are emitted as separate private methods.
-        return "lambdaNode(" + FunctionCallCodeGen.buildInlineLambdaWithSig(this, n, ctx) + ")";
+        // The declared parameter count travels with the value, so a built-in that receives this
+        // function as an argument can pass it as many arguments as it takes.
+        return "lambdaNode(" + FunctionCallCodeGen.buildInlineLambdaWithSig(this, n, ctx)
+                + ", " + n.params().size() + ")";
     }
 
     @Override
@@ -1584,6 +1625,19 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitObjectConstructor(ObjectConstructor n, GenCtx ctx) {
         if (n.pairs().isEmpty()) return "object()";
+        // Literal keys are the common case and need none of the per-key checking the general
+        // constructor does, so they get a form that takes the names as plain strings.
+        boolean allKeysLiteral = n.pairs().stream().allMatch(p -> p.key() instanceof StringLiteral);
+        if (allKeysLiteral) {
+            List<String> keys = new java.util.ArrayList<>();
+            List<String> values = new java.util.ArrayList<>();
+            for (KeyValuePair p : n.pairs()) {
+                keys.add(ClassAssembler.javaString(((StringLiteral) p.key()).value()));
+                values.add(p.value().accept(this, ctx));
+            }
+            String keyField = ctx.state.keyArray("{" + String.join(", ", keys) + "}");
+            return "objectOf(" + keyField + ", new JsonNode[]{" + String.join(", ", values) + "})";
+        }
         List<String> parts = new java.util.ArrayList<>();
         for (KeyValuePair p : n.pairs()) {
             parts.add(p.key().accept(this, ctx));
@@ -1874,7 +1928,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             String innerPartial = visitPartialApplication(new PartialApplication(fc.name(), argsWithPipe), ctx);
             int id = ctx.state.nextId();
             String argVar = "__cfaArg" + id;
-            return "lambdaNode(" + argVar + " -> forceArray(fn_apply(" + innerPartial + ", " + argVar + ")))";
+            return "lambdaNode(" + argVar + " -> forceArray(fn_apply(" + innerPartial + ", " + argVar + ")), 1)";
         }
         return step.accept(this, ctx);
     }
@@ -1905,7 +1959,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         return "lambdaNode(" + srcVar + " -> fn_transform(" + srcVar
                 + ", " + locVar + " -> " + locExpr
                 + ", " + updVar + " -> " + updExpr
-                + ", " + delExpr + "))";
+                + ", " + delExpr + "), 1)";
     }
 
     // =========================================================================

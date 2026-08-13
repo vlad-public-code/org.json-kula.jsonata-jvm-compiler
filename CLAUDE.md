@@ -23,6 +23,11 @@ Stack:
   - Generated classes import `static org.json_kula.jsonata_jvm.runtime.JsonataRuntime.*` and use the runtime for all JSONata operations.
 - Runtime support library implemented in package `org.json_kula.jsonata_jvm.runtime`:
   - `JsonataRuntime` — all static helper methods used by generated classes: field navigation with sequence mapping, filter/subscript, arithmetic, string concat, comparisons, boolean logic, array/object constructors, range, sort/reverse/distinct/flatten/map/filter/reduce/each, string functions, numeric functions, date/time, error, and chain-operator support via a lambda registry.
+  - `LambdaNode` / `RegexNode` — function and regex values, carried directly as `JsonNode`s. They are
+    node types rather than specially-prefixed strings, so no input document can be mistaken for one,
+    and a function value stays callable for as long as something references it (there is no registry
+    and no expiry). `PreservedNode` is the internal "do not flatten this element" marker used by
+    nested array constructors.
   - `JsonataLambda` — single-argument functional interface (`JsonNode apply(JsonNode) throws JsonataEvaluationException`) used for predicates, map/filter callbacks, and inline lambdas.
   - `org.json_kula.jsonata_jvm.runtime.datetime` — date/time subsystem (`IsoConverter`, `TimezoneUtils`, `RomanNumerals`, `WordNumbers`, `PictureFormatter`, `PictureParser`); `DateTimeUtils` in `runtime` is a thin facade over this package. See [docs/datetime.md](docs/datetime.md) for the full reference.
   - `org.json_kula.jsonata_jvm.runtime.numeric` — numeric built-ins (`NumericBuiltins`, `DecimalPicture`, `IntegerPicture`, `EnglishWords`); `JsonataRuntime` delegates to `NumericBuiltins` for all `$number`, `$round`, `$random`, `$formatBase`, `$formatNumber`, `$formatInteger`, `$parseInteger` calls. See [docs/numeric.md](docs/numeric.md) for the full reference.

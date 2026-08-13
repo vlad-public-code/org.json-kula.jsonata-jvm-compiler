@@ -79,6 +79,11 @@ public final class JsonataBindings {
         return functions.get(name);
     }
 
+    /** Returns {@code true} if nothing at all is bound. */
+    public boolean isEmpty() {
+        return values.isEmpty() && functions.isEmpty();
+    }
+
     /** Returns an unmodifiable view of the value bindings. */
     public Map<String, JsonNode> getValues() {
         return Collections.unmodifiableMap(values);

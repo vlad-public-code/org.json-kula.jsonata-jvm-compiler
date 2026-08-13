@@ -267,4 +267,172 @@ class HigherOrderFunctionsTest {
         assertTrue(result.has("account"));
         assertFalse(result.has("metadata"));
     }
+
+    // =========================================================================
+    // Multi-parameter callbacks whose body is a block
+    // =========================================================================
+    // A block body is emitted as a private helper method, and a multi-parameter
+    // callback is emitted as an unpacking helper method; the two together used to
+    // produce Java that referenced __root outside its scope.
+
+    @Test
+    void map_multiParamLambda_withBlockBody() throws Exception {
+        JsonNode result = eval("$map([1, 2], function($v, $i){ ($c := 10; $v * $c + $i) })");
+        assertTrue(result.isArray());
+        assertEquals(10, result.get(0).intValue());
+        assertEquals(21, result.get(1).intValue());
+    }
+
+    @Test
+    void filter_multiParamLambda_withBlockBody() throws Exception {
+        JsonNode result = eval("$filter([1, 2, 3], function($v, $i){ ($min := 2; $v >= $min) })");
+        assertTrue(result.isArray());
+        assertEquals(2, result.size());
+        assertEquals(2, result.get(0).intValue());
+        assertEquals(3, result.get(1).intValue());
+    }
+
+    @Test
+    void single_multiParamLambda_withBlockBody() throws Exception {
+        JsonNode result = eval("$single([1, 2, 3], function($v, $i){ ($want := 1; $i = $want) })");
+        assertEquals(2, result.intValue());
+    }
+
+    @Test
+    void sift_multiParamLambda_withBlockBody() throws Exception {
+        JsonNode result = eval("$sift({\"a\": 1, \"b\": 2}, function($v, $k){ ($keep := \"b\"; $k = $keep) })");
+        assertTrue(result.isObject());
+        assertFalse(result.has("a"));
+        assertEquals(2, result.get("b").intValue());
+    }
+
+    @Test
+    void each_multiParamLambda_withBlockBody() throws Exception {
+        JsonNode result = eval("$each({\"a\": 1}, function($v, $k){ ($sep := \":\"; $k & $sep & $v) })");
+        assertEquals("a:1", result.textValue());
+    }
+
+    @Test
+    void sort_comparatorWithBlockBody() throws Exception {
+        JsonNode result = eval("$sort([3, 1, 2], function($a, $b){ ($bias := 0; $a + $bias > $b) })");
+        assertTrue(result.isArray());
+        assertEquals(1, result.get(0).intValue());
+        assertEquals(2, result.get(1).intValue());
+        assertEquals(3, result.get(2).intValue());
+    }
+
+    @Test
+    void map_multiParamLambda_withBlockNestedInConditional() throws Exception {
+        JsonNode result = eval("$map([1, 2], function($v, $i){ $i = 0 ? ($x := 100; $x) : $v })");
+        assertTrue(result.isArray());
+        assertEquals(100, result.get(0).intValue());
+        assertEquals(2, result.get(1).intValue());
+    }
+
+    // =========================================================================
+    // Callbacks supplied as a value rather than written inline
+    // =========================================================================
+    // A callback that reaches a built-in as a value — a variable holding a function, a partial
+    // application, a chain — used to be called with the element alone, so a two-parameter callback
+    // silently lost its index or key, and $sort could not tell a comparator from a key function.
+
+    @Test
+    void map_namedFunctionWithTwoParams_receivesTheIndex() throws Exception {
+        JsonNode result = eval("( $f := function($v, $i){ $i }; $map([10, 20, 30], $f) )");
+        assertTrue(result.isArray());
+        assertEquals(0, result.get(0).intValue());
+        assertEquals(1, result.get(1).intValue());
+        assertEquals(2, result.get(2).intValue());
+    }
+
+    @Test
+    void map_namedFunctionWithOneParam_receivesTheElement() throws Exception {
+        JsonNode result = eval("( $f := function($v){ $v * 2 }; $map([1, 2], $f) )");
+        assertEquals(2, result.get(0).intValue());
+        assertEquals(4, result.get(1).intValue());
+    }
+
+    @Test
+    void map_namedFunctionWithThreeParams_receivesTheWholeArray() throws Exception {
+        JsonNode result = eval("( $f := function($v, $i, $a){ $count($a) }; $map([7, 8], $f) )");
+        assertEquals(2, result.get(0).intValue());
+        assertEquals(2, result.get(1).intValue());
+    }
+
+    @Test
+    void filter_namedPredicateWithTwoParams_receivesTheIndex() throws Exception {
+        JsonNode result = eval("( $p := function($v, $i){ $i > 0 }; $filter([1, 2, 3], $p) )");
+        assertTrue(result.isArray());
+        assertEquals(2, result.size());
+        assertEquals(2, result.get(0).intValue());
+        assertEquals(3, result.get(1).intValue());
+    }
+
+    @Test
+    void single_namedPredicateWithTwoParams_receivesTheIndex() throws Exception {
+        assertEquals(30, eval("( $p := function($v, $i){ $i = 2 }; $single([10, 20, 30], $p) )").intValue());
+    }
+
+    @Test
+    void sift_namedPredicateWithTwoParams_receivesTheKey() throws Exception {
+        JsonNode result = eval("( $s := function($v, $k){ $k = \"a\" }; $sift({\"a\": 1, \"b\": 2}, $s) )");
+        assertTrue(result.isObject());
+        assertEquals(1, result.get("a").intValue());
+        assertFalse(result.has("b"));
+    }
+
+    @Test
+    void each_namedFunctionWithTwoParams_receivesTheKey() throws Exception {
+        JsonNode result = eval("( $e := function($v, $k){ $k & \"=\" & $v }; $each({\"a\": 1}, $e) )");
+        assertEquals("a=1", result.textValue());
+    }
+
+    @Test
+    void sort_namedComparator_sortsRatherThanKeyingOnABoolean() throws Exception {
+        JsonNode result = eval("( $c := function($a, $b){ $a > $b }; $sort([3, 1, 2], $c) )");
+        assertTrue(result.isArray());
+        assertEquals(1, result.get(0).intValue());
+        assertEquals(2, result.get(1).intValue());
+        assertEquals(3, result.get(2).intValue());
+    }
+
+    @Test
+    void sort_namedKeyFunction_stillKeys() throws Exception {
+        JsonNode result = eval("( $k := function($v){ -$v }; $sort([1, 3, 2], $k) )");
+        assertEquals(3, result.get(0).intValue());
+        assertEquals(2, result.get(1).intValue());
+        assertEquals(1, result.get(2).intValue());
+    }
+
+    @Test
+    void builtinAsAValue_isCalledWithOneArgument() throws Exception {
+        JsonNode result = eval("( $f := $string; $map([1, 2], $f) )");
+        assertEquals("1", result.get(0).textValue());
+        assertEquals("2", result.get(1).textValue());
+    }
+
+    @Test
+    void partialApplicationAsAValue_isCalledWithOneArgument() throws Exception {
+        JsonNode result = eval("( $first := $substring(?, 0, 1); $map([\"ab\", \"cd\"], $first) )");
+        assertEquals("a", result.get(0).textValue());
+        assertEquals("c", result.get(1).textValue());
+    }
+
+    @Test
+    void chainAsAValue_isCalledWithOneArgument() throws Exception {
+        JsonNode result = eval("( $norm := $trim ~> $uppercase; $map([\" a \", \" b \"], $norm) )");
+        assertEquals("A", result.get(0).textValue());
+        assertEquals("B", result.get(1).textValue());
+    }
+
+    @Test
+    void map_multiParamLambda_blockBodyReachesTheDocumentRoot() throws Exception {
+        // The block helper needs the document root, which the unpacking helper must pass on.
+        JsonNode result = eval(
+                "$map(items, function($v, $i){ ($p := $$.prefix; $p & $v) })",
+                "{\"prefix\": \"x\", \"items\": [\"a\", \"b\"]}");
+        assertTrue(result.isArray());
+        assertEquals("xa", result.get(0).textValue());
+        assertEquals("xb", result.get(1).textValue());
+    }
 }

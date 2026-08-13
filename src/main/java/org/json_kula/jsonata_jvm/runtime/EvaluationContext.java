@@ -23,7 +23,7 @@ final class EvaluationContext {
     /**
      * All per-evaluation thread-local state in one mutable container.
      * Reused across evaluate() calls on the same thread to avoid per-call allocation.
-     * Fields that are only needed when lambdas are used (evalLambdas, callDepth,
+     * Fields that are only needed when user-defined functions are called (callDepth,
      * pendingTailCall) are lazily initialised on first access.
      */
     static final class EvalState {
@@ -31,36 +31,64 @@ final class EvaluationContext {
         JsonataBindings bindings;
         long millis;
         long timeoutDeadline;   // Long.MAX_VALUE = disabled
-        Map<String, JsonataLambda> evalLambdas;
         Map<String, org.joni.Regex> instanceRegexes;
         int[] callDepth;
         LambdaRegistry.TailCallData[] pendingTailCall;
-        /** Non-null while this evaluation is defining a function library; see {@link LambdaScope}. */
-        LambdaScope definingScope;
+        JsonataRuntime.EvalDelegate evalDelegate;
+
+        /** The suspended frame beneath this one, or {@code null} at the outermost evaluation. */
+        private Frame suspended;
+
+        /**
+         * One suspended evaluation. Allocated only when an evaluation starts inside another —
+         * {@code $eval}, or a bound function that evaluates an expression of its own. Before this
+         * existed, the inner evaluation overwrote the outer one and cleared it on the way out, so
+         * the outer expression silently lost its bindings from that point on.
+         */
+        private record Frame(JsonataBindings bindings, long millis, long timeoutDeadline,
+                             Map<String, org.joni.Regex> instanceRegexes,
+                             JsonataRuntime.EvalDelegate evalDelegate,
+                             int[] callDepth, LambdaRegistry.TailCallData[] pendingTailCall,
+                             Frame suspended) {}
 
         void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes,
-                   int timeoutMs, LambdaScope definingScope) {
+                   int timeoutMs, JsonataRuntime.EvalDelegate evalDelegate) {
+            if (active) {
+                // Nested evaluation: suspend the enclosing one rather than overwriting it. The
+                // inner evaluation gets its own recursion budget, which is restored on the way out.
+                this.suspended = new Frame(this.bindings, this.millis, this.timeoutDeadline,
+                        this.instanceRegexes, this.evalDelegate,
+                        this.callDepth, this.pendingTailCall, this.suspended);
+                this.callDepth = null;
+                this.pendingTailCall = null;
+            }
             this.active = true;
             this.bindings = bindings;
             this.millis = millis;
             this.instanceRegexes = instanceRegexes;
             this.timeoutDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
-            this.definingScope = definingScope;
+            this.evalDelegate = evalDelegate;
         }
 
         void end() {
+            Frame outer = this.suspended;
+            if (outer != null) {
+                this.suspended = outer.suspended();
+                this.bindings = outer.bindings();
+                this.millis = outer.millis();
+                this.timeoutDeadline = outer.timeoutDeadline();
+                this.instanceRegexes = outer.instanceRegexes();
+                this.evalDelegate = outer.evalDelegate();
+                this.callDepth = outer.callDepth();
+                this.pendingTailCall = outer.pendingTailCall();
+                return;
+            }
             this.active = false;
             this.bindings = null;
             this.instanceRegexes = null;
-            this.definingScope = null;
-            if (evalLambdas != null) evalLambdas.clear();
+            this.evalDelegate = null;
             if (callDepth != null) callDepth[0] = 0;
             if (pendingTailCall != null) pendingTailCall[0] = null;
-        }
-
-        Map<String, JsonataLambda> evalLambdas() {
-            if (evalLambdas == null) evalLambdas = new java.util.HashMap<>();
-            return evalLambdas;
         }
 
         int[] callDepth() {
@@ -80,56 +108,61 @@ final class EvaluationContext {
     private static final JsonataBindings EMPTY_BINDINGS = new JsonataBindings();
 
     /**
-     * Merges permanent bindings from the generated class with per-evaluation
-     * bindings and installs the result as the active bindings for this thread.
+     * Installs the bindings visible to this evaluation: the expression's permanent set, overlaid
+     * with any per-evaluation set.
      *
      * <p>Must be paired with a {@link #endEvaluation()} call in a finally block.
      *
-     * @param permanentValues    permanent named values registered on the expression instance
-     * @param permanentFunctions permanent named functions registered on the expression instance
-     * @param perEval            per-evaluation bindings, or {@code null}
-     * @param instanceRegexes    per-instance regex cache field from the expression instance
-     */
-    static void beginEvaluation(Map<String, JsonNode> permanentValues,
-                                Map<String, JsonataBoundFunction> permanentFunctions,
-                                JsonataBindings perEval,
-                                Map<String, org.joni.Regex> instanceRegexes,
-                                int timeoutMs) {
-        beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes, timeoutMs, null);
-    }
-
-    /**
-     * As {@link #beginEvaluation(Map, Map, JsonataBindings, Map, int)}, but additionally installs a
-     * {@link LambdaScope} so that every lambda created during this evaluation outlives it. Used
-     * once per function library, when its definition expression is evaluated.
+     * <p>The overlay is only built when both sides are non-empty. The expression instance keeps its
+     * permanent set pre-merged (see {@code AbstractJsonataExpression}), so the common cases —
+     * permanent bindings only, per-evaluation bindings only, or none — install an existing object
+     * and allocate nothing. This matters: rebuilding the map per call cost 3× the throughput of a
+     * simple expression with one binding, and 9× with ten.
      *
-     * @param definingScope the durable scope to mint lambdas into, or {@code null} for a normal
-     *                      evaluation
+     * @param permanent       the expression's permanent bindings; never {@code null}
+     * @param perEval         per-evaluation bindings, or {@code null}
+     * @param instanceRegexes per-instance regex cache field from the expression instance
      */
-    static void beginEvaluation(Map<String, JsonNode> permanentValues,
-                                Map<String, JsonataBoundFunction> permanentFunctions,
+    static void beginEvaluation(JsonataBindings permanent,
                                 JsonataBindings perEval,
                                 Map<String, org.joni.Regex> instanceRegexes,
                                 int timeoutMs,
-                                LambdaScope definingScope) {
+                                JsonataRuntime.EvalDelegate evalDelegate) {
         JsonataBindings merged;
-        if (permanentValues.isEmpty() && permanentFunctions.isEmpty() && perEval == null) {
-            merged = EMPTY_BINDINGS;
+        if (perEval == null || perEval.isEmpty()) {
+            merged = permanent;
+        } else if (permanent.isEmpty()) {
+            merged = perEval;
         } else {
             merged = new JsonataBindings();
-            permanentValues.forEach(merged::bindValue);
-            permanentFunctions.forEach(merged::bindFunction);
-            if (perEval != null) {
-                perEval.getValues().forEach(merged::bindValue);
-                perEval.getFunctions().forEach(merged::bindFunction);
-            }
+            permanent.getValues().forEach(merged::bindValue);
+            permanent.getFunctions().forEach(merged::bindFunction);
+            perEval.getValues().forEach(merged::bindValue);
+            perEval.getFunctions().forEach(merged::bindFunction);
         }
-        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs, definingScope);
+        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs, evalDelegate);
+    }
+
+    /** The {@code $eval} delegate of the expression being evaluated, or {@code null}. */
+    static JsonataRuntime.EvalDelegate getEvalDelegate() {
+        EvalState s = CURRENT.get();
+        return s.active ? s.evalDelegate : null;
+    }
+
+    /** The shared empty binding set, installed when an expression binds nothing. */
+    static JsonataBindings emptyBindings() {
+        return EMPTY_BINDINGS;
     }
 
     /** Returns {@code true} if an evaluation is currently active on this thread. */
     static boolean isActive() {
         return CURRENT.get().active;
+    }
+
+    /** Returns {@code true} if the current evaluation has a deadline to respect. */
+    static boolean hasDeadline() {
+        EvalState s = CURRENT.get();
+        return s.active && s.timeoutDeadline != Long.MAX_VALUE;
     }
 
     /**
@@ -154,17 +187,11 @@ final class EvaluationContext {
     /**
      * Returns the full eval state for the current thread, or {@code null} if outside
      * an evaluation. LambdaRegistry uses this to pay only one ThreadLocal.get() per
-     * fn_apply invocation instead of separate lookups for call depth, pending TCO, and lambdas.
+     * fn_apply invocation instead of separate lookups for call depth and pending TCO.
      */
     static EvalState getState() {
         EvalState s = CURRENT.get();
         return s.active ? s : null;
-    }
-
-    /** Returns the per-evaluation lambda map for the current thread, or {@code null} if outside an evaluation. */
-    static Map<String, JsonataLambda> getEvalLambdas() {
-        EvalState s = CURRENT.get();
-        return s.active ? s.evalLambdas() : null;
     }
 
     /** Returns the per-instance regex map for the current evaluation thread, or {@code null}. */

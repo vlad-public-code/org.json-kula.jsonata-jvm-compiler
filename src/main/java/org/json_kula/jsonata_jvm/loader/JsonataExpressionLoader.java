@@ -32,10 +32,13 @@ import java.util.regex.Pattern;
  */
 public class JsonataExpressionLoader {
 
+    // Fallback only: used when the caller does not name the class it is asking for. Matching the
+    // first "class X" in the text is fragile — the source also carries the original JSONata
+    // expression as a string literal — so callers that know the name should pass it.
     private static final Pattern PACKAGE_PATTERN =
             Pattern.compile("\\bpackage\\s+([\\w.]+)\\s*;");
     private static final Pattern CLASS_PATTERN =
-            Pattern.compile("\\bclass\\s+(\\w+)");
+            Pattern.compile("(?m)^\\s*public\\s+(?:final\\s+)?class\\s+(\\w+)");
 
     /**
      * Builds the compilation classpath from all available sources:
@@ -84,6 +87,18 @@ public class JsonataExpressionLoader {
     }
 
     /**
+     * As {@link #load(String)}, for a caller that already knows the fully-qualified name of the
+     * class the source declares — which is every caller inside this library, since the translator
+     * mints the name. Skips scanning the text for a class declaration.
+     *
+     * @param className   fully-qualified name of the top-level class in {@code javaSource}
+     * @param javaSource  full text of the Java 21 source file
+     */
+    public JsonataExpression load(String className, String javaSource) throws JsonataLoadException {
+        return loadAll(List.of(className), List.of(javaSource)).get(0);
+    }
+
+    /**
      * Compiles a batch of Java sources in a <b>single</b> {@code javac} invocation and returns one
      * {@link JsonataExpression} per source, in input order.
      *
@@ -110,8 +125,23 @@ public class JsonataExpressionLoader {
      *                              {@link JsonataExpression}, or cannot be instantiated
      */
     public List<JsonataExpression> loadAll(List<String> javaSources) throws JsonataLoadException {
+        return loadAll(null, javaSources);
+    }
+
+    /**
+     * As {@link #loadAll(List)}, with the class names supplied rather than parsed out of the
+     * sources. Pass {@code null} to have them extracted.
+     *
+     * @param classNames fully-qualified top-level class name per source, in the same order
+     */
+    public List<JsonataExpression> loadAll(List<String> classNames, List<String> javaSources)
+            throws JsonataLoadException {
         if (javaSources.isEmpty()) {
             return List.of();
+        }
+        if (classNames != null && classNames.size() != javaSources.size()) {
+            throw new JsonataLoadException("Got " + classNames.size() + " class names for "
+                    + javaSources.size() + " sources.");
         }
 
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
@@ -122,13 +152,15 @@ public class JsonataExpressionLoader {
 
         // Extract each source's top-level class name up front (order-preserving) so a source with
         // no class declaration fails fast, before the compiler is even invoked.
-        List<String> classNames = new ArrayList<>(javaSources.size());
+        List<String> names = new ArrayList<>(javaSources.size());
         List<JavaFileObject> sourceFiles = new ArrayList<>(javaSources.size());
-        for (String javaSource : javaSources) {
-            String className = extractClassName(javaSource);
-            classNames.add(className);
+        for (int i = 0; i < javaSources.size(); i++) {
+            String javaSource = javaSources.get(i);
+            String className = classNames != null ? classNames.get(i) : extractClassName(javaSource);
+            names.add(className);
             sourceFiles.add(new InMemorySourceFile(className, javaSource));
         }
+        List<String> classNamesResolved = names;
 
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         Map<String, byte[]> classBytes;
@@ -144,7 +176,7 @@ public class JsonataExpressionLoader {
                     sourceFiles);
 
             if (!task.call()) {
-                throw new JsonataLoadException(formatCompileErrors(classNames, diagnostics));
+                throw new JsonataLoadException(formatCompileErrors(classNamesResolved, diagnostics));
             }
 
             classBytes = fileManager.classBytes();
@@ -153,7 +185,7 @@ public class JsonataExpressionLoader {
             // success from task.call() yet emit no bytecode for a class. Left unchecked, the class
             // load fails later with an opaque error — or, worse, a partially-written class evaluates
             // wrongly. Verify every expected top-level class produced non-empty bytecode up front.
-            for (String expected : classNames) {
+            for (String expected : classNamesResolved) {
                 byte[] bytes = classBytes.get(expected);
                 if (bytes == null || bytes.length == 0) {
                     throw new JsonataLoadException(
@@ -169,8 +201,8 @@ public class JsonataExpressionLoader {
         // One classloader for the whole batch: the top-level class names are globally unique, so
         // there is no collision, and a single loader keeps metaspace lower than one per expression.
         InMemoryClassLoader classLoader = new InMemoryClassLoader(classBytes);
-        List<JsonataExpression> result = new ArrayList<>(classNames.size());
-        for (String className : classNames) {
+        List<JsonataExpression> result = new ArrayList<>(classNamesResolved.size());
+        for (String className : classNamesResolved) {
             result.add(instantiate(className, classLoader));
         }
         return List.copyOf(result);
@@ -321,7 +353,11 @@ public class JsonataExpressionLoader {
 
         @Override
         protected Class<?> findClass(String name) throws ClassNotFoundException {
-            byte[] bytes = classBytes.get(name);
+            // Remove rather than get: the bytecode is needed exactly once, and the loader outlives
+            // every expression it defined. Keeping it pinned the source bytes of the whole batch in
+            // heap for as long as any one expression was referenced. loadClass consults
+            // findLoadedClass first, so findClass is never asked for the same name twice.
+            byte[] bytes = classBytes.remove(name);
             if (bytes == null) {
                 throw new ClassNotFoundException(name);
             }

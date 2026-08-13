@@ -144,7 +144,7 @@ final class FunctionExportRewriter {
 
     /** Picks a synthetic variable name that the definition does not already bind. */
     private static String freshNamesVar(Iterable<String> boundNames) {
-        List<String> taken = new ArrayList<>();
+        java.util.Set<String> taken = new java.util.HashSet<>();
         boundNames.forEach(taken::add);
         String candidate = NAMES_VAR_BASE;
         for (int suffix = 2; taken.contains(candidate); suffix++) {
@@ -176,6 +176,7 @@ final class FunctionExportRewriter {
         }
 
         List<String> result = new ArrayList<>(elements.size());
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (JsonNode element : elements) {
             if (!element.isTextual() || JsonataRuntime.isLambdaToken(element)) {
                 throw error("The definition expression must return an array of function names, but"
@@ -186,7 +187,7 @@ final class FunctionExportRewriter {
             if (name.isEmpty()) {
                 throw error("The definition expression returned an empty function name");
             }
-            if (result.contains(name)) {
+            if (!seen.add(name)) {
                 throw error("The definition expression names $" + name + " twice");
             }
             result.add(name);

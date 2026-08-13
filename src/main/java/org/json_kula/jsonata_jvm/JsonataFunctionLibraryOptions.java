@@ -70,8 +70,4 @@ public final class JsonataFunctionLibraryOptions {
     String getSignatureOverride(String normalizedName) {
         return signatures.get(normalizedName);
     }
-
-    Map<String, String> getSignatureOverrides() {
-        return signatures;
-    }
 }

@@ -3,32 +3,16 @@ package org.json_kula.jsonata_jvm.runtime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
-
 /**
- * Registry for lambda functions used by the {@code ~>} chain operator.
+ * Call and composition support for JSONata function values.
  *
- * <p>Lambdas are represented as plain {@link com.fasterxml.jackson.databind.node.TextNode}s
- * with the sentinel prefix {@code "__λ:"} so they flow through the Jackson type
- * system without requiring a custom {@code JsonNode} subclass.
+ * <p>A function value <em>is</em> a {@link LambdaNode} — it carries its {@link JsonataLambda}
+ * directly, so calling it is a cast rather than a registry lookup, and it stays callable for exactly
+ * as long as something references it.
  */
 final class LambdaRegistry {
 
     private LambdaRegistry() {}
-
-    /** Bounded static LRU cache: fallback when no evaluation context is active (max 100 entries). */
-    private static final Map<String, JsonataLambda> LAMBDA_REGISTRY =
-            Collections.synchronizedMap(new LinkedHashMap<>(128, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, JsonataLambda> eldest) {
-                    return size() > 100;
-                }
-            });
-    static final String LAMBDA_PREFIX = "__\u03bb:";
-    private static final AtomicLong LAMBDA_COUNTER = new AtomicLong();
 
     /** Maximum nesting depth for user-defined function calls (JSONata U1001 limit).
      *  factorial(99) needs 100 fn_apply calls (0..99) — all succeed.
@@ -50,7 +34,7 @@ final class LambdaRegistry {
     static final com.fasterxml.jackson.databind.node.TextNode TCO_SENTINEL =
             JsonNodeFactory.instance.textNode("__λ_tco:");
 
-    /** Carries the next tail-call target (lambda token + arg) when TCO_SENTINEL is returned. */
+    /** Carries the next tail-call target (lambda + arg) when TCO_SENTINEL is returned. */
     record TailCallData(JsonataLambda fn, JsonNode arg) {}
 
     /**
@@ -60,60 +44,36 @@ final class LambdaRegistry {
     private static final ThreadLocal<TailCallData> PENDING_TAIL_CALL = ThreadLocal.withInitial(() -> null);
 
     /**
-     * Registers {@code fn} in the lambda registry and returns a sentinel
-     * {@link com.fasterxml.jackson.databind.node.TextNode} that can be stored as a
-     * {@link JsonNode} value and later resolved by {@link #lookupLambda}.
-     *
-     * <p>Lambdas are stored in the per-evaluation ThreadLocal map when inside an active
-     * evaluation, so the map is automatically discarded after each {@code evaluate()} call.
-     * The static fallback is used only outside an active evaluation (e.g. in tests).
+     * Wraps {@code fn} as a JSONata function value of unknown arity.
      */
     static JsonNode lambdaNode(JsonataLambda fn) {
-        EvaluationContext.EvalState evalState = EvaluationContext.getState();
-        if (evalState != null && evalState.definingScope != null) {
-            // Library-defining evaluation: mint a scope-qualified key so the token stays
-            // resolvable after this evaluation ends (see LambdaScope).
-            String key = evalState.definingScope.id() + LambdaScope.SCOPE_SEPARATOR
-                    + LAMBDA_COUNTER.incrementAndGet();
-            evalState.definingScope.put(key, fn);
-            return JsonNodeFactory.instance.textNode(LAMBDA_PREFIX + key);
-        }
-        String key = String.valueOf(LAMBDA_COUNTER.incrementAndGet());
-        if (evalState != null) {
-            evalState.evalLambdas().put(key, fn);
-        } else {
-            LAMBDA_REGISTRY.put(key, fn);
-        }
-        return JsonNodeFactory.instance.textNode(LAMBDA_PREFIX + key);
+        return new LambdaNode(fn, LambdaNode.UNKNOWN_ARITY);
     }
 
     /**
-     * Resolves a lambda key against, in order: its own scope (when the key is scope-qualified),
-     * the per-evaluation map, and the static fallback registry. Returns {@code null} if unknown.
-     *
-     * @param evalState the caller's already-fetched state, or {@code null} outside an evaluation
+     * Wraps {@code fn} as a JSONata function value that declares {@code arity} parameters.
+     * Built-in higher-order functions consult the arity when the callback reaches them as a value
+     * rather than as a literal lambda.
      */
-    private static JsonataLambda resolve(String key, EvaluationContext.EvalState evalState) {
-        JsonataLambda scoped = LambdaScope.resolveQualified(key);
-        if (scoped != null) return scoped;
-        if (evalState != null && evalState.evalLambdas != null) {
-            JsonataLambda fn = evalState.evalLambdas.get(key);
-            if (fn != null) return fn;
-        }
-        return LAMBDA_REGISTRY.get(key);
+    static JsonNode lambdaNode(JsonataLambda fn, int arity) {
+        return new LambdaNode(fn, arity);
     }
 
-    /** Returns {@code true} if {@code n} is a lambda sentinel token. */
+    /** Returns {@code true} if {@code n} is a function value. */
     static boolean isLambdaToken(JsonNode n) {
-        return n != null && n.isTextual() && n.textValue().startsWith(LAMBDA_PREFIX);
+        return n instanceof LambdaNode;
     }
 
-    /** Resolves the lambda sentinel token to the registered {@link JsonataLambda}. */
+    /** Returns the callable carried by {@code n}. */
     static JsonataLambda lookupLambda(JsonNode n) throws RuntimeEvaluationException {
-        String key = n.textValue().substring(LAMBDA_PREFIX.length());
-        JsonataLambda fn = resolve(key, EvaluationContext.getState());
-        if (fn == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
-        return fn;
+        if (!(n instanceof LambdaNode lambda))
+            throw new RuntimeEvaluationException("T1006", "The expression is not a function; got: " + n);
+        return lambda.function();
+    }
+
+    /** Returns the declared parameter count of {@code n}, or {@link LambdaNode#UNKNOWN_ARITY}. */
+    static int arityOf(JsonNode n) {
+        return n instanceof LambdaNode lambda ? lambda.arity() : LambdaNode.UNKNOWN_ARITY;
     }
 
     /**
@@ -135,7 +95,7 @@ final class LambdaRegistry {
         if (isLambdaToken(arg)) {
             final JsonataLambda f = lookupLambda(arg);
             final JsonataLambda g = lookupLambda(fn);
-            return lambdaNode(x -> g.apply(f.apply(x)));
+            return lambdaNode(x -> g.apply(f.apply(x)), arityOf(arg));
         }
         return lookupLambda(fn).apply(arg);
     }
@@ -144,12 +104,11 @@ final class LambdaRegistry {
      * Applies {@code fn} to {@code arg} — used when calling a user-defined
      * lambda stored in a local variable.
      *
-     * <p>Uses a single {@link EvaluationContext#getState()} call to access call depth,
-     * pending TCO slot, and lambda map, avoiding redundant ThreadLocal lookups.
-     * Implements a <em>trampoline</em> for tail-call optimisation (TCO).
+     * <p>Implements a <em>trampoline</em> for tail-call optimisation (TCO): a tail call returns
+     * {@link #TCO_SENTINEL} and is re-dispatched here instead of growing the JVM stack.
      */
     static JsonNode fn_apply(JsonNode fn, JsonNode arg) throws RuntimeEvaluationException {
-        if (isLambdaToken(fn)) {
+        if (fn instanceof LambdaNode lambdaNode) {
             EvaluationContext.EvalState evalState = EvaluationContext.getState();
             int[] depth = evalState != null ? evalState.callDepth() : CALL_DEPTH.get();
             TailCallData[] pendingSlot = evalState != null ? evalState.pendingTailCall() : null;
@@ -162,12 +121,7 @@ final class LambdaRegistry {
                 throw new RuntimeEvaluationException("U1001", "Expression evaluation timeout");
             depth[0]++;
             try {
-                // Inline lookup reuses evalState already obtained above
-                String key = fn.textValue().substring(LAMBDA_PREFIX.length());
-                JsonataLambda lambda = resolve(key, evalState);
-                if (lambda == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
-
-                JsonNode result = lambda.apply(arg);
+                JsonNode result = lambdaNode.function().apply(arg);
                 int trampolineCount = 0;
                 while (result == TCO_SENTINEL) {
                     if (++trampolineCount > MAX_TRAMPOLINE_ITERATIONS)
@@ -208,17 +162,12 @@ final class LambdaRegistry {
      * <p>Must only be called from <em>tail position</em> in a lambda body.
      */
     static JsonNode fn_apply_tco(JsonNode fn, JsonNode arg) throws RuntimeEvaluationException {
-        if (!isLambdaToken(fn))
+        if (!(fn instanceof LambdaNode lambdaNode))
             throw new RuntimeEvaluationException(
                     "T1006", "The expression is not a function; got: " + fn);
 
+        TailCallData tcd = new TailCallData(lambdaNode.function(), arg);
         EvaluationContext.EvalState evalState = EvaluationContext.getState();
-        // Inline lookup reuses evalState
-        String key = fn.textValue().substring(LAMBDA_PREFIX.length());
-        JsonataLambda lambda = resolve(key, evalState);
-        if (lambda == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
-
-        TailCallData tcd = new TailCallData(lambda, arg);
         if (evalState != null) {
             evalState.pendingTailCall()[0] = tcd;
         } else {

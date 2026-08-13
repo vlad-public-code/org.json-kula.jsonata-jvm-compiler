@@ -40,14 +40,15 @@ final class RegexRegistry {
     static JsonNode regexNode(String pattern, String flags) throws RuntimeEvaluationException {
         String key = pattern + "\0" + flags;
         Map<String, org.joni.Regex> instanceMap = EvaluationContext.getInstanceRegexes();
+        org.joni.Regex compiled;
         if (instanceMap != null) {
-            instanceMap.computeIfAbsent(key, k -> compile(pattern, flags));
+            compiled = instanceMap.computeIfAbsent(key, k -> compile(pattern, flags));
         } else {
             synchronized (REGEX_REGISTRY) {
-                REGEX_REGISTRY.computeIfAbsent(key, k -> compile(pattern, flags));
+                compiled = REGEX_REGISTRY.computeIfAbsent(key, k -> compile(pattern, flags));
             }
         }
-        return JsonNodeFactory.instance.textNode(REGEX_PREFIX + key);
+        return new RegexNode(compiled, pattern, flags);
     }
 
     private static org.joni.Regex compile(String pattern, String flags) {
@@ -61,22 +62,16 @@ final class RegexRegistry {
                 org.joni.WarnCallback.DEFAULT);
     }
 
-    /** Returns {@code true} if {@code n} is a regex sentinel token. */
+    /** Returns {@code true} if {@code n} is a compiled regex value. */
     static boolean isRegexToken(JsonNode n) {
-        return n != null && n.isTextual() && n.textValue().startsWith(REGEX_PREFIX);
+        return n instanceof RegexNode;
     }
 
-    /** Resolves the regex sentinel token to the compiled {@link org.joni.Regex}. */
+    /** Returns the compiled {@link org.joni.Regex} carried by {@code n}. */
     static org.joni.Regex lookupRegex(JsonNode n) throws RuntimeEvaluationException {
-        String key = n.textValue().substring(REGEX_PREFIX.length());
-        Map<String, org.joni.Regex> instanceMap = EvaluationContext.getInstanceRegexes();
-        if (instanceMap != null) {
-            org.joni.Regex rx = instanceMap.get(key);
-            if (rx != null) return rx;
-        }
-        org.joni.Regex rx = REGEX_REGISTRY.get(key);
-        if (rx == null) throw new RuntimeEvaluationException(null, "Regex token expired: " + key);
-        return rx;
+        if (!(n instanceof RegexNode rx))
+            throw new RuntimeEvaluationException(null, "Not a regular expression: " + n);
+        return rx.regex();
     }
 
     /** Builds a regex that matches the literal string {@code s} (no special regex chars). */

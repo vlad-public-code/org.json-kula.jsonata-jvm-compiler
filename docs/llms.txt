@@ -8,7 +8,7 @@ sitemap: false
 > jsonata-jvm-compiler is a Java 21 library that compiles [JSONata](https://jsonata.org) expressions
 > into native JVM bytecode at runtime. Each expression is parsed, optimised, translated to Java
 > source, compiled in-memory, and returned as a ready-to-call, thread-safe `JsonataExpression`.
-> Repeated evaluation is over 25× faster than interpreter-based alternatives (e.g. IBM's
+> Repeated evaluation is around 40× faster than interpreter-based alternatives (e.g. IBM's
 > JSONata4Java) on a realistic analytical benchmark. All cases in the official JSONata test suite
 > pass. Apache-2.0.
 
@@ -22,7 +22,7 @@ Key facts:
   `JsonataExpression`; `expr.evaluate(jsonNode)` → `JsonNode`. The instance is thread-safe and
   reusable; don't call `compile()` on the hot path.
 - **Batch compile:** `factory.compileAll(List.of(...))` runs the expensive `javac` step once for the
-  whole batch — ~10–16× faster than compiling 20 expressions one at a time.
+  whole batch — ~35× faster than compiling 200 expressions one at a time, and uses a fraction of the metaspace.
 - **Bindings:** inject `$name` values and `$name(...)` functions per-evaluation
   (`JsonataBindings`) or permanently (`assign` / `registerFunction`); per-evaluation wins on a name
   clash.
@@ -40,7 +40,7 @@ Key facts:
 - [Getting started]({{ '/#getting-started' | absolute_url }}): add the dependency, compile an expression (single or batch), and evaluate against JSON.
 - [Bindings]({{ '/#bindings' | absolute_url }}): per-evaluation vs permanent bindings, `JsonataBoundFunction`, and the function-signature syntax.
 - [Function libraries]({{ '/#function-libraries' | absolute_url }}): compile a JSONata definition expression — one that binds functions and returns the names to export — into `JsonataBoundFunction`s; captured helpers, signatures, and lifetime.
-- [Performance]({{ '/#performance' | absolute_url }}): the ~25× benchmark vs JSONata4Java and how to reproduce it.
+- [Performance]({{ '/#performance' | absolute_url }}): the ~41× benchmark vs JSONata4Java and how to reproduce it.
 - [Architecture]({{ '/#architecture' | absolute_url }}): the pipeline and package structure (`parser`, `optimizer`, `translator`, `runtime`, `loader`).
 - [Source on GitHub](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler): code and README. Apache-2.0.
 

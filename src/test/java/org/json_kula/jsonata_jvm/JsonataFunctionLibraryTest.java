@@ -467,7 +467,6 @@ class JsonataFunctionLibraryTest {
         JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
         JsonataBoundFunction sin = lib.get("sin");
         assertTrue(lib.isOpen());
-        assertTrue(lib.lambdaCount() > 0);
         assertEquals(Math.sin(1), call(sin, num(1)).doubleValue(), 1e-12);
 
         lib.close();
@@ -665,13 +664,25 @@ class JsonataFunctionLibraryTest {
     }
 
     @Test
-    void ordinaryLambdaTokens_stayScopedToTheirEvaluation() throws Exception {
-        // A lambda produced by a normal expression is still per-evaluation: exporting it as a value
-        // and calling it later is not supported (and must not silently resolve to something else).
+    void functionValues_areNotStrings() throws Exception {
+        // A function value is a node of its own, not a string carrying a sentinel prefix — so no
+        // string in the input document can be mistaken for one.
         JsonataExpression expr = FACTORY.compile("($f := function($x){ $x }; {\"f\": $f})");
         JsonNode result = expr.evaluate(EMPTY_OBJECT);
-        assertTrue(result.get("f").isTextual(), "lambda values are carried as tokens");
-        assertFalse(result.get("f").textValue().contains("/"),
-                "an ordinary lambda token must not be scope-qualified: " + result.get("f"));
+        JsonNode fn = result.get("f");
+        assertFalse(fn.isTextual(), "a function value must not be a string: " + fn);
+        assertEquals("function", FACTORY.compile("$type(f)").evaluate(result).textValue());
+        assertEquals("\"\"", fn.toString(), "a function serialises as the empty string");
+    }
+
+    @Test
+    void functionValues_outliveTheEvaluationThatCreatedThem() throws Exception {
+        // Nothing expires: the node carries the closure, so a function produced by one evaluation
+        // is still callable from a later, unrelated one.
+        Map<String, JsonataBoundFunction> fns = export("($add := function($a,$b){ $a + $b }; [\"add\"])");
+        for (int i = 0; i < 5; i++) {
+            FACTORY.compile("1 + 1").evaluate(EMPTY_OBJECT);   // unrelated evaluations in between
+        }
+        assertEquals(7, call(fns.get("add"), num(3), num(4)).intValue());
     }
 }
