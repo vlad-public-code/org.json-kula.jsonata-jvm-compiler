@@ -1,5 +1,6 @@
 package org.json_kula.jsonata_jvm;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.json_kula.jsonata_jvm.loader.JsonataExpressionLoader;
 import org.json_kula.jsonata_jvm.loader.JsonataLoadException;
 import org.json_kula.jsonata_jvm.optimizer.Optimizer;
@@ -7,12 +8,14 @@ import org.json_kula.jsonata_jvm.parser.ParseException;
 import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
+import org.json_kula.jsonata_jvm.runtime.LambdaScope;
 import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
 import org.json_kula.jsonata_jvm.translator.RuntimeTranslatorException;
 import org.json_kula.jsonata_jvm.translator.Translator;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -138,6 +141,141 @@ public class JsonataExpressionFactory {
             throw new JsonataCompilationException(
                     null, "Failed to load generated classes for batch: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Compiles a JSONata <em>definition expression</em> and returns the named functions it binds,
+     * ready to be registered on any expression.
+     *
+     * <pre>{@code
+     * Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
+     *         List.of("$sin", "$cos"),
+     *         """
+     *         (
+     *           $pi := 3.1415926535897932384626;
+     *           $product := function($a, $b) { $a * $b };
+     *           $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
+     *           $sin := function($x){ $cos($x - $pi/2) };
+     *           $cos := function($x){ ... };
+     *         )
+     *         """);
+     *
+     * JsonataExpression expr = factory.compile("angles.$sin($)");
+     * trig.forEach(expr::registerFunction);
+     * }</pre>
+     *
+     * <p>The definition expression is evaluated once, here; its own result is discarded. Names may
+     * be written with or without the leading {@code $}, and map keys never carry it. Bindings that
+     * the exported functions rely on need not be exported themselves — they are captured.
+     *
+     * <p>The returned functions keep their {@link JsonataFunctionLibrary} — and its generated class
+     * — alive for as long as they are referenced. Use
+     * {@link #compileFunctionLibrary(List, String)} instead when the lifetime should be explicit.
+     *
+     * @param functionNames    the functions to export; at least one, no duplicates
+     * @param functionDefinition the JSONata expression that binds them
+     * @return the exported functions keyed by name without {@code $}, in request order
+     * @throws JsonataCompilationException if the definition cannot be compiled, if a requested name
+     *         is not bound at the top level of the definition, or if a requested name turns out not
+     *         to be a function
+     */
+    public Map<String, JsonataBoundFunction> compileFunctions(List<String> functionNames,
+                                                              String functionDefinition)
+            throws JsonataCompilationException {
+        return compileFunctionLibrary(functionNames, functionDefinition).asMap();
+    }
+
+    /**
+     * As {@link #compileFunctions}, but returns the owning {@link JsonataFunctionLibrary} so that
+     * its lifetime can be ended explicitly with {@link JsonataFunctionLibrary#close()}.
+     */
+    public JsonataFunctionLibrary compileFunctionLibrary(List<String> functionNames,
+                                                         String functionDefinition)
+            throws JsonataCompilationException {
+        return compileFunctionLibrary(functionNames, functionDefinition, null);
+    }
+
+    /**
+     * As {@link #compileFunctionLibrary(List, String)}, with control over the input document, the
+     * definition-time bindings and the reported signatures.
+     *
+     * @param options extra settings, or {@code null} for the defaults
+     */
+    public JsonataFunctionLibrary compileFunctionLibrary(List<String> functionNames,
+                                                         String functionDefinition,
+                                                         JsonataFunctionLibraryOptions options)
+            throws JsonataCompilationException {
+        List<String> names = FunctionExportRewriter.normalizeAll(functionNames);
+        JsonataFunctionLibraryOptions opts =
+                options != null ? options : new JsonataFunctionLibraryOptions();
+
+        AstNode ast;
+        try {
+            ast = Parser.parse(functionDefinition);
+        } catch (ParseException e) {
+            throw new JsonataCompilationException(
+                    e.getErrorCode(), "Invalid JSONata expression: " + e.getMessage(), e);
+        }
+
+        Map<String, FunctionExportRewriter.ExportInfo> infos =
+                FunctionExportRewriter.analyze(ast, names);
+
+        String source;
+        try {
+            AstNode optimized = Optimizer.optimize(FunctionExportRewriter.rewrite(ast, names));
+            String className = "CompiledFunctionLibrary" + CLASS_COUNTER.incrementAndGet();
+            source = Translator.translate(optimized, GEN_PACKAGE, className, functionDefinition);
+        } catch (RuntimeTranslatorException e) {
+            throw new JsonataCompilationException(
+                    e.getErrorCode(), "Failed to translate definition expression: " + e.getMessage(), e);
+        }
+
+        JsonataExpression compiled;
+        try {
+            compiled = loader.load(source);
+        } catch (JsonataLoadException e) {
+            throw new JsonataCompilationException(
+                    null, "Failed to load generated class for definition expression: " + e.getMessage(), e);
+        }
+        if (!(compiled instanceof AbstractJsonataExpression definition)) {
+            throw new JsonataCompilationException(
+                    null, "Generated class does not extend AbstractJsonataExpression", null);
+        }
+
+        LambdaScope scope = LambdaScope.create();
+        JsonataFunctionLibrary library = new JsonataFunctionLibrary(
+                functionDefinition, definition, scope, opts.getBindings());
+
+        JsonNode exported;
+        try {
+            exported = definition.evaluateDefining(opts.getInput(), opts.getBindings(), scope);
+        } catch (JsonataEvaluationException e) {
+            scope.close();
+            throw new JsonataCompilationException(
+                    e.getErrorCode(), "Definition expression failed to evaluate: " + e.getMessage(), e);
+        }
+
+        for (String name : names) {
+            JsonNode token = exported != null ? exported.get(name) : null;
+            if (token == null || !JsonataRuntime.isLambdaToken(token)) {
+                scope.close();
+                throw new JsonataCompilationException(null,
+                        "$" + name + " is not a function; the definition expression bound it to "
+                                + describe(token), null);
+            }
+            FunctionExportRewriter.ExportInfo info = infos.get(name);
+            String override = opts.getSignatureOverride(name);
+            library.export(name, new ExportedJsonataFunction(
+                    name, token, override != null ? override : info.signature(),
+                    info.arity(), library));
+        }
+        return library;
+    }
+
+    /** Describes an exported value that turned out not to be a function, for the error message. */
+    private static String describe(JsonNode value) {
+        if (value == null || value.isMissingNode()) return "nothing";
+        return JsonataRuntime.fn_type(value).asText() + " " + JsonataRuntime.sanitizeForString(value);
     }
 
     public String translate(String expression) throws JsonataCompilationException {

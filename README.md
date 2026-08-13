@@ -25,7 +25,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.4</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
@@ -195,6 +195,85 @@ The signature has the form `<params:return>` where `params` is a sequence of typ
 | `-` | Use the context value ("focus") if the argument is missing |
 
 Example: `$length` has signature `<s-:n>` — accepts a string (using context as focus if omitted) and returns a number.
+
+## Function libraries
+
+A **function library** turns a JSONata *definition expression* — one whose job is to bind named lambdas, not to compute a result — into ready-to-use `JsonataBoundFunction`s. Write the function once in JSONata, then call it from Java or register it on any expression.
+
+```java
+JsonataExpressionFactory factory = new JsonataExpressionFactory();
+
+Map<String, JsonataBoundFunction> trig = factory.compileFunctions(
+        List.of("$sin", "$cos"),
+        """
+        (
+          $pi := 3.1415926535897932384626;
+
+          /* Factorial is the product of the integers 1..n */
+          $product := function($a, $b) { $a * $b };
+          $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
+
+          $sin := function($x){ $cos($x - $pi/2) };
+          $cos := function($x){
+            $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
+              $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
+          };
+        )
+        """);
+
+JsonataExpression expr = factory.compile("angles.$sin($)");
+trig.forEach(expr::registerFunction);        // or: new JsonataBindings().bindFunctions(trig)
+
+expr.evaluate(mapper.readTree("{\"angles\": [0, 1, 2]}"));
+// → [0, 0.8414709848078965, 0.9092974268256817]
+```
+
+The definition expression is compiled and evaluated **once**, inside `compileFunctions`; its own result is discarded. What matters is what it bound:
+
+- **Only the requested names are exported** — `$pi`, `$product` and `$factorial` stay internal, yet the exported functions still reach them. Helpers do not have to be exported to be usable.
+- **Mutual recursion works**: `$sin` calls `$cos`, which calls itself and `$factorial`.
+- **Names may be written with or without the `$`.** Map keys never carry it, so the map drops straight into `registerFunction` or `bindFunction`.
+- **Any lambda shape works**: multi-parameter, recursive, tail-recursive, `λ`, a function returned by another function (`$twice($add3)`), a `~>` chain (`$uppercase ~> $trim`), or a partial application (`$substring(?, 0, 5)`).
+
+Exported functions can also be called straight from Java, with no expression involved:
+
+```java
+JsonataBoundFunction sin = trig.get("sin");
+JsonNode result = sin.apply(new JsonataFunctionArguments(List.of(DoubleNode.valueOf(1.0))));
+```
+
+### Signatures
+
+Each exported function reports a JSONata signature:
+
+| Definition | Reported signature |
+|---|---|
+| `$twice := function($x)<n:n>{ $x * 2 }` | `<n:n>` — the declared one |
+| `$volume := function($l, $w, $h){ ... }` | `<j?j?j?:j>` — synthesised, all-optional |
+| `$normalize := $uppercase ~> $trim` | none — arity known only at call time |
+
+The synthesised form is deliberately permissive: JSONata lets a lambda be called with fewer arguments than it declares (the rest are *undefined*), and `j` applies no coercion — so an exported function accepts exactly what the same function accepts inside JSONata. Ask for something stricter with a signature override:
+
+```java
+JsonataFunctionLibrary lib = factory.compileFunctionLibrary(
+        List.of("$twice"), "($twice := function($x){ $x * 2 };)",
+        new JsonataFunctionLibraryOptions().signature("$twice", "<n:n>"));
+
+// "<n:n>" coerces at the boundary: $twice("21") → 42
+```
+
+### Lifetime and options
+
+`compileFunctions` returns just the map; the underlying library stays alive as long as the functions are referenced. Use `compileFunctionLibrary` when the lifetime should be explicit — `JsonataFunctionLibrary` is `AutoCloseable`, and `close()` releases the compiled functions (calling them afterwards throws `JsonataEvaluationException`).
+
+`JsonataFunctionLibraryOptions` also carries the document the definition is evaluated against (`input`) and the bindings visible while it runs (`bindings`).
+
+Two semantics worth knowing:
+
+- **Bound names are captured; free names are late-bound.** A name the definition binds (`$pi`) is baked into the closure. A name it never binds (`$vatRate`) resolves against the bindings active where the function is *called* — or against the library's own `bindings` option when it is called directly from Java.
+- **The caller's evaluation is reused.** Called from inside an expression, an exported function shares that evaluation's recursion budget (100 nested calls) and its `setTimeout` deadline.
+
+A library owns one generated class, so build it once at startup and keep it, exactly as with `compile()`. Exported functions are thread-safe and may be called concurrently.
 
 ## Advanced usage
 

@@ -91,3 +91,29 @@ Each type symbol may also have options applied.
 `-` - if this argument is missing, use the context value ("focus"). E.g. $length has signature `<s-:n>`; it can be called as $length(OrderID) (one argument) but equivalently as OrderID.$length().
 
 Class JsonataFunctionArguments represents a list of JsonNode.
+
+# Function libraries
+Besides implementing JsonataBoundFunction in Java, a bound function can be written in JSONata itself.
+`JsonataExpressionFactory.compileFunctions(List<String> functionNames, String functionDefinition)`
+takes a definition expression — one that binds named lambdas and whose own result is discarded — and
+returns `Map<String, JsonataBoundFunction>` keyed by name without the leading `$`.
+
+Only the requested names are exported; other bindings in the definition (helper values and helper
+functions) stay internal but remain reachable from the exported closures, and mutual recursion
+between exported functions works.
+
+How it works:
+1. `FunctionExportRewriter` appends `{"name": $name, ...}` to the outermost block of the parsed
+   definition, so the requested lambdas are returned to the caller. It also recovers each function's
+   arity and signature from the AST.
+2. The rewritten expression is optimised, translated and loaded exactly like any other expression.
+3. It is evaluated once with a `LambdaScope` installed (`AbstractJsonataExpression.evaluateDefining`).
+   While a scope is installed, `LambdaRegistry.lambdaNode` mints scope-qualified token keys
+   (`__λ:<scopeId>/<n>`) into that durable scope instead of the per-evaluation map, so the functions
+   stay callable after the defining evaluation ends — on any thread, inside any evaluation, or none.
+4. Each exported token is wrapped in an `ExportedJsonataFunction`, which applies the runtime calling
+   convention (no arg → `null`, one arg → passed through, several → `packArgs` tuple).
+
+`JsonataFunctionLibrary` owns the scope and the generated class; `close()` releases it. See
+[docs/design/function-library.md](docs/design/function-library.md) for the full design and the
+alternatives that were rejected.

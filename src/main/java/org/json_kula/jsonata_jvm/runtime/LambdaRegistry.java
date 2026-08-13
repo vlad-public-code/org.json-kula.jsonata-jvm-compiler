@@ -69,14 +69,38 @@ final class LambdaRegistry {
      * The static fallback is used only outside an active evaluation (e.g. in tests).
      */
     static JsonNode lambdaNode(JsonataLambda fn) {
-        String key = String.valueOf(LAMBDA_COUNTER.incrementAndGet());
         EvaluationContext.EvalState evalState = EvaluationContext.getState();
+        if (evalState != null && evalState.definingScope != null) {
+            // Library-defining evaluation: mint a scope-qualified key so the token stays
+            // resolvable after this evaluation ends (see LambdaScope).
+            String key = evalState.definingScope.id() + LambdaScope.SCOPE_SEPARATOR
+                    + LAMBDA_COUNTER.incrementAndGet();
+            evalState.definingScope.put(key, fn);
+            return JsonNodeFactory.instance.textNode(LAMBDA_PREFIX + key);
+        }
+        String key = String.valueOf(LAMBDA_COUNTER.incrementAndGet());
         if (evalState != null) {
             evalState.evalLambdas().put(key, fn);
         } else {
             LAMBDA_REGISTRY.put(key, fn);
         }
         return JsonNodeFactory.instance.textNode(LAMBDA_PREFIX + key);
+    }
+
+    /**
+     * Resolves a lambda key against, in order: its own scope (when the key is scope-qualified),
+     * the per-evaluation map, and the static fallback registry. Returns {@code null} if unknown.
+     *
+     * @param evalState the caller's already-fetched state, or {@code null} outside an evaluation
+     */
+    private static JsonataLambda resolve(String key, EvaluationContext.EvalState evalState) {
+        JsonataLambda scoped = LambdaScope.resolveQualified(key);
+        if (scoped != null) return scoped;
+        if (evalState != null && evalState.evalLambdas != null) {
+            JsonataLambda fn = evalState.evalLambdas.get(key);
+            if (fn != null) return fn;
+        }
+        return LAMBDA_REGISTRY.get(key);
     }
 
     /** Returns {@code true} if {@code n} is a lambda sentinel token. */
@@ -87,12 +111,7 @@ final class LambdaRegistry {
     /** Resolves the lambda sentinel token to the registered {@link JsonataLambda}. */
     static JsonataLambda lookupLambda(JsonNode n) throws RuntimeEvaluationException {
         String key = n.textValue().substring(LAMBDA_PREFIX.length());
-        EvaluationContext.EvalState evalState = EvaluationContext.getState();
-        if (evalState != null) {
-            JsonataLambda fn = evalState.evalLambdas().get(key);
-            if (fn != null) return fn;
-        }
-        JsonataLambda fn = LAMBDA_REGISTRY.get(key);
+        JsonataLambda fn = resolve(key, EvaluationContext.getState());
         if (fn == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
         return fn;
     }
@@ -145,8 +164,7 @@ final class LambdaRegistry {
             try {
                 // Inline lookup reuses evalState already obtained above
                 String key = fn.textValue().substring(LAMBDA_PREFIX.length());
-                JsonataLambda lambda = evalState != null ? evalState.evalLambdas().get(key) : null;
-                if (lambda == null) lambda = LAMBDA_REGISTRY.get(key);
+                JsonataLambda lambda = resolve(key, evalState);
                 if (lambda == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
 
                 JsonNode result = lambda.apply(arg);
@@ -197,8 +215,7 @@ final class LambdaRegistry {
         EvaluationContext.EvalState evalState = EvaluationContext.getState();
         // Inline lookup reuses evalState
         String key = fn.textValue().substring(LAMBDA_PREFIX.length());
-        JsonataLambda lambda = evalState != null ? evalState.evalLambdas().get(key) : null;
-        if (lambda == null) lambda = LAMBDA_REGISTRY.get(key);
+        JsonataLambda lambda = resolve(key, evalState);
         if (lambda == null) throw new RuntimeEvaluationException(null, "Lambda expired or not found: " + key);
 
         TailCallData tcd = new TailCallData(lambda, arg);

@@ -64,6 +64,51 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
     }
 
     /**
+     * Evaluates this expression with {@code scope} installed, so that every lambda it creates is
+     * minted into that durable scope instead of the per-evaluation map and stays callable
+     * afterwards. Used exactly once per {@link JsonataFunctionLibrary}, on its definition
+     * expression.
+     *
+     * @param input    the input document the definition expression is evaluated against
+     * @param bindings definition-time bindings, or {@code null}
+     * @param scope    the durable lambda scope to mint into
+     * @return the raw expression result — for a rewritten definition expression, the export object
+     */
+    final JsonNode evaluateDefining(JsonNode input, JsonataBindings bindings,
+                                    org.json_kula.jsonata_jvm.runtime.LambdaScope scope)
+            throws JsonataEvaluationException {
+        beginEvaluation(__values, __functions, bindings, __regexes, __timeoutMs, scope);
+        try {
+            if (input == null)
+                throw new JsonataEvaluationException(null, "Input JSON cannot be null");
+            return doEvaluate(input);
+        } catch (JsonataEvaluationException __e) {
+            throw __e;
+        } catch (RuntimeEvaluationException __e) {
+            throw new JsonataEvaluationException(__e.getErrorCode(), __e.getMessage(), __e);
+        } catch (Exception __e) {
+            throw new JsonataEvaluationException(null, __e.getMessage(), __e);
+        } finally {
+            endEvaluation();
+        }
+    }
+
+    /** Permanent value bindings registered on this instance — read by exported library functions. */
+    final ConcurrentHashMap<String, JsonNode> permanentValues() {
+        return __values;
+    }
+
+    /** Permanent function bindings registered on this instance. */
+    final ConcurrentHashMap<String, JsonataBoundFunction> permanentFunctions() {
+        return __functions;
+    }
+
+    /** This instance's regex cache, reused when an exported function opens its own frame. */
+    final ConcurrentHashMap<String, org.joni.Regex> instanceRegexes() {
+        return __regexes;
+    }
+
+    /**
      * Evaluates the compiled JSONata expression against the given input document.
      *
      * @param __root the validated, non-null input document

@@ -35,20 +35,24 @@ final class EvaluationContext {
         Map<String, org.joni.Regex> instanceRegexes;
         int[] callDepth;
         LambdaRegistry.TailCallData[] pendingTailCall;
+        /** Non-null while this evaluation is defining a function library; see {@link LambdaScope}. */
+        LambdaScope definingScope;
 
         void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes,
-                   int timeoutMs) {
+                   int timeoutMs, LambdaScope definingScope) {
             this.active = true;
             this.bindings = bindings;
             this.millis = millis;
             this.instanceRegexes = instanceRegexes;
             this.timeoutDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
+            this.definingScope = definingScope;
         }
 
         void end() {
             this.active = false;
             this.bindings = null;
             this.instanceRegexes = null;
+            this.definingScope = null;
             if (evalLambdas != null) evalLambdas.clear();
             if (callDepth != null) callDepth[0] = 0;
             if (pendingTailCall != null) pendingTailCall[0] = null;
@@ -91,6 +95,23 @@ final class EvaluationContext {
                                 JsonataBindings perEval,
                                 Map<String, org.joni.Regex> instanceRegexes,
                                 int timeoutMs) {
+        beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes, timeoutMs, null);
+    }
+
+    /**
+     * As {@link #beginEvaluation(Map, Map, JsonataBindings, Map, int)}, but additionally installs a
+     * {@link LambdaScope} so that every lambda created during this evaluation outlives it. Used
+     * once per function library, when its definition expression is evaluated.
+     *
+     * @param definingScope the durable scope to mint lambdas into, or {@code null} for a normal
+     *                      evaluation
+     */
+    static void beginEvaluation(Map<String, JsonNode> permanentValues,
+                                Map<String, JsonataBoundFunction> permanentFunctions,
+                                JsonataBindings perEval,
+                                Map<String, org.joni.Regex> instanceRegexes,
+                                int timeoutMs,
+                                LambdaScope definingScope) {
         JsonataBindings merged;
         if (permanentValues.isEmpty() && permanentFunctions.isEmpty() && perEval == null) {
             merged = EMPTY_BINDINGS;
@@ -103,7 +124,12 @@ final class EvaluationContext {
                 perEval.getFunctions().forEach(merged::bindFunction);
             }
         }
-        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs);
+        CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs, definingScope);
+    }
+
+    /** Returns {@code true} if an evaluation is currently active on this thread. */
+    static boolean isActive() {
+        return CURRENT.get().active;
     }
 
     /**

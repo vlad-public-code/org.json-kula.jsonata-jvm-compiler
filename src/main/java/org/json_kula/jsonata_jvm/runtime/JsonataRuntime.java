@@ -2052,11 +2052,35 @@ public final class JsonataRuntime {
     }
 
     /**
+     * As {@link #beginEvaluation(Map, Map, JsonataBindings, Map, int)}, but installs
+     * {@code definingScope} so that every lambda created during this evaluation is minted into
+     * that scope and outlives the evaluation. Used when compiling a function library.
+     */
+    public static void beginEvaluation(Map<String, JsonNode> permanentValues,
+                                       Map<String, JsonataBoundFunction> permanentFunctions,
+                                       JsonataBindings perEval,
+                                       Map<String, org.joni.Regex> instanceRegexes,
+                                       int timeoutMs,
+                                       LambdaScope definingScope) {
+        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval,
+                instanceRegexes, timeoutMs, definingScope);
+    }
+
+    /**
      * Clears the active bindings for the current thread.
      * Always call this in a {@code finally} block after {@link #beginEvaluation}.
      */
     public static void endEvaluation() {
         EvaluationContext.endEvaluation();
+    }
+
+    /**
+     * Returns {@code true} when an evaluation is active on the current thread. Callers that invoke
+     * runtime helpers outside {@code evaluate()} — such as a function exported from a library —
+     * use this to decide whether they must open an evaluation frame of their own.
+     */
+    public static boolean isEvaluationActive() {
+        return EvaluationContext.isActive();
     }
 
     /**

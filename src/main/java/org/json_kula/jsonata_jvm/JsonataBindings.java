@@ -54,6 +54,18 @@ public final class JsonataBindings {
     }
 
     /**
+     * Binds every entry of {@code fns}, keyed by function name without the leading {@code $}.
+     * Convenient for the map returned by
+     * {@link JsonataExpressionFactory#compileFunctions(java.util.List, String)}.
+     *
+     * @return {@code this} for chaining
+     */
+    public JsonataBindings bindFunctions(Map<String, JsonataBoundFunction> fns) {
+        functions.putAll(fns);
+        return this;
+    }
+
+    /**
      * Returns the value bound to {@code name}, or {@code null} if not bound.
      */
     public JsonNode getValue(String name) {
