@@ -79,8 +79,15 @@ final class BoundFunctionValue {
         try {
             return fn.apply(new JsonataFunctionArguments(coerced));
         } catch (JsonataEvaluationException e) {
+            // Carry the cause's message, not just the call site. The wrapper alone
+            // ("Error calling bound function $grind") says a call failed but not why, which hides
+            // exactly the failures a caller can act on — a timeout (U1001), a signature rejection,
+            // an $error() raised inside the body. Matches the shape the library docs already use:
+            // "Error calling exported function $sin: Lambda expired or not found".
+            String reason = e.getMessage();
             throw new RuntimeEvaluationException(e.getErrorCode(),
-                    "Error calling bound function $" + name, e);
+                    "Error calling bound function $" + name
+                            + (reason != null && !reason.isBlank() ? ": " + reason : ""), e);
         }
     }
 

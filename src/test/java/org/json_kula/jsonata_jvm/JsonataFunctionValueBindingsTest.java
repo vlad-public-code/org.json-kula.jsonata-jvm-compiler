@@ -371,4 +371,23 @@ class JsonataFunctionValueBindingsTest {
         assertEquals(7.0, eval("λ($a, $n)<xn:n>{$n}(\"anything\", 7)", new JsonataBindings())
                 .doubleValue(), 1e-9);
     }
+
+    @Test
+    void aFailingBoundFunctionReportsWhyItFailed() throws Exception {
+        // The wrapper names the call site; without the cause's message a caller is told only that
+        // "$boom" failed — not that it was a timeout, a signature rejection, or an explicit $error.
+        JsonataBindings bindings = new JsonataBindings().bindFunction("boom", new JsonataBoundFunction() {
+            @Override public String getFunctionSignature() { return "<n:n>"; }
+            @Override public JsonNode apply(JsonataFunctionArguments args) throws JsonataEvaluationException {
+                throw new JsonataEvaluationException("U1001", "Expression evaluation timeout");
+            }
+        });
+
+        JsonataEvaluationException e = assertThrows(JsonataEvaluationException.class,
+                () -> eval("$map([1], $boom)", bindings));
+
+        assertEquals("U1001", e.getErrorCode());
+        assertTrue(e.getMessage().contains("$boom"), e.getMessage());
+        assertTrue(e.getMessage().contains("Expression evaluation timeout"), e.getMessage());
+    }
 }
