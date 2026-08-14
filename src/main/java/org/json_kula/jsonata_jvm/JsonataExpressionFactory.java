@@ -242,6 +242,7 @@ public class JsonataExpressionFactory {
         }
 
         Map<String, AstNode> topLevelBindings = FunctionExportRewriter.topLevelBindings(ast);
+        FunctionExportRewriter.requireSelfContained(ast, providedNames(opts));
 
         String source;
         String libraryClassName;
@@ -291,6 +292,15 @@ public class JsonataExpressionFactory {
                     e.getErrorCode(), "Definition expression failed to evaluate: " + e.getMessage(), e);
         }
         return library;
+    }
+
+    /** The names the caller supplies at build time, which a definition may therefore rely on. */
+    private static java.util.Set<String> providedNames(JsonataLibraryOptions options) {
+        JsonataBindings bindings = options.getBindings();
+        if (bindings == null) return java.util.Set.of();
+        java.util.Set<String> names = new java.util.HashSet<>(bindings.getValues().keySet());
+        names.addAll(bindings.getFunctions().keySet());
+        return names;
     }
 
     /**

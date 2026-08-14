@@ -328,10 +328,33 @@ A library owns one generated class, so build it once at startup and keep it — 
 
 `JsonataLibraryOptions` also carries the document the definition is evaluated against (`input`, for a definition that reads from data) and the bindings visible while it runs (`bindings`).
 
-Two semantics worth knowing:
+### A definition must be self-contained
 
-- **Bound names are captured; free names are late-bound.** A name the definition binds (`$vatRate`) is baked into the closure. A name it never binds resolves against the bindings active where the function is *called* — or against the library's own `bindings` option when it is called directly from Java.
-- **The caller's evaluation is reused.** Called from inside an expression, an exported function shares that evaluation's recursion budget (100 nested calls) and its `setTimeout` deadline.
+Every name a definition uses has to come from somewhere it controls: a name it binds itself, a JSONata built-in, or a name handed to it at build time. Anything else is rejected when the library is compiled:
+
+```
+($withVat := function($net){ $net * (1 + $vatRate) }; ["withVat"])
+
+→ JsonataCompilationException: The definition expression uses $vatRate, which it does not bind
+  and which is not a JSONata built-in. Bind it in the definition, or supply it through
+  JsonataLibraryOptions.bindings.
+```
+
+The alternative — resolving `$vatRate` against whatever happens to be bound where `$withVat` is *called* — would make a library's behaviour depend on its caller, and would make a typo (`$rat` for `$rate`) indistinguishable from a deliberate hook. Failing at build time names both the problem and the fix.
+
+To parameterise a library, supply the values when you build it:
+
+```java
+JsonataLibrary lib = factory.compileLibrary(definition,
+        new JsonataLibraryOptions().bindings(
+                new JsonataBindings().bindValue("vatRate", rate)));
+```
+
+Those names are then in scope for the definition, and are captured by the functions it exports.
+
+Lambda parameters, bindings inside nested blocks, forward references between siblings (mutual recursion), and path bindings (`@$v`, `#$i`) all count as bound — only genuinely unresolvable names are reported.
+
+One further semantic worth knowing: **the caller's evaluation is reused.** Called from inside an expression, an exported function shares that evaluation's recursion budget (100 nested calls) and its `setTimeout` deadline.
 
 ---
 

@@ -66,6 +66,15 @@ public final class Parser {
         "base64encode", "base64decode"
     );
 
+    /**
+     * Returns {@code true} if {@code name} (without the leading {@code $}) is a JSONata built-in.
+     * Used by callers that need to tell a reference to the standard library from a reference to
+     * something the expression is expected to provide.
+     */
+    public static boolean isBuiltin(String name) {
+        return BUILTIN_NAMES.contains(name);
+    }
+
     private Parser(List<Token> tokens) {
         this.tokens = tokens;
         this.cursor = 0;

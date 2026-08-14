@@ -35,9 +35,13 @@ public final class JsonataLibraryOptions {
     }
 
     /**
-     * Sets bindings visible while the definition runs. They are also installed when an exported
-     * function is called directly from Java, outside any evaluation — inside an expression the
-     * caller's own bindings apply instead.
+     * Sets bindings the definition may rely on: the way to parameterise a library.
+     *
+     * <p>A definition must be self-contained, so a name it neither binds nor gets from the JSONata
+     * standard library has to be supplied here — otherwise compiling the library fails. These names
+     * are in scope while the definition runs, are captured by the functions it exports, and are
+     * installed again when an exported function is called directly from Java, outside any
+     * evaluation.
      */
     public JsonataLibraryOptions bindings(JsonataBindings bindings) {
         this.bindings = bindings;

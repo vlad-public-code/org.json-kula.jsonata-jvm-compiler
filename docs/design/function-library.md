@@ -493,9 +493,14 @@ key is the 5 % of that change that solves this problem.
 
 1. **Should `compileLibrary` also export values?** A `Map<String, JsonNode>` sibling for `$pi` is
    nearly free once the export object exists. Deferred until asked for.
-2. **Should the free-variable rule be strict?** Option: reject at build time any definition body that
-   references a name bound neither locally nor in the definition-time bindings, instead of silently
-   late-binding to the consumer. Safer, but forbids intentionally caller-parameterised libraries.
+2. ~~**Should the free-variable rule be strict?**~~ **Decided: yes.** A definition that references a
+   name it neither binds nor receives through `JsonataLibraryOptions.bindings` — and that is not a
+   JSONata built-in — is rejected when the library is compiled. Late-binding to the calling
+   expression made a library's behaviour depend on its caller and made a typo indistinguishable from
+   a deliberate hook; parameterisation goes through the options instead, where the dependency is
+   explicit. Implemented as `FunctionExportRewriter.requireSelfContained` over
+   `ScopeAnalyzer.freeVariables`, which treats lambda parameters, nested block bindings, sibling
+   forward references and path bindings (`@$v`, `#$i`) as bound.
 3. **`$eval` re-entrancy** (Appendix A, probe 2) is a pre-existing bug this design routes around
    rather than fixes. Making `EvalState` a proper frame stack would fix `$eval`, unblock
    alternative A, and simplify §4.3's `ownFrame` handling. Worth a separate issue.

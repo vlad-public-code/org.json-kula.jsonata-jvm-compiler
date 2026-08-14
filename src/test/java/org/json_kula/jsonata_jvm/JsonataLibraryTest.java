@@ -533,17 +533,106 @@ class JsonataLibraryTest {
         assertEquals(120.0, call(lib.getFunctions().get("withVat"), num(100)).doubleValue(), 1e-9);
     }
 
+    // =========================================================================
+    // A definition must be self-contained
+    // =========================================================================
+
     @Test
-    void freeVariable_resolvesAgainstCallerBindingsInsideAnExpression() throws Exception {
-        // Documented semantics: a name the definition never binds is late-bound to the caller.
-        Map<String, JsonataBoundFunction> fns =
-                export("($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])");
+    void error_definitionUsesAnUnboundVariable() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])"));
+        assertTrue(e.getMessage().contains("$vatRate"), e.getMessage());
+        assertTrue(e.getMessage().contains("does not bind"), e.getMessage());
+        assertTrue(e.getMessage().contains("JsonataLibraryOptions.bindings"),
+                "the message should say how to fix it: " + e.getMessage());
+    }
 
-        JsonataExpression expr = FACTORY.compile("$withVat(100)");
-        fns.forEach(expr::registerFunction);
-        expr.assign("vatRate", num(0.5));
+    @Test
+    void error_definitionCallsAnUnboundFunction() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($f := function($x){ $helper($x) }; [\"f\"])"));
+        assertTrue(e.getMessage().contains("$helper"), e.getMessage());
+    }
 
-        assertEquals(150.0, expr.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
+    @Test
+    void error_unboundNamesAreAllReported() {
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($f := function($x){ $x * $rate + $offset }; [\"f\"])"));
+        assertTrue(e.getMessage().contains("$rate"), e.getMessage());
+        assertTrue(e.getMessage().contains("$offset"), e.getMessage());
+        assertTrue(e.getMessage().contains("are not JSONata built-ins"), e.getMessage());
+    }
+
+    @Test
+    void error_typoInAnExportedName_isCaughtAsAnUnboundReference() {
+        // The reason for rejecting rather than late-binding: this is a typo, not a hook.
+        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
+                () -> export("($rate := 0.2; $f := function($x){ $x * $rat }; [\"f\"])"));
+        assertTrue(e.getMessage().contains("$rat"), e.getMessage());
+    }
+
+    @Test
+    void selfContained_builtinsAreNotFreeVariables() throws Exception {
+        Map<String, JsonataBoundFunction> fns = export("""
+                (
+                  $stats := function($a){ {"n": $count($a), "total": $sum($a), "avg": $average($a)} };
+                  $shout := $uppercase ~> $trim;
+                  $head := $substring(?, 0, 3);
+                  ["stats", "shout", "head"]
+                )""");
+        assertEquals(3, fns.size());
+        assertEquals(6, call(fns.get("stats"), MAPPER.readTree("[1,2,3]")).get("total").intValue());
+    }
+
+    @Test
+    void selfContained_lambdaParametersAndInnerBindingsAreBound() throws Exception {
+        Map<String, JsonataBoundFunction> fns = export("""
+                ($f := function($x, $y){ ( $sum := $x + $y; $scale := 2; $sum * $scale ) };
+                 ["f"])""");
+        assertEquals(14, call(fns.get("f"), num(3), num(4)).intValue());
+    }
+
+    @Test
+    void selfContained_forwardReferencesBetweenSiblingsAreBound() throws Exception {
+        // $sin refers to $cos before it is bound — legal, and not a free variable.
+        assertEquals(2, export(TRIG).size());
+    }
+
+    @Test
+    void selfContained_pathBindingsAreBound() throws Exception {
+        // @$v and #$i bind names for the steps that follow them.
+        Map<String, JsonataBoundFunction> fns = export("""
+                ($labels := function($a){ $a@$v#$i.($string($i) & ":" & $v) };
+                 ["labels"])""");
+        assertEquals("[\"0:a\",\"1:b\"]",
+                call(fns.get("labels"), MAPPER.readTree("[\"a\",\"b\"]")).toString());
+    }
+
+    @Test
+    void selfContained_namesSuppliedThroughOptionsAreAccepted() throws Exception {
+        JsonataLibrary lib = FACTORY.compileLibrary(
+                "($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])",
+                new JsonataLibraryOptions()
+                        .bindings(new JsonataBindings().bindValue("vatRate", num(0.2))));
+
+        assertEquals(120.0, call(lib.getFunctions().get("withVat"), num(100)).doubleValue(), 1e-9);
+    }
+
+    @Test
+    void selfContained_functionsSuppliedThroughOptionsAreAccepted() throws Exception {
+        JsonataBindings provided = new JsonataBindings().bindFunction("triple",
+                new JsonataBoundFunction() {
+                    public String getFunctionSignature() { return "<n:n>"; }
+                    public JsonNode apply(JsonataFunctionArguments args) {
+                        return MAPPER.getNodeFactory().numberNode(args.get(0).intValue() * 3);
+                    }
+                });
+
+        JsonataLibrary lib = FACTORY.compileLibrary(
+                "($f := function($x){ $triple($x) + 1 }; [\"f\"])",
+                new JsonataLibraryOptions().bindings(provided));
+
+        assertEquals(13, call(lib.getFunctions().get("f"), num(4)).intValue());
     }
 
     @Test

@@ -1,13 +1,16 @@
 package org.json_kula.jsonata_jvm;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.json_kula.jsonata_jvm.parser.Parser;
 import org.json_kula.jsonata_jvm.parser.ast.AstNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
+import org.json_kula.jsonata_jvm.translator.ScopeAnalyzer;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Turns a JSONata <em>definition expression</em> — one that binds named lambdas and returns the
@@ -97,6 +100,35 @@ final class FunctionExportRewriter {
             }
         }
         return bindings;
+    }
+
+    /**
+     * Rejects a definition that refers to a name nothing provides.
+     *
+     * <p>A definition is meant to be self-contained: whatever it uses, it either binds itself, gets
+     * from the JSONata standard library, or is handed at build time through
+     * {@link JsonataLibraryOptions#bindings}. Resolving the rest against whatever happens to be
+     * bound where an exported function is <em>called</em> would make the library's behaviour depend
+     * on its caller, and a typo indistinguishable from a deliberate hook — so it is an error here,
+     * where the name and the fix can both be named.
+     *
+     * @param root     the parsed definition
+     * @param provided names supplied at build time, without the leading {@code $}
+     */
+    static void requireSelfContained(AstNode root, Set<String> provided)
+            throws JsonataCompilationException {
+        List<String> unresolved = new ArrayList<>();
+        for (String name : ScopeAnalyzer.freeVariables(root)) {
+            if (provided.contains(name) || Parser.isBuiltin(name)) continue;
+            unresolved.add(name);
+        }
+        if (unresolved.isEmpty()) return;
+        boolean one = unresolved.size() == 1;
+        throw error("The definition expression uses $" + String.join(", $", unresolved)
+                + ", which it does not bind and which "
+                + (one ? "is not a JSONata built-in" : "are not JSONata built-ins")
+                + ". Bind " + (one ? "it" : "them") + " in the definition, or supply "
+                + (one ? "it" : "them") + " through JsonataLibraryOptions.bindings.");
     }
 
     /**

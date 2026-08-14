@@ -118,6 +118,11 @@ helper functions) stay internal but remain reachable from the exported closures,
 between exported functions works. Constants are values, not expressions: the definition runs once, at
 compile time.
 
+A definition must be self-contained. Every name it uses must be one it binds, a JSONata built-in, or
+one supplied through `JsonataLibraryOptions.bindings`; anything else fails the build
+(`FunctionExportRewriter.requireSelfContained`, using `ScopeAnalyzer.freeVariables`). Late-binding a
+free name to the calling expression would make a library depend on its caller and hide typos.
+
 How it works:
 1. `FunctionExportRewriter` binds the definition's last expression (the export list) to a synthetic
    `$__exportNames` variable and appends `{"names": $__exportNames, "functions": {...every top-level

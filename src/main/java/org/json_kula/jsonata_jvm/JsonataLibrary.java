@@ -41,10 +41,10 @@ import java.util.Map;
  *
  * <h2>Semantics worth knowing</h2>
  * <ul>
- *   <li><b>Helper bindings are captured; free variables are not.</b> A name bound inside the
- *       definition is baked into the closure. A name the definition never binds (say {@code $rate})
- *       resolves against whatever bindings are active where the function is <em>called</em>, or
- *       against the library's own definition-time bindings when it is called from plain Java.</li>
+ *   <li><b>The definition is self-contained.</b> Every name it uses must be one it binds, a JSONata
+ *       built-in, or one supplied through {@link JsonataLibraryOptions#bindings} — anything else is
+ *       rejected when the library is compiled, rather than resolved against whatever happens to be
+ *       bound where an exported function is called.</li>
  *   <li><b>The caller's evaluation is reused.</b> Called from inside an expression, an exported
  *       function shares that evaluation's recursion budget (100 nested calls) and timeout.</li>
  *   <li><b>Thread-safe.</b> The definition runs exactly once, at build time; afterwards the closure
