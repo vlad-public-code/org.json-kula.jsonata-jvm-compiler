@@ -31,8 +31,8 @@ Key facts:
   A definition is ordinary JSONata that binds names and returns the ones to export
   (`["gross", "format", "vatRate"]`); each lands in one map or the other by what it evaluated to.
   Write a set of bindings once in JSONata — recursive, mutually recursive, closing over private
-  helpers — then apply it to any expression with `getFunctions().forEach(expr::registerFunction)`
-  and `getConstants().forEach(expr::assign)`. A definition must be self-contained: a name it neither
+  helpers — then apply the whole set to any expression with `expr.useLibrary(lib)` (permanent) or
+  `new JsonataBindings().useLibrary(lib)` (per evaluation). A definition must be self-contained: a name it neither
   binds nor takes from the standard library must be supplied through
   `JsonataLibraryOptions.bindings`, or the build fails.
 - **Two exceptions:** `JsonataCompilationException` (bad expression) and `JsonataEvaluationException`

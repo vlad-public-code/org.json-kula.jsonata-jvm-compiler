@@ -26,6 +26,9 @@ import org.json_kula.jsonata_jvm.translator.Translator;
  *       {@link #assign(String, JsonNode)} or
  *       {@link #registerFunction(String, JsonataBoundFunction)}.</li>
  * </ul>
+ * Either way, {@link #useLibrary(JsonataLibrary)} and {@link JsonataBindings#useLibrary} apply
+ * everything a {@link JsonataLibrary} exports in one call.
+ * <p>
  * Permanent bindings are merged with per-evaluation bindings at call time;
  * per-evaluation values take precedence when both define the same name.
  */
@@ -91,6 +94,32 @@ public interface JsonataExpression {
      * @param fnc  the {@link JsonataBoundFunction} implementation
      */
     default void registerFunction(String name, JsonataBoundFunction fnc) {}
+
+    /**
+     * Permanently binds everything {@code library} exports — its functions as function bindings, its
+     * constants as value bindings — for all future evaluations of this instance.
+     *
+     * <p>The permanent counterpart of {@link JsonataBindings#useLibrary}, and equivalent to applying
+     * both maps by hand:
+     *
+     * <pre>{@code
+     * library.getFunctions().forEach(expr::registerFunction);
+     * library.getConstants().forEach(expr::assign);
+     * }</pre>
+     *
+     * <p>Which of the two a name belongs to is the library's business — the definition decides it by
+     * what each name evaluates to — so taking both together is almost always what a caller wants.
+     * Applying two libraries that export the same name leaves the later call's binding in place, as
+     * re-binding a name always does; a per-evaluation binding still wins over anything registered
+     * here.
+     *
+     * @param library the library to apply; its exports are copied, so later changes to it — short of
+     *                {@link JsonataLibrary#close()} — do not affect this instance
+     */
+    default void useLibrary(JsonataLibrary library) {
+        library.getFunctions().forEach(this::registerFunction);
+        library.getConstants().forEach(this::assign);
+    }
 
     /**
      * Sets a wall-clock timeout for all future evaluations on this instance.

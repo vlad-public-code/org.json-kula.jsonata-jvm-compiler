@@ -283,17 +283,16 @@ Each exported name lands in one map or the other according to **what it evaluate
 
 ### Providing bindings from a library
 
-The two maps are shaped for the binding API. Keys never carry the `$`, so they drop straight in:
+`useLibrary` applies a whole library, functions and constants together, so the caller never has to
+know which name is which. On the expression it is permanent, for the lifetime of that instance:
 
 ```java
 JsonataExpression invoice = factory.compile("lines.$gross(amount) ~> $sum() ~> $format()");
 
-billing.getFunctions().forEach(invoice::registerFunction);   // permanent bindings
-billing.getConstants().forEach(invoice::assign);
+invoice.useLibrary(billing);
 ```
 
-or per evaluation, when different calls need different libraries — `useLibrary` applies a whole
-library, functions and constants together, so the caller never has to know which name is which:
+or per evaluation, when different calls need different libraries:
 
 ```java
 JsonataBindings bindings = new JsonataBindings()
@@ -321,8 +320,7 @@ Applying a library to every expression in an application is one line each:
 
 ```java
 for (JsonataExpression expr : factory.compileAll(expressions)) {
-    billing.getFunctions().forEach(expr::registerFunction);
-    billing.getConstants().forEach(expr::assign);
+    expr.useLibrary(billing);
 }
 ```
 

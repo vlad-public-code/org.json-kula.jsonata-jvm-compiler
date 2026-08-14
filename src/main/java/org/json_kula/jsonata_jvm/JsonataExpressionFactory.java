@@ -204,8 +204,7 @@ public class JsonataExpressionFactory {
      *         """);
      *
      * JsonataExpression expr = factory.compile("angles.$sin($) * $pi");
-     * trig.getFunctions().forEach(expr::registerFunction);
-     * trig.getConstants().forEach(expr::assign);
+     * expr.useLibrary(trig);
      * }</pre>
      *
      * <p>The definition is compiled and evaluated once, here. Each exported name goes to

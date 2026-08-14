@@ -35,6 +35,7 @@ import java.util.Map;
  * JsonataLibrary trig = factory.compileLibrary(definition);
  *
  * JsonataExpression report = factory.compile("angles.$sin($) * $pi");
+ * report.useLibrary(trig);   // or the two maps by hand:
  * trig.getFunctions().forEach(report::registerFunction);
  * trig.getConstants().forEach(report::assign);
  * }</pre>
@@ -98,7 +99,9 @@ public final class JsonataLibrary implements AutoCloseable {
     /**
      * Returns the exported functions, keyed by name <b>without</b> the leading {@code $}, in the
      * order the definition listed them. Immutable, and ready for
-     * {@link JsonataBindings#bindFunctions} or {@link JsonataExpression#registerFunction}.
+     * {@link JsonataBindings#bindFunctions} or {@link JsonataExpression#registerFunction} — though
+     * {@link JsonataExpression#useLibrary} and {@link JsonataBindings#useLibrary} take this map and
+     * {@link #getConstants()} together.
      */
     public Map<String, JsonataBoundFunction> getFunctions() {
         return functionsView;
