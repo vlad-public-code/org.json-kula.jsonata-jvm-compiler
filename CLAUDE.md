@@ -30,7 +30,9 @@ Stack:
     node types rather than specially-prefixed strings, so no input document can be mistaken for one,
     and a function value stays callable for as long as something references it (there is no registry
     and no expiry). `PreservedNode` is the internal "do not flatten this element" marker used by
-    nested array constructors.
+    nested array constructors. `BoundFunctionValue` adapts a `JsonataBoundFunction` to a function
+    value and back — the mirror of `ExportedJsonataFunction`, which adapts a function value to a
+    `JsonataBoundFunction`.
   - `JsonataLambda` — single-argument functional interface (`JsonNode apply(JsonNode) throws JsonataEvaluationException`) used for predicates, map/filter callbacks, and inline lambdas.
   - `org.json_kula.jsonata_jvm.runtime.datetime` — date/time subsystem (`IsoConverter`, `TimezoneUtils`, `RomanNumerals`, `WordNumbers`, `PictureFormatter`, `PictureParser`); `DateTimeUtils` in `runtime` is a thin facade over this package. See [docs/datetime.md](docs/datetime.md) for the full reference.
   - `org.json_kula.jsonata_jvm.runtime.numeric` — numeric built-ins (`NumericBuiltins`, `DecimalPicture`, `IntegerPicture`, `EnglishWords`); `JsonataRuntime` delegates to `NumericBuiltins` for all `$number`, `$round`, `$random`, `$formatBase`, `$formatNumber`, `$formatInteger`, `$parseInteger` calls. See [docs/numeric.md](docs/numeric.md) for the full reference.
@@ -62,6 +64,18 @@ Named functions is a map where key is a string and value is instance of JsonataB
 To bind a value permanently use a method JsonataExpression.assign(String name, JsonNode value).
 To bind a function permanently use a method JsonataExpression.registerFunction(String name, JsonataBoundFunction fnc).
 
+Functions cross the binding boundary in both directions, as call targets and as values:
+- A bound function referenced as `$name` (no call) resolves to a function value — `EvaluationContext.resolveBinding`
+  falls back to the functions map and wraps the entry via `BoundFunctionValue.of`. That is what lets a bound
+  function, and therefore a JsonataLibrary export, be passed to `$map`, piped through `~>`, or handed to another
+  bound function.
+- A bound *value* that is a function (`JsonataRuntime.lambdaNode(...)` passed to `bindValue`) is callable as
+  `$name(...)` — `EvaluationContext.callBoundFunction` falls back to the values map.
+- Whichever map matches the position wins: values for `$name`, functions for `$name(...)`.
+- The arity of a bound function used as a value comes from its signature's parameter count
+  (`FunctionSignature.arityOf`); a signature that leaves it open — absent, unparseable or variadic — yields a
+  one-argument function value, because a packed argument tuple is indistinguishable from a single array argument.
+
 Interface JsonataBoundFunction contains two methods:
 1. getFunctionSignature() which returns a string describing arguments types.
 2. apply(JsonataFunctionArguments) which returns JsonNode representing a result of the function.
@@ -78,20 +92,21 @@ l - null
 Complex types:
 a - array
 o - object
-
-Type "f" which is for "function" is not supported in this library.
+f - function; an argument that is not a function value is rejected with T0410
 
 Union types:
 `(sao)` - string, array or object
 `(o)` - same as `o`
 `u` - equivalent to `(bnsl)` i.e. Boolean, number, string or null
-`j` - any JSON type. Equivalent to `(bnsloa)` i.e. Boolean, number, string, null, object or array, but not function
-
-Type "x" which is for "bnsloaf" is not supported in this library.
+`j` - any JSON type. Equivalent to `(bnsloa)` i.e. Boolean, number, string, null, object or array. The spec
+excludes functions from `j`; this library does not enforce that — declare `f` where a function is required.
+`x` - any type at all, equivalent to `(bnsloaf)`; accepted without any check
 
 Parametrised types:
 * `a<s>` - array of strings
 * `a<x>` - array of values of any type
+* `f<n:n>` - a function from number to number. The argument must be a function; its own parameter and
+  return types are not checked (jsonata-js does not check them either).
 
 Each type symbol may also have options applied.
 `+` - one or more arguments of this type. E.g. $zip has signature `<a+>`; it accepts one array, or two arrays, or three arrays, or...

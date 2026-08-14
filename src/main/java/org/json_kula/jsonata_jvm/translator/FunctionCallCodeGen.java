@@ -666,10 +666,11 @@ final class FunctionCallCodeGen {
                 while (j < inner.length() && "+-?".indexOf(inner.charAt(j)) >= 0) { mod.append(inner.charAt(j++)); }
                 result.add(union + mod);
                 i = j;
-            } else if (c == 'a' || c == 'o' || c == 'b' || c == 'n' || c == 's' || c == 'l' || c == 'j' || c == 'u') {
+            } else if (c == 'a' || c == 'o' || c == 'b' || c == 'n' || c == 's' || c == 'l'
+                    || c == 'j' || c == 'u' || c == 'f' || c == 'x') {
                 StringBuilder spec = new StringBuilder(String.valueOf(c));
                 i++;
-                // Array type param: a<n>
+                // Array or function type param: a<n>, f<n:n>
                 if (i < inner.length() && inner.charAt(i) == '<') {
                     int j = i + 1;
                     int d = 1;
@@ -689,9 +690,9 @@ final class FunctionCallCodeGen {
                 result.add("-");
                 i++;
             } else {
-                // Unknown type char (e.g. 'f' for function — not supported).
-                // Skip any trailing angle-bracket type param so that e.g. f<n:n>
-                // is consumed entirely and the 'n' inside is not parsed as a spec.
+                // Unknown type char. Skipping it without adding a spec would shift every later
+                // spec onto the wrong parameter, so this stays a last resort for genuinely
+                // unrecognised syntax. Skip any trailing angle-bracket type param with it.
                 i++;
                 if (i < inner.length() && inner.charAt(i) == '<') {
                     int j = i + 1, d = 1;
@@ -726,7 +727,13 @@ final class FunctionCallCodeGen {
             if (base.equals("n") || base.equals("s") || base.equals("b")) return null;
         }
         String guard = focus ? "if (!" + paramVar + ".isMissingNode()) " : "";
-        if (base.equals("n")) {
+        if (base.charAt(0) == 'f') {
+            // "f" and its parametrised form "f<n:n>": the argument must be a function value. The
+            // argument function's own parameter and return types are not checked, matching jsonata-js.
+            return guard + "if (!" + paramVar + ".isMissingNode() && !isLambdaToken(" + paramVar + ")) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a function\");";
+        } else if (base.equals("x")) {
+            return null;   // any type at all, functions included — nothing to check
+        } else if (base.equals("n")) {
             return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isNumber()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a number\");";
         } else if (base.equals("s")) {
             return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isTextual()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a string\");";

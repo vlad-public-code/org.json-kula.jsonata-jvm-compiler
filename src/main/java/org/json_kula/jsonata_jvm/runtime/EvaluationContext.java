@@ -3,11 +3,7 @@ package org.json_kula.jsonata_jvm.runtime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataBoundFunction;
-import org.json_kula.jsonata_jvm.JsonataEvaluationException;
-import org.json_kula.jsonata_jvm.JsonataFunctionArguments;
 
-import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -213,6 +209,16 @@ final class EvaluationContext {
     /**
      * Resolves a named value from the active bindings.
      *
+     * <p>A name bound as a <em>function</em> resolves to a function value, so {@code $myFn} can be
+     * passed to {@code $map}, piped through {@code ~>}, or handed to another bound function — the
+     * same things a JSONata-defined function can do. Without this a bound function was callable and
+     * nothing else, which also made a function exported by {@code compileLibrary} unusable as an
+     * argument, since library exports are registered as bound functions.
+     *
+     * <p>The values map wins if a name appears in both: {@code $name} in value position asks for a
+     * value. (The call site {@code $name(...)} resolves the other way round — see
+     * {@link #callBoundFunction}.)
+     *
      * @param name the variable name (without the leading {@code $})
      * @return the bound {@link JsonNode}, or {@link JsonataRuntime#MISSING} if not bound
      */
@@ -220,30 +226,34 @@ final class EvaluationContext {
         EvalState s = CURRENT.get();
         if (!s.active) return JsonataRuntime.MISSING;
         JsonNode v = s.bindings.getValue(name);
-        return v != null ? v : JsonataRuntime.MISSING;
+        if (v != null) return v;
+        JsonataBoundFunction fn = s.bindings.getFunction(name);
+        if (fn != null) return BoundFunctionValue.of(name, fn);
+        return JsonataRuntime.MISSING;
     }
 
     /**
      * Calls a named function from the active bindings.
      *
+     * <p>Falls back to the values map when no function is bound under {@code name}: a value that is
+     * a function — bound directly, or returned by an expression that was bound — is callable as
+     * {@code $name(...)}, not only usable as an argument. The equivalent one-line rebind
+     * ({@code $g := $name; $g(...)}) has always worked, so refusing the direct call was an
+     * arbitrary distinction rather than a safeguard.
+     *
      * @param name the function name (without the leading {@code $})
      * @param args the arguments to pass
-     * @return the function result, or {@link JsonataRuntime#MISSING} if no function is bound to {@code name}
-     * @throws RuntimeEvaluationException if the function throws
+     * @return the function result
+     * @throws RuntimeEvaluationException if the function throws, or nothing callable is bound
      */
     static JsonNode callBoundFunction(String name, JsonNode[] args) throws RuntimeEvaluationException {
         EvalState s = CURRENT.get();
         if (s.active) {
             JsonataBoundFunction fn = s.bindings.getFunction(name);
-            if (fn != null) {
-                List<JsonNode> coerced = FunctionSignature.coerce(
-                        fn.getFunctionSignature(), Arrays.asList(args));
-                try {
-                    return fn.apply(new JsonataFunctionArguments(coerced));
-                } catch (JsonataEvaluationException e) {
-                    throw new RuntimeEvaluationException(e.getErrorCode(), "Error calling bound function", e);
-                }
-            }
+            if (fn != null) return BoundFunctionValue.call(name, fn, args);
+
+            JsonNode value = s.bindings.getValue(name);
+            if (LambdaRegistry.isLambdaToken(value)) return BoundFunctionValue.apply(value, args);
         }
         throw new RuntimeEvaluationException("T1006", "The function '" + name + "' is not defined");
     }

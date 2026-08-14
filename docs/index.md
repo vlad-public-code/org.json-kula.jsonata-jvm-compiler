@@ -98,11 +98,10 @@ try {
 
 ## JSONata language features
 
-The library implements all JSONata language features except:
-- a function as an argument of a bound function
-- a function as a bound value
-
----
+The library implements all JSONata language features, functions as first-class values included: a
+function can be stored in a variable, put in an array or object, passed to and returned from another
+function, and carried across the binding boundary in either direction — see
+[Functions as values](#functions-as-values).
 
 ## Bindings
 
@@ -160,6 +159,44 @@ Permanent bindings are isolated per instance — assigning to one `JsonataExpres
 
 When both a permanent binding and a per-evaluation binding exist for the same name, the **per-evaluation binding wins**.
 
+### Functions as values
+
+A bound function is not only callable — `$name` on its own is a **function value**, so it can be
+passed to a higher-order built-in, piped through `~>`, or handed to another bound function:
+
+```java
+JsonataBindings bindings = new JsonataBindings().bindFunction("double", doubler);
+
+factory.compile("$map([1,2,3], $double)").evaluate(input, bindings);   // → [2, 4, 6]
+factory.compile("5 ~> $double").evaluate(input, bindings);             // → 10
+factory.compile("$type($double)").evaluate(input, bindings);           // → "function"
+```
+
+This is what makes a [library](#jsonata-libraries) export usable as an argument as well as a call
+target, since exports are supplied through `registerFunction`.
+
+The reverse also holds: a function *value* can be bound with `bindValue` and called by name.
+`JsonataRuntime.lambdaNode` builds one from a Java lambda, with the number of parameters it takes:
+
+```java
+JsonNode timesTen = JsonataRuntime.lambdaNode(x -> new DoubleNode(x.doubleValue() * 10), 1);
+
+JsonataBindings bindings = new JsonataBindings().bindValue("f", timesTen);
+
+factory.compile("$f(3)").evaluate(input, bindings);          // → 30
+factory.compile("$map([1,2], $f)").evaluate(input, bindings); // → [10, 20]
+```
+
+Both maps are consulted, and the one that matches the position wins: `$name` in value position
+prefers a value binding, `$name(...)` at a call site prefers a function binding.
+
+**Arity.** How many arguments reach a bound function used as a value is decided by its declared
+signature — `<nn:b>` makes a two-argument function, so `$sort([2,3,1], $desc)` receives a comparator
+pair and `$map` supplies the index. A signature that does not pin the arity down (absent,
+unparseable, or variadic) yields a one-argument function value. This is the same limitation
+hand-written JSONata lambdas have: a packed argument tuple is an array, and so is a single array
+argument. Declare a fixed arity to receive several arguments.
+
 ### Implementing JsonataBoundFunction
 
 `JsonataBoundFunction` has two methods:
@@ -190,11 +227,19 @@ The signature has the form `<params:return>` where `params` is a sequence of typ
 |---|---|
 | `a` | array |
 | `o` | object |
+| `f` | function |
 | `j` | any JSON type — equivalent to `(bnsloa)` |
 | `u` | Boolean, number, string, or null — equivalent to `(bnsl)` |
+| `x` | any type at all, functions included — equivalent to `(bnsloaf)` |
 | `(sao)` | union: string, array, or object |
 
-**Parametrised array types**: `a<s>` (array of strings), `a<x>` (array of any type).
+**Parametrised types**: `a<s>` (array of strings), `a<x>` (array of any type), `f<n:n>` (a function
+from number to number). A parametrised `f` requires a function, but the argument function's own
+parameter and return types are not checked — jsonata-js does not check them either.
+
+An argument declared `f` that is not a function is rejected with `T0410`. Note that `j` is documented
+by the JSONata spec as *excluding* functions but does not reject one here; declare `f` when you
+require a function.
 
 **Option modifiers** appended to a type symbol:
 
