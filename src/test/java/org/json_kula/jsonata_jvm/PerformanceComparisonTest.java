@@ -28,6 +28,22 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>The expression ({@code benchmark_expression.jsonata}) and the input document
  * ({@code benchmark_input.json}) live in {@code src/test/resources}.
+ *
+ * <h2>Running it</h2>
+ *
+ * <p>{@code @Disabled} keeps this out of a normal build, and JUnit honours that even when the class
+ * is named with {@code -Dtest=} — selecting it on its own reports success without running anything.
+ * Switch the condition off to actually run it, and pass that inside {@code argLine} so it reaches
+ * the forked JVM: a bare {@code -D} stays with the Maven JVM and has no effect on the tests.
+ *
+ * <pre>
+ *   mvn test -Dtest=PerformanceComparisonTest
+ *       -DargLine="-Djunit.jupiter.conditions.deactivate=org.junit.jupiter.engine.extension.DisabledCondition"
+ * </pre>
+ *
+ * <p>Take the figures from {@code benchmark_comparison_sideBy_side}, which warms up and times both
+ * libraries in one JVM; the per-library tests run in whichever order JUnit picks and are more
+ * exposed to JIT and GC ordering.
  */
 @Disabled("Please start it manually since it takes several minutes to measure performance")
 class PerformanceComparisonTest {

@@ -55,6 +55,34 @@ class FunctionSignatureTest {
     }
 
     @Test
+    void parseParams_functionType() {
+        var p = FunctionSignature.parseParams("<fn:n>");
+        assertNotNull(p, "'f' must be a recognised type symbol, not a parse failure");
+        assertEquals(2, p.size(), "'f' must occupy a parameter position of its own");
+        assertEquals("f", p.get(0).type());
+        assertEquals("n", p.get(1).type());
+    }
+
+    @Test
+    void parseParams_parametrisedFunctionType_consumedWhole() {
+        // The nested "<n:n>" must not be mistaken for further parameter specs.
+        var p = FunctionSignature.parseParams("<f<n:n>s:n>");
+        assertNotNull(p);
+        assertEquals(2, p.size());
+        assertEquals("f<n:n>", p.get(0).type());
+        assertEquals("s", p.get(1).type());
+    }
+
+    @Test
+    void parseParams_nestedArrayType_consumedWhole() {
+        var p = FunctionSignature.parseParams("<a<a<n>>s:n>");
+        assertNotNull(p);
+        assertEquals(2, p.size());
+        assertEquals("a<a<n>>", p.get(0).type());
+        assertEquals("s", p.get(1).type());
+    }
+
+    @Test
     void parseParams_optionalModifier() {
         var p = FunctionSignature.parseParams("<s?:s>");
         assertNotNull(p);
@@ -332,6 +360,57 @@ class FunctionSignatureTest {
 
         JsonNode result = expr.evaluate(JsonNodeTestHelper.parseJson("{\"val\": \"7\"}"), b);
         assertEquals(14.0, result.doubleValue(), 1e-9);
+    }
+
+    // =========================================================================
+    // Function type "f" — coercion and arity
+    // =========================================================================
+
+    @Test
+    void coerce_functionType_acceptsFunctionValue() throws Exception {
+        JsonNode fn = JsonataRuntime.lambdaNode(x -> x, 1);
+        assertEquals(List.of(fn), FunctionSignature.coerce("<f:j>", List.of(fn)));
+    }
+
+    @Test
+    void coerce_functionType_rejectsNonFunction() {
+        RuntimeEvaluationException e = assertThrows(RuntimeEvaluationException.class,
+                () -> FunctionSignature.coerce("<f:j>", List.of(IntNode.valueOf(1))));
+        assertEquals("T0410", e.getErrorCode());
+    }
+
+    @Test
+    void coerce_parametrisedFunctionType_checksOnlyThatItIsAFunction() throws Exception {
+        JsonNode fn = JsonataRuntime.lambdaNode(x -> x, 1);
+        assertEquals(List.of(fn), FunctionSignature.coerce("<f<s:s>:j>", List.of(fn)));
+        assertThrows(RuntimeEvaluationException.class,
+                () -> FunctionSignature.coerce("<f<s:s>:j>", List.of(TextNode.valueOf("x"))));
+    }
+
+    @Test
+    void coerce_functionType_doesNotSuppressLaterParams() throws Exception {
+        // An unparseable signature is passed over entirely, so an unrecognised "f" used to switch
+        // off coercion for every other parameter as well.
+        JsonNode fn = JsonataRuntime.lambdaNode(x -> x, 1);
+        List<JsonNode> coerced = FunctionSignature.coerce("<fn:n>", List.of(fn, TextNode.valueOf("5")));
+        assertTrue(coerced.get(1).isNumber(), "the n parameter should have been coerced");
+    }
+
+    @Test
+    void arityOf_countsDeclaredParameters() {
+        assertEquals(0, FunctionSignature.arityOf("<:n>"));
+        assertEquals(1, FunctionSignature.arityOf("<n:n>"));
+        assertEquals(2, FunctionSignature.arityOf("<fn:n>"));
+        assertEquals(2, FunctionSignature.arityOf("<n?n?:n>"));
+        assertEquals(1, FunctionSignature.arityOf("<s-:n>"));
+    }
+
+    @Test
+    void arityOf_unknownWhenSignatureDoesNotPinItDown() {
+        assertEquals(LambdaNode.UNKNOWN_ARITY, FunctionSignature.arityOf(null));
+        assertEquals(LambdaNode.UNKNOWN_ARITY, FunctionSignature.arityOf("nonsense"));
+        assertEquals(LambdaNode.UNKNOWN_ARITY, FunctionSignature.arityOf("<a+:a>"),
+                "a variadic spec covers any number of positions");
     }
 
     @Test

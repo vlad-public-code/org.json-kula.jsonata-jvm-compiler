@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.JsonNode;
  * <ul>
  *   <li>{@code a} — array</li>
  *   <li>{@code o} — object</li>
+ *   <li>{@code f} — function; an argument that is not one is rejected with {@code T0410}</li>
  * </ul>
  *
  * <h3>Union types</h3>
@@ -30,12 +31,15 @@ import com.fasterxml.jackson.databind.JsonNode;
  *   <li>{@code (sao)} — string, array, or object</li>
  *   <li>{@code u} — equivalent to {@code (bnsl)}: Boolean, number, string, or null</li>
  *   <li>{@code j} — any JSON type: equivalent to {@code (bnsloa)}</li>
+ *   <li>{@code x} — any type at all: equivalent to {@code (bnsloaf)}</li>
  * </ul>
  *
  * <h3>Parametrised types</h3>
  * <ul>
  *   <li>{@code a<s>} — array of strings</li>
  *   <li>{@code a<x>} — array of values of any type</li>
+ *   <li>{@code f<n:n>} — a function from number to number. The argument must be a function; its own
+ *       parameter and return types are not checked (nor are they in jsonata-js).</li>
  * </ul>
  *
  * <h3>Option modifiers</h3>
@@ -48,8 +52,16 @@ import com.fasterxml.jackson.databind.JsonNode;
  * <p>Example: {@code $length} has signature {@code <s-:n>} — accepts a string
  * (using context as focus if omitted) and returns a number.
  *
- * <p>Note: type {@code f} (function) and type {@code x} ({@code bnsloaf}) are
- * not supported in this library.
+ * <p>Note: {@code j} is documented by the JSONata spec as excluding functions, but does not reject
+ * one here. Declare {@code f} where a function is required.
+ *
+ * <h2>Functions as values</h2>
+ *
+ * <p>A bound function is also a value: {@code $name} without a call resolves to a function value, so
+ * it can be passed to {@code $map}, piped through {@code ~>}, or handed to another bound function.
+ * How many arguments reach it that way is taken from the parameter count of its signature, so a
+ * signature that leaves the arity open — absent, unparseable, or variadic — yields a one-argument
+ * function value.
  */
 public interface JsonataBoundFunction {
 

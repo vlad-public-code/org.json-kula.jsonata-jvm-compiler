@@ -15,6 +15,42 @@ final class GenState {
     final StringBuilder localDeclarations = new StringBuilder();
 
     /**
+     * Literal nodes hoisted to static fields, keyed by the Java expression that builds them.
+     *
+     * <p>A literal inside a predicate or a lambda is evaluated once per element per evaluation:
+     * {@code employees[level = "senior"]} allocated a fresh {@code TextNode} for every employee,
+     * every time. Value nodes are immutable, so one instance per class serves every evaluation on
+     * every thread.
+     */
+    private final Map<String, String> constants = new java.util.LinkedHashMap<>();
+
+    /** Returns the field name holding {@code javaExpression}, creating the field if needed. */
+    String constant(String javaExpression) {
+        return constants.computeIfAbsent(javaExpression, e -> "__const" + constants.size());
+    }
+
+    /** Key arrays of object constructors, hoisted for the same reason as literal nodes. */
+    private final Map<String, String> keyArrays = new java.util.LinkedHashMap<>();
+
+    /** Returns the field name holding the given {@code String[]} initialiser. */
+    String keyArray(String javaInitialiser) {
+        return keyArrays.computeIfAbsent(javaInitialiser, e -> "__keys" + keyArrays.size());
+    }
+
+    /** Emits the static field declarations for every hoisted literal and key array. */
+    String constantDeclarations() {
+        if (constants.isEmpty() && keyArrays.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        constants.forEach((expression, field) ->
+                sb.append("    private static final JsonNode ").append(field)
+                  .append(" = ").append(expression).append(";\n"));
+        keyArrays.forEach((initialiser, field) ->
+                sb.append("    private static final String[] ").append(field)
+                  .append(" = ").append(initialiser).append(";\n"));
+        return sb.toString();
+    }
+
+    /**
      * Stack of locally-bound variable name sets, one entry per active scope
      * (block or lambda body). Used by {@link #isLocal} to decide whether a
      * {@code VariableRef} should resolve to a Java local variable or to a

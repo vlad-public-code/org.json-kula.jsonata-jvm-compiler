@@ -5,7 +5,7 @@
 
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **over 25× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -25,7 +25,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
 </dependency>
 ```
 
@@ -49,7 +49,7 @@ List<JsonataExpression> exprs = factory.compileAll(List.of(
         "status = \"active\""));
 ```
 
-`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — on the order of **10–16× for 20 expressions** in the project's own benchmark. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
+`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — **around 10× for 20 expressions** in the project's own benchmark (`JsonataBatchCompilationPerfTest`). The saving is one fixed `javac` cost per batch instead of one per expression, so how large it is depends on how many expressions the batch holds. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
 
 ### 3. Evaluate against JSON
 
@@ -90,9 +90,10 @@ try {
 
 ## JSONata language features
 
-The library implements all JSONata language features except:
-- a function as an argument of a bound function
-- a function as a bound value
+The library implements all JSONata language features, functions as first-class values included: a
+function can be stored in a variable, put in an array or object, passed to and returned from another
+function, and carried across the binding boundary in either direction — see
+[Functions as values](#functions-as-values).
 
 ## Bindings
 
@@ -150,6 +151,44 @@ Permanent bindings are isolated per instance — assigning to one `JsonataExpres
 
 When both a permanent binding and a per-evaluation binding exist for the same name, the **per-evaluation binding wins**.
 
+### Functions as values
+
+A bound function is not only callable — `$name` on its own is a **function value**, so it can be
+passed to a higher-order built-in, piped through `~>`, or handed to another bound function:
+
+```java
+JsonataBindings bindings = new JsonataBindings().bindFunction("double", doubler);
+
+factory.compile("$map([1,2,3], $double)").evaluate(input, bindings);   // → [2, 4, 6]
+factory.compile("5 ~> $double").evaluate(input, bindings);             // → 10
+factory.compile("$type($double)").evaluate(input, bindings);           // → "function"
+```
+
+This is what makes a [library](#jsonata-libraries) export usable as an argument as well as a call
+target, since exports are supplied through `registerFunction`.
+
+The reverse also holds: a function *value* can be bound with `bindValue` and called by name.
+`JsonataRuntime.lambdaNode` builds one from a Java lambda, with the number of parameters it takes:
+
+```java
+JsonNode timesTen = JsonataRuntime.lambdaNode(x -> new DoubleNode(x.doubleValue() * 10), 1);
+
+JsonataBindings bindings = new JsonataBindings().bindValue("f", timesTen);
+
+factory.compile("$f(3)").evaluate(input, bindings);          // → 30
+factory.compile("$map([1,2], $f)").evaluate(input, bindings); // → [10, 20]
+```
+
+Both maps are consulted, and the one that matches the position wins: `$name` in value position
+prefers a value binding, `$name(...)` at a call site prefers a function binding.
+
+**Arity.** How many arguments reach a bound function used as a value is decided by its declared
+signature — `<nn:b>` makes a two-argument function, so `$sort([2,3,1], $desc)` receives a comparator
+pair and `$map` supplies the index. A signature that does not pin the arity down (absent,
+unparseable, or variadic) yields a one-argument function value. This is the same limitation
+hand-written JSONata lambdas have: a packed argument tuple is an array, and so is a single array
+argument. Declare a fixed arity to receive several arguments.
+
 ### Implementing JsonataBoundFunction
 
 `JsonataBoundFunction` has two methods:
@@ -180,11 +219,19 @@ The signature has the form `<params:return>` where `params` is a sequence of typ
 |---|---|
 | `a` | array |
 | `o` | object |
+| `f` | function |
 | `j` | any JSON type — equivalent to `(bnsloa)` |
 | `u` | Boolean, number, string, or null — equivalent to `(bnsl)` |
+| `x` | any type at all, functions included — equivalent to `(bnsloaf)` |
 | `(sao)` | union: string, array, or object |
 
-**Parametrised array types**: `a<s>` (array of strings), `a<x>` (array of any type).
+**Parametrised types**: `a<s>` (array of strings), `a<x>` (array of any type), `f<n:n>` (a function
+from number to number). A parametrised `f` requires a function, but the argument function's own
+parameter and return types are not checked — jsonata-js does not check them either.
+
+An argument declared `f` that is not a function is rejected with `T0410`. Note that `j` is documented
+by the JSONata spec as *excluding* functions but does not reject one here; declare `f` when you
+require a function.
 
 **Option modifiers** appended to a type symbol:
 
@@ -195,6 +242,167 @@ The signature has the form `<params:return>` where `params` is a sequence of typ
 | `-` | Use the context value ("focus") if the argument is missing |
 
 Example: `$length` has signature `<s-:n>` — accepts a string (using context as focus if omitted) and returns a number.
+
+## JSONata libraries
+
+The bindings above are written in Java: a `JsonataBoundFunction` per function, an `assign` per value, repeated for every expression that needs them. A **library** is the same set of bindings written in JSONata instead — once, in one file — and applied to any expression that needs it.
+
+A library is nothing more than a **definition expression**: ordinary JSONata that binds names and returns the names to export.
+
+```
+(
+  $vatRate := 0.2;
+  $round2  := function($n){ $round($n, 2) };
+  $gross   := function($net){ $round2($net * (1 + $vatRate)) };
+  $format  := function($n){ "£" & $string($round2($n)) };
+
+  ["gross", "format", "vatRate"]
+)
+```
+
+That is a complete, valid JSONata expression. Evaluate it in any JSONata engine and it returns `["gross", "format", "vatRate"]` — the export list *is* the expression's result, not a parameter passed from Java. So a definition file can be linted, tested and run by tools that know nothing about this library, and it states its own interface: nothing outside it decides what it provides.
+
+```java
+JsonataLibrary billing = factory.compileLibrary(definition);
+
+billing.getFunctions();   // Map<String, JsonataBoundFunction> — gross, format
+billing.getConstants();   // Map<String, JsonNode>             — vatRate
+```
+
+Each exported name lands in one map or the other according to **what it evaluated to** — the definition never says which is which. Names it binds but does not export (`$round2` here) stay private, while remaining reachable from the exported functions.
+
+### Providing bindings from a library
+
+The two maps are shaped for the binding API. Keys never carry the `$`, so they drop straight in:
+
+```java
+JsonataExpression invoice = factory.compile("lines.$gross(amount) ~> $sum() ~> $format()");
+
+billing.getFunctions().forEach(invoice::registerFunction);   // permanent bindings
+billing.getConstants().forEach(invoice::assign);
+```
+
+or per evaluation, when different calls need different libraries — `useLibrary` applies a whole
+library, functions and constants together, so the caller never has to know which name is which:
+
+```java
+JsonataBindings bindings = new JsonataBindings()
+        .useLibrary(billing);
+
+invoice.evaluate(input, bindings);
+```
+
+It returns the same `JsonataBindings`, so libraries and one-off bindings compose in a single
+expression:
+
+```java
+JsonataBindings bindings = new JsonataBindings()
+        .useLibrary(billing)
+        .useLibrary(formatting)
+        .bindValue("today", today);
+```
+
+Applying two libraries that export the same name leaves the later one in place, exactly as re-binding
+a name always does.
+
+Either way the expression sees `$gross(...)`, `$format(...)` and `$vatRate` exactly as if they had been written in Java — the precedence rules above apply unchanged, so a per-evaluation binding still wins over a library one registered permanently.
+
+Applying a library to every expression in an application is one line each:
+
+```java
+for (JsonataExpression expr : factory.compileAll(expressions)) {
+    billing.getFunctions().forEach(expr::registerFunction);
+    billing.getConstants().forEach(expr::assign);
+}
+```
+
+### What a definition can contain
+
+Anything JSONata can express. Exported functions may be recursive, mutually recursive, closures over private helpers, `λ`-notation, functions returned by other functions, `~>` chains, or partial applications:
+
+```
+(
+  $pi := 3.1415926535897932384626;
+
+  /* private helpers — not exported, still reachable */
+  $product   := function($a, $b) { $a * $b };
+  $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
+
+  $sin := function($x){ $cos($x - $pi/2) };
+  $cos := function($x){
+    $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
+      $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
+  };
+
+  ["sin", "cos", "pi"]
+)
+```
+
+Constants are values, not expressions: the definition runs **once**, when the library is compiled, so `$total := $sum([1..10])` exports the number `55`. Functions, by contrast, run whenever they are called.
+
+The export list is itself an expression — `["sin", "cos"]` is the usual form, a single `"sin"` works, and so does a list computed at definition time. A definition that forgets its export list ends on its last binding and therefore returns a *function*; that is rejected with `must return an array of function names`.
+
+Exported functions can also be called straight from Java, with no expression involved:
+
+```java
+JsonataBoundFunction gross = billing.getFunctions().get("gross");
+JsonNode result = gross.apply(new JsonataFunctionArguments(List.of(DoubleNode.valueOf(100))));
+```
+
+### Signatures
+
+Each exported function reports a JSONata signature:
+
+| Definition | Reported signature |
+|---|---|
+| `$twice := function($x)<n:n>{ $x * 2 }` | `<n:n>` — the declared one |
+| `$volume := function($l, $w, $h){ ... }` | `<j?j?j?:j>` — synthesised, all-optional |
+| `$normalize := $uppercase ~> $trim` | none — arity known only at call time |
+
+The synthesised form is deliberately permissive: JSONata lets a lambda be called with fewer arguments than it declares (the rest are *undefined*), and `j` applies no coercion — so an exported function accepts exactly what the same function accepts inside JSONata. Ask for something stricter with a signature override:
+
+```java
+JsonataLibrary lib = factory.compileLibrary(definition,
+        new JsonataLibraryOptions().signature("$gross", "<n:n>"));
+
+// "<n:n>" coerces at the boundary: $gross("100") works
+```
+
+### Lifetime and options
+
+A library owns one generated class, so build it once at startup and keep it — the same advice as `compile()`. Exported functions are thread-safe and may be called concurrently.
+
+`JsonataLibrary` is `AutoCloseable`; `close()` retires the exported functions (calling one afterwards throws `JsonataEvaluationException`), which is only worth doing when the lifetime should be explicit. Constants keep working — they are ordinary nodes. Letting the library become unreachable releases everything.
+
+`JsonataLibraryOptions` also carries the document the definition is evaluated against (`input`, for a definition that reads from data) and the bindings visible while it runs (`bindings`).
+
+### A definition must be self-contained
+
+Every name a definition uses has to come from somewhere it controls: a name it binds itself, a JSONata built-in, or a name handed to it at build time. Anything else is rejected when the library is compiled:
+
+```
+($withVat := function($net){ $net * (1 + $vatRate) }; ["withVat"])
+
+→ JsonataCompilationException: The definition expression uses $vatRate, which it does not bind
+  and which is not a JSONata built-in. Bind it in the definition, or supply it through
+  JsonataLibraryOptions.bindings.
+```
+
+The alternative — resolving `$vatRate` against whatever happens to be bound where `$withVat` is *called* — would make a library's behaviour depend on its caller, and would make a typo (`$rat` for `$rate`) indistinguishable from a deliberate hook. Failing at build time names both the problem and the fix.
+
+To parameterise a library, supply the values when you build it:
+
+```java
+JsonataLibrary lib = factory.compileLibrary(definition,
+        new JsonataLibraryOptions().bindings(
+                new JsonataBindings().bindValue("vatRate", rate)));
+```
+
+Those names are then in scope for the definition, and are captured by the functions it exports.
+
+Lambda parameters, bindings inside nested blocks, forward references between siblings (mutual recursion), and path bindings (`@$v`, `#$i`) all count as bound — only genuinely unresolvable names are reported.
+
+One further semantic worth knowing: **the caller's evaluation is reused.** Called from inside an expression, an exported function shares that evaluation's recursion budget (100 nested calls) and its `setTimeout` deadline.
 
 ## Advanced usage
 
@@ -257,22 +465,26 @@ jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated ev
 ### Benchmark: [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) vs [JSONata4Java](https://github.com/IBM/JSONata4Java)
 The benchmark compiles one expression once, then runs 100 000 evaluations against the same JSON document (with a 1 000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
-Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
+Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM; two consecutive runs agreed to within 2%:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | 817 ms | 144 ms |
-| 100,000 evaluations | ~1,740 ms | ~37,400 ms |
-| Throughput | **~57,500 eval/s** | ~2,700 eval/s |
-| **Speedup** | **~25× faster** | baseline |
+| Compilation | ~800 ms | ~145 ms |
+| 100,000 evaluations | ~1,020 ms | ~40,400 ms |
+| Throughput | **~98,000 eval/s** | ~2,500 eval/s |
+| **Speedup** | **~40× faster** | baseline |
 
-> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates.
+> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch instead of one per expression, worth [around 10× for 20 expressions](#compiling-many-expressions-at-once).
+
+Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys build an exactly-sized map in one pass; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; and the runtime's hot type checks are single dispatches rather than chains of megamorphic calls.
 
 The benchmark is reproducible via:
 
 ```
-mvn test -Dtest=PerformanceComparisonTest#benchmark_comparison_sideBy_side
+mvn test -Dtest=PerformanceComparisonTest -DargLine="-Djunit.jupiter.conditions.deactivate=org.junit.jupiter.engine.extension.DisabledCondition"
 ```
+
+The benchmark class carries `@Disabled` so that a normal `mvn test` does not spend minutes on it, which is why the run needs that condition switched off — selecting the test with `-Dtest=` alone silently skips it.
 
 ## Thread safety
 

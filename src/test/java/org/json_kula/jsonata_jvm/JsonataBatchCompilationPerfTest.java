@@ -23,6 +23,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The assertion is deliberately conservative — batch strictly faster than one-by-one — because the
  * advantage is structural (1 compiler invocation vs 20) and does not depend on machine speed; the
  * measured ratio is printed for visibility.
+ *
+ * <h2>Running it</h2>
+ *
+ * <p>{@code @Disabled} keeps this out of a normal build, and JUnit honours that even when the class
+ * is named with {@code -Dtest=} — selecting it on its own reports success without running anything.
+ * Switch the condition off to actually run it, and pass that inside {@code argLine} so it reaches
+ * the forked JVM: a bare {@code -D} stays with the Maven JVM and has no effect on the tests.
+ *
+ * <pre>
+ *   mvn test -Dtest=JsonataBatchCompilationPerfTest
+ *       -DargLine="-Djunit.jupiter.conditions.deactivate=org.junit.jupiter.engine.extension.DisabledCondition"
+ * </pre>
+ *
+ * <p>Measured on OpenJDK 21 / Windows 11 the ratio is around 10x for these 20 expressions, which is
+ * the figure the README quotes. It is not a constant: the saving is one fixed {@code javac} cost per
+ * batch instead of one per expression, so it moves with the batch size and with how fast the host
+ * starts a compiler.
  */
 @Disabled("Please start it manually")
 class JsonataBatchCompilationPerfTest {

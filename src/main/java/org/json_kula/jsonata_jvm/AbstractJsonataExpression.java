@@ -24,19 +24,50 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
     private final ConcurrentHashMap<String, org.joni.Regex> __regexes = new ConcurrentHashMap<>();
     private volatile int __timeoutMs = 0;
 
+    /**
+     * The permanent bindings, pre-merged into the form the evaluation frame installs. Rebuilt
+     * lazily after {@link #assign} or {@link #registerFunction} rather than on every evaluation —
+     * merging per call dominated the cost of a small expression.
+     */
+    private volatile JsonataBindings __permanent = new JsonataBindings();
+
+    /**
+     * The {@code $eval} delegate of the factory that compiled this instance. Held per instance so
+     * that constructing another factory cannot change how this expression evaluates {@code $eval}.
+     */
+    private volatile org.json_kula.jsonata_jvm.runtime.JsonataRuntime.EvalDelegate __evalDelegate;
+
     @Override
     public void setTimeout(int timeoutMs) {
         __timeoutMs = timeoutMs;
+        if (timeoutMs > 0) org.json_kula.jsonata_jvm.runtime.JsonataRuntime.notifyTimeoutInUse();
     }
 
     @Override
     public void assign(String name, JsonNode value) {
         __values.put(name, value);
+        __permanent = null;
     }
 
     @Override
     public void registerFunction(String name, JsonataBoundFunction fn) {
         __functions.put(name, fn);
+        __permanent = null;
+    }
+
+    /**
+     * Returns the permanent bindings as one object, rebuilding it only after a change. Racing
+     * callers may each build one; they are equivalent, so the last writer wins harmlessly.
+     */
+    private JsonataBindings permanentBindings() {
+        JsonataBindings cached = __permanent;
+        if (cached == null) {
+            cached = new JsonataBindings();
+            __values.forEach(cached::bindValue);
+            __functions.forEach(cached::bindFunction);
+            __permanent = cached;
+        }
+        return cached;
     }
 
     @Override
@@ -47,7 +78,7 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
     @Override
     public final JsonNode evaluate(JsonNode __input, JsonataBindings __perEval)
             throws JsonataEvaluationException {
-        beginEvaluation(__values, __functions, __perEval, __regexes, __timeoutMs);
+        beginEvaluation(permanentBindings(), __perEval, __regexes, __timeoutMs, __evalDelegate);
         try {
             if (__input == null)
                 throw new JsonataEvaluationException(null, "Input JSON cannot be null");
@@ -63,11 +94,27 @@ public abstract class AbstractJsonataExpression implements JsonataExpression {
         }
     }
 
+    /** Set by the factory that compiled this instance. */
+    final void setEvalDelegate(org.json_kula.jsonata_jvm.runtime.JsonataRuntime.EvalDelegate delegate) {
+        this.__evalDelegate = delegate;
+    }
+
+    /** The permanent bindings of this instance — read by exported library functions. */
+    final JsonataBindings permanentBindingSet() {
+        return permanentBindings();
+    }
+
+    /** This instance's regex cache, reused when an exported function opens its own frame. */
+    final ConcurrentHashMap<String, org.joni.Regex> instanceRegexes() {
+        return __regexes;
+    }
+
     /**
      * Evaluates the compiled JSONata expression against the given input document.
      *
      * @param __root the validated, non-null input document
-     * @return the expression result ({@code MissingNode} for undefined, never Java {@code null})
+     * @return the expression result ({@code MissingNode} for undefined, never Java {@code null});
+     *         returned to the caller as-is
      * @throws Exception any runtime error; the caller maps it to {@link JsonataEvaluationException}
      */
     protected abstract JsonNode doEvaluate(JsonNode __root) throws Exception;

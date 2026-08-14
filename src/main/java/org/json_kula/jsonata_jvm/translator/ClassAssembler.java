@@ -14,6 +14,14 @@ final class ClassAssembler {
     static String buildClass(String pkg, String className,
                               String bodyExpr, String helperMethods,
                               String localDeclarations, String sourceExpression) {
+        return buildClass(pkg, className, bodyExpr, helperMethods, localDeclarations,
+                sourceExpression, "");
+    }
+
+    static String buildClass(String pkg, String className,
+                              String bodyExpr, String helperMethods,
+                              String localDeclarations, String sourceExpression,
+                              String constantDeclarations) {
         String pkgDecl = pkg.isEmpty() ? "" : "package " + pkg + ";\n\n";
         return pkgDecl
                 + "import com.fasterxml.jackson.databind.JsonNode;\n"
@@ -27,6 +35,7 @@ final class ClassAssembler {
                 + "public final class " + className + " extends AbstractJsonataExpression {\n"
                 + "\n"
                 + "    private static final String __SOURCE = " + javaString(sourceExpression) + ";\n"
+                + constantDeclarations
                 + "\n"
                 + "    @Override\n"
                 + "    public String getSourceJsonata() { return __SOURCE; }\n"

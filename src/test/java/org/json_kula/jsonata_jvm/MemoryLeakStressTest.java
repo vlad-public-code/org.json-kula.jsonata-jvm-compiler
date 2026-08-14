@@ -22,16 +22,48 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Long-running stress test for detecting memory leaks in LambdaRegistry and RegexRegistry.
  *
- * <p>Not intended for normal CI runs. Run manually with a heap profiler attached, e.g.:
- * <pre>
- *   mvn test -Dtest=MemoryLeakStressTest -Dgroups=stress \
- *       -DargLine="-Xmx512m -Xms512m -verbose:gc"
- * </pre>
- *
  * <p>Each of the {@value #THREADS} threads compiles {@value #CYCLES_PER_THREAD} unique
  * JSONata expressions (each containing a distinct regex literal and lambda), then
  * evaluates every expression {@value #EVALS_PER_EXPRESSION} times against randomly
  * generated JSON input, verifying the result after each evaluation.
+ *
+ * <h2>Running it</h2>
+ *
+ * <p>Not intended for normal CI runs. {@code @Disabled} keeps it out of a normal build, and JUnit
+ * honours that even when the class is named with {@code -Dtest=} — selecting it on its own reports
+ * success without running anything. Switch the condition off to actually run it, and pass that
+ * inside {@code argLine} so it reaches the forked JVM: a bare {@code -D} stays with the Maven JVM
+ * and has no effect on the tests.
+ *
+ * <pre>
+ *   mvn test -Dtest=MemoryLeakStressTest
+ *       -DargLine="-Xmx512m -Xms512m -Xlog:gc:file=target/leak-gc.log:time,uptime
+ *                  -Djunit.jupiter.conditions.deactivate=org.junit.jupiter.engine.extension.DisabledCondition"
+ * </pre>
+ *
+ * <h2>Reading the result</h2>
+ *
+ * <p>The test asserts correctness, not memory: a leak shows up as an {@code OutOfMemoryError} or not
+ * at all, so watch the JVM while it runs rather than waiting for a verdict at the end.
+ *
+ * <ul>
+ *   <li><b>Metaspace</b> is the one that matters most here. Every cycle compiles a <em>distinct</em>
+ *       expression into its own class and {@code InMemoryClassLoader}, so a retained loader shows as
+ *       Metaspace climbing without bound. It should sit flat
+ *       ({@code jcmd <pid> GC.heap_info}).</li>
+ *   <li><b>The live set</b>, via {@code jcmd <pid> GC.class_histogram} — which forces a full GC and
+ *       reports only reachable objects. Sample it twice, minutes apart, and compare: what this test
+ *       would catch is {@code LambdaNode}, {@code RegexNode} or generated classes accumulating.
+ *       A handful of {@code InMemoryFileManager} and {@code EvaluationContext$EvalState} instances
+ *       (one per thread) is expected.</li>
+ *   <li><b>Post-GC heap</b> from the GC log: the floor should be flat. Young-collection numbers
+ *       alone prove nothing, since they do not collect the old generation.</li>
+ * </ul>
+ *
+ * <p>Most of the retained heap belongs to {@code javac} — its zip file-system index and
+ * {@code SharedNameTable} — rather than to this library, and it grows with the number of compiler
+ * invocations. That is a cost of compiling in-process, and the JVM reclaims it under heap pressure;
+ * do not read it as a leak here.
  */
 @Tag("stress")
 @Disabled("Please start it manually since it takes several minutes")

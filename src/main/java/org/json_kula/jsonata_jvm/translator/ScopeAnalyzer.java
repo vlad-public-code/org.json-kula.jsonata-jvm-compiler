@@ -18,7 +18,7 @@ import java.util.Set;
  * array-holder patterns, which outer-scope locals are free variables in a
  * block, and whether a given variable name appears free inside a subtree.
  */
-final class ScopeAnalyzer {
+public final class ScopeAnalyzer {
 
     private ScopeAnalyzer() {}
 
@@ -98,62 +98,100 @@ final class ScopeAnalyzer {
         return new ArrayList<>(used);
     }
 
-    /** Recursively collects variable references that are free (not locally bound). */
+
+    /**
+     * Returns every variable and function name the expression references but does not itself bind.
+     *
+     * <p>A block's bindings count as bound throughout the block, not only after their own
+     * statement, because that is what the generated code does: forward references and mutual
+     * recursion between sibling bindings are supported through holder arrays. Path steps that bind
+     * a name — {@code @$v} and {@code #$i} — count for the steps that follow them.
+     *
+     * <p>Built-ins are not filtered out here; the caller decides what counts as provided.
+     */
+    public static Set<String> freeVariables(AstNode root) {
+        Set<String> used = new LinkedHashSet<>();
+        collectFreeVarsInto(root, used, new HashSet<>(), true);
+        return used;
+    }
+
     static void collectFreeVarsInto(AstNode node, Set<String> used, Set<String> bound) {
+        collectFreeVarsInto(node, used, bound, false);
+    }
+
+    /**
+     * @param blockScopeIsWholeBlock when true, every name a block binds is in scope for the whole
+     *                               block, and path bindings are in scope for later steps
+     */
+    private static void collectFreeVarsInto(AstNode node, Set<String> used, Set<String> bound,
+                                            boolean blockScopeIsWholeBlock) {
         if (node == null) return;
         switch (node) {
             case VariableRef vr -> { if (!bound.contains(vr.name())) used.add(vr.name()); }
             case FunctionCall fc -> {
                 if (!bound.contains(fc.name())) used.add(fc.name());
-                fc.args().forEach(a -> collectFreeVarsInto(a, used, bound));
+                fc.args().forEach(a -> collectFreeVarsInto(a, used, bound, blockScopeIsWholeBlock));
             }
             case Lambda lam -> {
                 Set<String> inner = new HashSet<>(bound);
                 inner.addAll(lam.params());
-                collectFreeVarsInto(lam.body(), used, inner);
+                collectFreeVarsInto(lam.body(), used, inner, blockScopeIsWholeBlock);
             }
             case Block blk -> {
                 Set<String> inner = new HashSet<>(bound);
+                if (blockScopeIsWholeBlock) {
+                    for (AstNode e : blk.expressions()) collectBindingNames(e, inner);
+                }
                 for (AstNode e : blk.expressions()) {
-                    collectFreeVarsInto(e, used, inner);
+                    collectFreeVarsInto(e, used, inner, blockScopeIsWholeBlock);
                     if (e instanceof VariableBinding vb) inner.add(vb.name());
                 }
             }
-            case VariableBinding vb    -> collectFreeVarsInto(vb.value(), used, bound);
-            case BinaryOp op           -> { collectFreeVarsInto(op.left(), used, bound);
-                                            collectFreeVarsInto(op.right(), used, bound); }
-            case UnaryMinus um         -> collectFreeVarsInto(um.operand(), used, bound);
-            case ConditionalExpr ce    -> { collectFreeVarsInto(ce.condition(), used, bound);
-                                            collectFreeVarsInto(ce.then(), used, bound);
-                                            if (ce.otherwise() != null) collectFreeVarsInto(ce.otherwise(), used, bound); }
-            case PathExpr pe           -> pe.steps().forEach(s -> collectFreeVarsInto(s, used, bound));
-            case ArrayConstructor ac   -> ac.elements().forEach(e -> collectFreeVarsInto(e, used, bound));
-            case ObjectConstructor oc  -> oc.pairs().forEach(p -> { collectFreeVarsInto(p.key(), used, bound);
-                                                                      collectFreeVarsInto(p.value(), used, bound); });
-            case PredicateExpr pe      -> { collectFreeVarsInto(pe.source(), used, bound);
-                                            collectFreeVarsInto(pe.predicate(), used, bound); }
-            case ArraySubscript as     -> { collectFreeVarsInto(as.source(), used, bound);
-                                            collectFreeVarsInto(as.index(), used, bound); }
-            case RangeExpr re          -> { collectFreeVarsInto(re.from(), used, bound);
-                                            collectFreeVarsInto(re.to(), used, bound); }
-            case SortExpr se           -> { collectFreeVarsInto(se.source(), used, bound);
-                                            se.keys().forEach(k -> collectFreeVarsInto(k.key(), used, bound)); }
-            case GroupByExpr gbe       -> { collectFreeVarsInto(gbe.source(), used, bound);
-                                            gbe.pairs().forEach(p -> { collectFreeVarsInto(p.key(), used, bound);
-                                                                        collectFreeVarsInto(p.value(), used, bound); }); }
-            case ChainExpr ce          -> ce.steps().forEach(s -> collectFreeVarsInto(s, used, bound));
-            case TransformExpr te      -> { collectFreeVarsInto(te.source(), used, bound);
-                                            collectFreeVarsInto(te.pattern(), used, bound);
-                                            collectFreeVarsInto(te.update(), used, bound); }
-            case ForceArray fa         -> collectFreeVarsInto(fa.source(), used, bound);
-            case Parenthesized p       -> collectFreeVarsInto(p.inner(), used, bound);
-            case ElvisExpr ee          -> { collectFreeVarsInto(ee.left(), used, bound);
-                                            collectFreeVarsInto(ee.right(), used, bound); }
-            case CoalesceExpr ce2      -> { collectFreeVarsInto(ce2.left(), used, bound);
-                                            collectFreeVarsInto(ce2.right(), used, bound); }
+            case VariableBinding vb    -> collectFreeVarsInto(vb.value(), used, bound, blockScopeIsWholeBlock);
+            case BinaryOp op           -> { collectFreeVarsInto(op.left(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(op.right(), used, bound, blockScopeIsWholeBlock); }
+            case UnaryMinus um         -> collectFreeVarsInto(um.operand(), used, bound, blockScopeIsWholeBlock);
+            case ConditionalExpr ce    -> { collectFreeVarsInto(ce.condition(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(ce.then(), used, bound, blockScopeIsWholeBlock);
+                                            if (ce.otherwise() != null) collectFreeVarsInto(ce.otherwise(), used, bound, blockScopeIsWholeBlock); }
+            case PathExpr pe           -> {
+                Set<String> inner = blockScopeIsWholeBlock ? new HashSet<>(bound) : bound;
+                for (AstNode s : pe.steps()) {
+                    if (blockScopeIsWholeBlock) {
+                        if (s instanceof ContextBinding cb) inner.add(cb.varName());
+                        else if (s instanceof PositionBinding pb) inner.add(pb.varName());
+                    }
+                    collectFreeVarsInto(s, used, inner, blockScopeIsWholeBlock);
+                }
+            }
+            case ArrayConstructor ac   -> ac.elements().forEach(e -> collectFreeVarsInto(e, used, bound, blockScopeIsWholeBlock));
+            case ObjectConstructor oc  -> oc.pairs().forEach(p -> { collectFreeVarsInto(p.key(), used, bound, blockScopeIsWholeBlock);
+                                                                      collectFreeVarsInto(p.value(), used, bound, blockScopeIsWholeBlock); });
+            case PredicateExpr pe      -> { collectFreeVarsInto(pe.source(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(pe.predicate(), used, bound, blockScopeIsWholeBlock); }
+            case ArraySubscript as     -> { collectFreeVarsInto(as.source(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(as.index(), used, bound, blockScopeIsWholeBlock); }
+            case RangeExpr re          -> { collectFreeVarsInto(re.from(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(re.to(), used, bound, blockScopeIsWholeBlock); }
+            case SortExpr se           -> { collectFreeVarsInto(se.source(), used, bound, blockScopeIsWholeBlock);
+                                            se.keys().forEach(k -> collectFreeVarsInto(k.key(), used, bound, blockScopeIsWholeBlock)); }
+            case GroupByExpr gbe       -> { collectFreeVarsInto(gbe.source(), used, bound, blockScopeIsWholeBlock);
+                                            gbe.pairs().forEach(p -> { collectFreeVarsInto(p.key(), used, bound, blockScopeIsWholeBlock);
+                                                                        collectFreeVarsInto(p.value(), used, bound, blockScopeIsWholeBlock); }); }
+            case ChainExpr ce          -> ce.steps().forEach(s -> collectFreeVarsInto(s, used, bound, blockScopeIsWholeBlock));
+            case TransformExpr te      -> { collectFreeVarsInto(te.source(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(te.pattern(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(te.update(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(te.delete(), used, bound, blockScopeIsWholeBlock); }
+            case ForceArray fa         -> collectFreeVarsInto(fa.source(), used, bound, blockScopeIsWholeBlock);
+            case Parenthesized p       -> collectFreeVarsInto(p.inner(), used, bound, blockScopeIsWholeBlock);
+            case ElvisExpr ee          -> { collectFreeVarsInto(ee.left(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(ee.right(), used, bound, blockScopeIsWholeBlock); }
+            case CoalesceExpr ce2      -> { collectFreeVarsInto(ce2.left(), used, bound, blockScopeIsWholeBlock);
+                                            collectFreeVarsInto(ce2.right(), used, bound, blockScopeIsWholeBlock); }
             case PartialApplication pa -> {
                 if (!bound.contains(pa.name())) used.add(pa.name());
-                pa.args().forEach(a -> collectFreeVarsInto(a, used, bound));
+                pa.args().forEach(a -> collectFreeVarsInto(a, used, bound, blockScopeIsWholeBlock));
             }
             default                    -> {} // leaf nodes: literals, FieldRef, WildcardStep, PartialPlaceholder, etc.
         }
@@ -200,5 +238,14 @@ final class ScopeAnalyzer {
             case AstNode.Parenthesized p         -> containsParentStep(p.inner());
             default                              -> false;
         };
+    }
+
+    /** Adds every name bound by {@code expr}, following chained assignments ($a := $b := v). */
+    private static void collectBindingNames(AstNode expr, Set<String> out) {
+        AstNode current = expr;
+        while (current instanceof VariableBinding vb) {
+            out.add(vb.name());
+            current = vb.value();
+        }
     }
 }

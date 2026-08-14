@@ -8,24 +8,33 @@ sitemap: false
 > jsonata-jvm-compiler is a Java 21 library that compiles [JSONata](https://jsonata.org) expressions
 > into native JVM bytecode at runtime. Each expression is parsed, optimised, translated to Java
 > source, compiled in-memory, and returned as a ready-to-call, thread-safe `JsonataExpression`.
-> Repeated evaluation is over 25× faster than interpreter-based alternatives (e.g. IBM's
+> Repeated evaluation is around 40× faster than interpreter-based alternatives (e.g. IBM's
 > JSONata4Java) on a realistic analytical benchmark. All cases in the official JSONata test suite
 > pass. Apache-2.0.
 
 Use it when you evaluate the same JSONata expression many times and want native-bytecode throughput
 instead of an interpreter — compile once at startup, evaluate on the hot path. Requires a Java 21
 **JDK** (the in-memory compiler needs `javac`), Jackson Databind 2.18+, and joni 2.2+. Maven
-coordinates: `io.github.vlad-public-code:jsonata-jvm-compiler:1.0.4`.
+coordinates: `io.github.vlad-public-code:jsonata-jvm-compiler:1.0.5`.
 
 Key facts:
 - **Compile then evaluate:** `factory.compile("Account.Order.Product.Price * 1.2")` →
   `JsonataExpression`; `expr.evaluate(jsonNode)` → `JsonNode`. The instance is thread-safe and
   reusable; don't call `compile()` on the hot path.
 - **Batch compile:** `factory.compileAll(List.of(...))` runs the expensive `javac` step once for the
-  whole batch — ~10–16× faster than compiling 20 expressions one at a time.
+  whole batch — ~35× faster than compiling 200 expressions one at a time, and uses a fraction of the metaspace.
 - **Bindings:** inject `$name` values and `$name(...)` functions per-evaluation
   (`JsonataBindings`) or permanently (`assign` / `registerFunction`); per-evaluation wins on a name
   clash.
+- **JSONata libraries:** `factory.compileLibrary(definitionExpression)` → `JsonataLibrary`, with
+  `getFunctions()` → `Map<String, JsonataBoundFunction>` and `getConstants()` → `Map<String, JsonNode>`.
+  A definition is ordinary JSONata that binds names and returns the ones to export
+  (`["gross", "format", "vatRate"]`); each lands in one map or the other by what it evaluated to.
+  Write a set of bindings once in JSONata — recursive, mutually recursive, closing over private
+  helpers — then apply it to any expression with `getFunctions().forEach(expr::registerFunction)`
+  and `getConstants().forEach(expr::assign)`. A definition must be self-contained: a name it neither
+  binds nor takes from the standard library must be supplied through
+  `JsonataLibraryOptions.bindings`, or the build fails.
 - **Two exceptions:** `JsonataCompilationException` (bad expression) and `JsonataEvaluationException`
   (bad input / runtime error, including the `U1001` timeout from `setTimeout`).
 
@@ -34,7 +43,8 @@ Key facts:
 - [Documentation]({{ '/' | absolute_url }}): overview, requirements, getting started, bindings, performance, thread safety, and the compile→optimize→translate→load architecture.
 - [Getting started]({{ '/#getting-started' | absolute_url }}): add the dependency, compile an expression (single or batch), and evaluate against JSON.
 - [Bindings]({{ '/#bindings' | absolute_url }}): per-evaluation vs permanent bindings, `JsonataBoundFunction`, and the function-signature syntax.
-- [Performance]({{ '/#performance' | absolute_url }}): the ~25× benchmark vs JSONata4Java and how to reproduce it.
+- [JSONata libraries]({{ '/#jsonata-libraries' | absolute_url }}): write a set of bindings once as a JSONata definition expression and apply it to any expression — exported functions and constants, private helpers, signatures, and lifetime.
+- [Performance]({{ '/#performance' | absolute_url }}): the ~40× benchmark vs JSONata4Java and how to reproduce it.
 - [Architecture]({{ '/#architecture' | absolute_url }}): the pipeline and package structure (`parser`, `optimizer`, `translator`, `runtime`, `loader`).
 - [Source on GitHub](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler): code and README. Apache-2.0.
 

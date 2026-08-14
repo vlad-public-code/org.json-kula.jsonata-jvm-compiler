@@ -128,7 +128,10 @@ final class BlockCodeGen {
                 if (expr instanceof VariableBinding vb) {
                     emitVarBinding(t, vb, sb, innerCtx, declared);
                 } else {
-                    sb.append("    ").append(expr.accept(t, innerCtx)).append(";\n");
+                    // The value is discarded, but Java accepts only certain expressions as
+                    // statements — a bare constant or variable reference is not one. discard()
+                    // evaluates the expression (so errors still surface) and makes it legal.
+                    sb.append("    discard(").append(expr.accept(t, innerCtx)).append(");\n");
                 }
             }
 

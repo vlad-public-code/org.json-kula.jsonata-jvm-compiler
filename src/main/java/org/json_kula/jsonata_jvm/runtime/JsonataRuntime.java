@@ -52,14 +52,37 @@ public final class JsonataRuntime {
 
     private static volatile EvalDelegate EVAL_DELEGATE = null;
 
-    /** Registers the delegate used by {@code $eval()}. */
+    /**
+     * Set the first time any expression is given a timeout. Until then the deadline machinery is
+     * skipped outright rather than consulting the thread-local evaluation state.
+     */
+    private static volatile boolean TIMEOUTS_IN_USE = false;
+
+    /** Called by {@code AbstractJsonataExpression.setTimeout} when a positive timeout is set. */
+    public static void notifyTimeoutInUse() {
+        TIMEOUTS_IN_USE = true;
+    }
+
+    /**
+     * Registers the process-wide fallback delegate for {@code $eval()}.
+     *
+     * <p>An expression compiled by a {@link org.json_kula.jsonata_jvm.JsonataExpressionFactory}
+     * carries that factory delegate on its own evaluation frame and uses it in preference to this
+     * one, so constructing a second factory cannot change how an already-compiled expression
+     * evaluates {@code $eval}. This fallback covers hand-written expression classes, which open a
+     * frame without one.
+     */
     public static void registerEvalDelegate(EvalDelegate delegate) {
         EVAL_DELEGATE = delegate;
     }
 
-    /** Returns the currently registered eval delegate, or {@code null} if none. */
+    /**
+     * Returns the delegate {@code $eval()} should use: the one belonging to the expression being
+     * evaluated, else the process-wide fallback, else {@code null}.
+     */
     public static EvalDelegate getEvalDelegate() {
-        return EVAL_DELEGATE;
+        EvalDelegate frameDelegate = EvaluationContext.getEvalDelegate();
+        return frameDelegate != null ? frameDelegate : EVAL_DELEGATE;
     }
 
     // =========================================================================
@@ -80,31 +103,47 @@ public final class JsonataRuntime {
      * over arrays (JSONata sequence semantics).
      */
     public static JsonNode field(JsonNode node, String name) {
-        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
-        if (node.isArray()) {
-            ArrayNode result = NF.arrayNode(node.size());
-            for (JsonNode elem : node) {
-                JsonNode val = field(elem, name);
-                if (!val.isMissingNode()) appendToSequence(result, val);
-            }
-            return unwrap(result);
-        }
+        if (node == null || node == MISSING || node.isNull()) return MISSING;
+        // Objects first: this is the hottest method in the runtime and a plain object is its most
+        // common input.
         if (node.isObject()) {
             JsonNode val = node.get(name);
             return val != null ? val : MISSING;
+        }
+        if (node.isArray()) {
+            // Most steps over an array yield nothing or a single value, and the sequence is then
+            // unwrapped again — so the collector is only allocated once a second value shows up.
+            JsonNode single = null;
+            ArrayNode result = null;
+            for (JsonNode elem : node) {
+                JsonNode val = field(elem, name);
+                if (val == MISSING) continue;
+                if (result != null) {
+                    appendToSequence(result, val);
+                } else if (single == null && !val.isArray()) {
+                    single = val;
+                } else {
+                    result = NF.arrayNode(node.size());
+                    if (single != null) result.add(single);
+                    single = null;
+                    appendToSequence(result, val);
+                }
+            }
+            if (result != null) return unwrap(result);
+            return single != null ? single : MISSING;
         }
         return MISSING;
     }
 
     /** Returns all field values of an object, or maps over an array. */
     public static JsonNode wildcard(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
+        if (node == null || node == MISSING || node.isNull()) return MISSING;
         if (node.isArray()) {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 if (elem.isObject()) {
                     appendToSequence(result, wildcard(elem));
-                } else if (!elem.isMissingNode()) {
+                } else if (elem != MISSING) {
                     // Primitive array elements are returned as-is
                     result.add(elem);
                 }
@@ -121,7 +160,7 @@ public final class JsonataRuntime {
 
     /** Recursively collects all descendant values (depth-first). */
     public static JsonNode descendant(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) return MISSING;
+        if (node == null || node == MISSING || node.isNull()) return MISSING;
         ArrayNode result = NF.arrayNode();
         collectDescendants(node, result);
         return unwrap(result);
@@ -142,7 +181,7 @@ public final class JsonataRuntime {
      * MISSING propagates as MISSING (nothing to wrap).
      */
     public static JsonNode forceArray(JsonNode node) {
-        if (node == null || node.isMissingNode()) return MISSING;
+        if (node == null || node == MISSING) return MISSING;
         if (node.isArray()) return node;
         ArrayNode result = NF.arrayNode();
         result.add(node);
@@ -155,15 +194,29 @@ public final class JsonataRuntime {
      */
     public static JsonNode filter(JsonNode seq, JsonataLambda predicate)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        predicate = deadlineGuard(predicate);
+        if (seq == null || seq == MISSING) return MISSING;
         if (!seq.isArray()) {
             return isTruthy(predicate.apply(seq)) ? seq : MISSING;
         }
-        ArrayNode result = NF.arrayNode(seq.size());
-        for (JsonNode elem : seq) {
-            if (isTruthy(predicate.apply(elem))) result.add(elem);
+        ArrayNode result = null;
+        JsonNode single = null;
+        for (int i = 0, size = seq.size(); i < size; i++) {
+            JsonNode elem = seq.get(i);
+            if (!isTruthy(predicate.apply(elem))) continue;
+            if (result != null) {
+                result.add(elem);
+            } else if (single == null) {
+                single = elem;
+            } else {
+                result = NF.arrayNode(size);
+                result.add(single);
+                result.add(elem);
+                single = null;
+            }
         }
-        return unwrap(result);
+        if (result != null) return result;
+        return single != null ? single : MISSING;
     }
 
     /**
@@ -180,9 +233,9 @@ public final class JsonataRuntime {
      */
     public static JsonNode dynamicFilter(JsonNode seq, JsonataLambda predicate)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         JsonNode probe = predicate.apply(MISSING);
-        if (probe != null && !probe.isMissingNode()) {
+        if (probe != null && probe != MISSING) {
             if (probe.isNumber()) return subscript(seq, probe);
             if (probe.isArray()) {
                 // Check if all elements are integers; if not, fall through to filter mode
@@ -191,17 +244,15 @@ public final class JsonataRuntime {
                     if (!idx.isNumber()) { allInts = false; break; }
                 }
                 if (allInts) {
-                    // Multi-index subscript: sort indices to preserve natural array order
+                    // Multi-index subscript: a sorted set gives unique indices in natural array
+                    // order in one pass, where scanning a list for duplicates was quadratic.
                     int size = seq.isArray() ? seq.size() : 1;
-                    java.util.List<Integer> indices = new java.util.ArrayList<>();
+                    java.util.TreeSet<Integer> indices = new java.util.TreeSet<>();
                     for (JsonNode idx : probe) {
                         int i = (int) idx.doubleValue();
                         int actual = i < 0 ? size + i : i;
-                        if (actual >= 0 && actual < size && !indices.contains(actual)) {
-                            indices.add(actual);
-                        }
+                        if (actual >= 0 && actual < size) indices.add(actual);
                     }
-                    java.util.Collections.sort(indices);
                     ArrayNode result = NF.arrayNode();
                     for (int i : indices) {
                         JsonNode val = seq.isArray() ? seq.get(i) : (i == 0 ? seq : MISSING);
@@ -220,7 +271,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode subscript(JsonNode seq, JsonNode index)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         int i = (int) toNumber(index);
         if (!seq.isArray()) {
             return i == 0 || i == -1 ? seq : MISSING;
@@ -237,7 +288,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode rangeSubscript(JsonNode seq, JsonNode from, JsonNode to)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         if (!seq.isArray()) {
             // Treat scalar as a single-element sequence at position 0 (or -1 as last).
             int f = (int) toNumber(from);
@@ -264,7 +315,7 @@ public final class JsonataRuntime {
      */
     public static JsonNode applyStep(JsonNode node, JsonataLambda fn)
             throws RuntimeEvaluationException {
-        if (node == null || node.isMissingNode()) return MISSING;
+        if (node == null || node == MISSING) return MISSING;
         return fn.apply(node);
     }
 
@@ -276,12 +327,13 @@ public final class JsonataRuntime {
      */
     public static JsonNode mapStep(JsonNode node, JsonataLambda fn)
             throws RuntimeEvaluationException {
-        if (node == null || node.isMissingNode()) return MISSING;
+        fn = deadlineGuard(fn);
+        if (node == null || node == MISSING) return MISSING;
         if (node.isArray()) {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (!val.isMissingNode()) appendToSequence(result, val);
+                if (val != MISSING) appendToSequence(result, val);
             }
             return unwrap(result);
         }
@@ -299,19 +351,20 @@ public final class JsonataRuntime {
      */
     public static JsonNode mapConstructorStep(JsonNode node, JsonataLambda fn)
             throws RuntimeEvaluationException {
-        if (node == null || node.isMissingNode()) return MISSING;
+        fn = deadlineGuard(fn);
+        if (node == null || node == MISSING) return MISSING;
         if (node.isArray()) {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (!val.isMissingNode()) {
+                if (val != MISSING) {
                     result.add(unwrapPreserve(val));
                 }
             }
             return result.isEmpty() ? MISSING : result;
         }
         JsonNode val = fn.apply(node);
-        if (val.isMissingNode()) return MISSING;
+        if (val == MISSING) return MISSING;
         return unwrapPreserve(val);
     }
 
@@ -322,57 +375,57 @@ public final class JsonataRuntime {
      */
     public static JsonNode mapConstructorStepFlat(JsonNode node, JsonataLambda fn)
             throws RuntimeEvaluationException {
-        if (node == null || node.isMissingNode()) return MISSING;
+        if (node == null || node == MISSING) return MISSING;
         if (node.isArray()) {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (!val.isMissingNode()) {
+                if (val != MISSING) {
                     appendToSequence(result, val);
                 }
             }
             return unwrap(result);
         }
         JsonNode val = fn.apply(node);
-        if (val.isMissingNode()) return MISSING;
+        if (val == MISSING) return MISSING;
         return val;
     }
 
-    /** Unwraps a preserveArray wrapper if present, otherwise returns the node as-is. */
+    /** Unwraps a {@link PreservedNode} if present, otherwise returns the node as-is. */
     private static JsonNode unwrapPreserve(JsonNode node) {
-        if (node.isObject() && node.has("__PRESERVE__")) {
-            return node.get("__PRESERVE__");
-        }
-        return node;
+        return node instanceof PreservedNode preserved ? preserved.value() : node;
     }
 
     // =========================================================================
     // Arithmetic
     // =========================================================================
 
-    public static JsonNode add(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
+    /**
+     * Rejects a non-numeric operand of an arithmetic operator, with the error code and wording the
+     * JSONata spec prescribes for the side it appears on ({@code T2001} left, {@code T2002} right).
+     */
+    private static void requireNumericOperands(JsonNode a, JsonNode b, char operator)
+            throws RuntimeEvaluationException {
         if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001", "The left side of the + operator must evaluate to a number");
+                "T2001", "The left side of the " + operator + " operator must evaluate to a number");
         if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002", "The right side of the + operator must evaluate to a number");
+                "T2002", "The right side of the " + operator + " operator must evaluate to a number");
+    }
+
+    public static JsonNode add(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
+        requireNumericOperands(a, b, '+');
         if (missing(a) || missing(b)) return MISSING;
         return numNode(a.doubleValue() + b.doubleValue());
     }
 
     public static JsonNode subtract(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
-        if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001", "The left side of the - operator must evaluate to a number");
-        if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002", "The right side of the - operator must evaluate to a number");
+        requireNumericOperands(a, b, '-');
         if (missing(a) || missing(b)) return MISSING;
         return numNode(a.doubleValue() - b.doubleValue());
     }
 
     public static JsonNode multiply(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
-        if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001", "The left side of the * operator must evaluate to a number");
-        if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002", "The right side of the * operator must evaluate to a number");
+        requireNumericOperands(a, b, '*');
         if (missing(a) || missing(b)) return MISSING;
         double av = a.doubleValue();
         double bv = b.doubleValue();
@@ -387,10 +440,7 @@ public final class JsonataRuntime {
     }
 
     public static JsonNode divide(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
-        if (!missing(a) && !a.isNumber()) throw new RuntimeEvaluationException(
-                "T2001", "The left side of the / operator must evaluate to a number");
-        if (!missing(b) && !b.isNumber()) throw new RuntimeEvaluationException(
-                "T2002", "The right side of the / operator must evaluate to a number");
+        requireNumericOperands(a, b, '/');
         if (missing(a) || missing(b)) return MISSING;
         double numer = a.doubleValue();
         double denom = b.doubleValue();
@@ -582,10 +632,19 @@ public final class JsonataRuntime {
      * considered equal — matching JSONata's deep-equals semantics for arrays and objects.
      */
     private static boolean deepEquals(JsonNode a, JsonNode b) {
+        // One virtual call per operand and a switch, rather than walking a chain of isX() pairs:
+        // comparisons in predicates are among the most frequent operations in a path expression.
+        com.fasterxml.jackson.databind.node.JsonNodeType typeA = a.getNodeType();
+        if (typeA == b.getNodeType()) {
+            switch (typeA) {
+                case STRING:  return a.textValue().equals(b.textValue());
+                case NUMBER:  return a.doubleValue() == b.doubleValue();
+                case BOOLEAN: return a.booleanValue() == b.booleanValue();
+                case NULL:    return true;
+                default:      break;   // arrays and objects fall through to the recursive walk
+            }
+        }
         if (a.isNumber() && b.isNumber()) return a.doubleValue() == b.doubleValue();
-        if (a.isTextual() && b.isTextual()) return a.textValue().equals(b.textValue());
-        if (a.isBoolean() && b.isBoolean()) return a.booleanValue() == b.booleanValue();
-        if (a.isNull() && b.isNull()) return true;
         if (a.isArray() && b.isArray()) {
             if (a.size() != b.size()) return false;
             for (int i = 0; i < a.size(); i++) {
@@ -599,7 +658,7 @@ public final class JsonataRuntime {
             while (it.hasNext()) {
                 java.util.Map.Entry<String, JsonNode> entry = it.next();
                 JsonNode bVal = b.get(entry.getKey());
-                if (bVal == null || bVal.isMissingNode()) return false;
+                if (bVal == null || bVal == MISSING) return false;
                 if (!deepEquals(entry.getValue(), bVal)) return false;
             }
             return true;
@@ -709,22 +768,26 @@ public final class JsonataRuntime {
      * </ul>
      */
     public static boolean isTruthy(JsonNode n) {
-        if (n == null || n.isMissingNode() || n.isNull()) return false;
-        if (n.isBoolean()) return n.booleanValue();
-        if (n.isNumber()) return n.doubleValue() != 0;
-        if (n.isTextual()) {
-            // Lambda / function tokens are falsy per the JSONata spec ("functions → false")
-            if (LambdaRegistry.isLambdaToken(n)) return false;
-            return !n.textValue().isEmpty();
+        if (n == null || n == MISSING) return false;
+        // A single virtual call and a switch: every predicate element goes through here, and the
+        // isX() chain it replaces was a run of megamorphic calls that could not be inlined.
+        switch (n.getNodeType()) {
+            case NULL:    return false;
+            case BOOLEAN: return n.booleanValue();
+            case NUMBER:  return n.doubleValue() != 0;
+            case STRING:  return !n.textValue().isEmpty();
+            case OBJECT:  return n.size() > 0;
+            case ARRAY:
+                // An array is truthy iff at least one of its members is truthy (spec rule).
+                // An empty array or an array whose every member is falsy is falsy.
+                for (int i = 0, size = n.size(); i < size; i++) {
+                    if (isTruthy(n.get(i))) return true;
+                }
+                return false;
+            default:
+                // Function values are falsy per the JSONata spec ("functions → false")
+                return !(n instanceof LambdaNode) && !(n instanceof RegexNode);
         }
-        if (n.isObject()) return n.size() > 0;
-        if (n.isArray()) {
-            // An array is truthy iff at least one of its members is truthy (spec rule).
-            // An empty array or an array whose every member is falsy is falsy.
-            for (JsonNode elem : n) { if (isTruthy(elem)) return true; }
-            return false;
-        }
-        return true;
     }
 
     // =========================================================================
@@ -737,7 +800,7 @@ public final class JsonataRuntime {
      * user-defined lambdas so that array arguments are preserved as single elements.
      */
     public static ArrayNode packArgs(JsonNode... elements) {
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(elements.length);
         for (JsonNode e : elements) result.add(e != null ? e : MISSING);
         return result;
     }
@@ -770,13 +833,13 @@ public final class JsonataRuntime {
      */
     public static JsonNode collectPosTuples(JsonNode seq, JsonataLambda elemsFn)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         int size = seq.isArray() ? seq.size() : 1;
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < size; i++) {
             JsonNode item = seq.isArray() ? seq.get(i) : seq;
             JsonNode elems = elemsFn.apply(NF.arrayNode().add(item).add(NF.numberNode(i)));
-            if (elems == null || elems.isMissingNode()) continue;
+            if (elems == null || elems == MISSING) continue;
             if (elems.isArray()) {
                 for (JsonNode e : elems) {
                     if (!missing(e)) result.add(NF.arrayNode().add(e).add(NF.numberNode(i)));
@@ -792,13 +855,12 @@ public final class JsonataRuntime {
     public record RangeHolder(int from, int to) {}
 
     /**
-     * Wraps an ArrayNode to signal that it should NOT be flattened by {@link #arrayOf}.
-     * Returns an ObjectNode wrapper (a valid JsonNode) so it can be used in lambdas.
+     * Marks {@code arr} as a single sequence element, so that {@link #arrayOf} adds it whole
+     * instead of merging its contents. The marker is a node type of its own, so no input document
+     * can be mistaken for one.
      */
     public static JsonNode preserveArray(JsonNode arr) {
-        ObjectNode wrapper = NF.objectNode();
-        wrapper.set("__PRESERVE__", arr);
-        return wrapper;
+        return new PreservedNode(arr);
     }
 
     /**
@@ -810,7 +872,7 @@ public final class JsonataRuntime {
      * unless wrapped with {@link #preserveArray}.
      */
     public static JsonNode arrayOf(Object... elements) {
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(Math.max(4, elements.length));
         for (Object e : elements) {
             if (e == null) continue;
             if (e instanceof RangeHolder rh) {
@@ -819,9 +881,8 @@ public final class JsonataRuntime {
                 }
             } else if (e instanceof JsonNode jn) {
                 if (!missing(jn)) {
-                    // Check for preserveArray wrapper
-                    if (jn.isObject() && jn.has("__PRESERVE__")) {
-                        result.add(jn.get("__PRESERVE__"));
+                    if (jn instanceof PreservedNode preserved) {
+                        result.add(preserved.value());
                     } else if (jn.isArray()) {
                         // Flatten ArrayNode from path navigation
                         for (JsonNode item : jn) {
@@ -852,11 +913,38 @@ public final class JsonataRuntime {
      *
      * @param keyValuePairs alternating {@code JsonNode} key, {@code JsonNode} value
      */
+    /**
+     * Builds an object whose keys are all known at compile time.
+     *
+     * <p>The general {@link #object(Object...)} form has to treat each key as an expression: wrap it
+     * in a node, check it is not missing, check it is a string, unwrap it again. A constructor
+     * written with literal keys — which is almost all of them — needs none of that, and this
+     * overload also lets the backing map be sized exactly once.
+     *
+     * @param keys   the field names, in source order
+     * @param values one value per key; a missing value omits its field, per JSONata
+     */
+    public static JsonNode objectOf(String[] keys, JsonNode[] values) throws RuntimeEvaluationException {
+        ObjectNode result = new ObjectNode(NF, new java.util.LinkedHashMap<>(
+                Math.max(4, (keys.length * 4 / 3) + 1)));
+        for (int i = 0; i < keys.length; i++) {
+            JsonNode value = values[i];
+            if (value == null || value == MISSING) continue;
+            if (result.replace(keys[i], value) != null)
+                throw new RuntimeEvaluationException(
+                        "D1009", "Multiple key definitions evaluate to the same key: \"" + keys[i] + "\"");
+        }
+        return result;
+    }
+
     public static JsonNode object(Object... keyValuePairs) throws RuntimeEvaluationException {
         if (keyValuePairs.length % 2 != 0) {
             throw new RuntimeEvaluationException("T1001", "object() requires an even number of arguments");
         }
-        ObjectNode result = NF.objectNode();
+        // Sized for the fields it will hold: the default map grows by rehashing, which for a
+        // wide object constructor was the single largest source of allocation in the runtime.
+        ObjectNode result = new ObjectNode(NF, new java.util.LinkedHashMap<>(
+                Math.max(4, (keyValuePairs.length * 2 / 3) + 2)));
         for (int i = 0; i < keyValuePairs.length; i += 2) {
             JsonNode key = (JsonNode) keyValuePairs[i];
             JsonNode val = (JsonNode) keyValuePairs[i + 1];
@@ -864,10 +952,12 @@ public final class JsonataRuntime {
                 if (!key.isTextual())
                     throw new RuntimeEvaluationException(
                             "T1003", "The key expression of an object component must evaluate to a string");
-                if (result.has(key.textValue()))
+                // replace() reports the previous value, so the duplicate-key check costs no
+                // second lookup.
+                JsonNode previous = result.replace(key.textValue(), val);
+                if (previous != null)
                     throw new RuntimeEvaluationException(
                             "D1009", "Multiple key definitions evaluate to the same key: \"" + key.textValue() + "\"");
-                result.set(key.textValue(), val);
             }
         }
         return result;
@@ -954,7 +1044,7 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_type(JsonNode arg) {
         if (missing(arg)) return MISSING;
-        if (LambdaRegistry.isLambdaToken(arg)) return NF.textNode("function");
+        if (arg instanceof LambdaNode || arg instanceof RegexNode) return NF.textNode("function");
         if (arg.isNull())    return NF.textNode("null");
         if (arg.isNumber())  return NF.textNode("number");
         if (arg.isTextual()) return NF.textNode("string");
@@ -965,7 +1055,7 @@ public final class JsonataRuntime {
     }
 
     public static JsonNode fn_exists(JsonNode arg) {
-        return bool(arg != null && !arg.isMissingNode());
+        return bool(arg != null && arg != MISSING);
     }
 
     // =========================================================================
@@ -1191,25 +1281,69 @@ public final class JsonataRuntime {
         if (!seq.isArray()) {
             if (!seq.isObject()) return NF.numberNode(0);
             JsonNode v = seq.get(fieldName);
-            if (v == null || v.isMissingNode()) return NF.numberNode(0);
+            if (v == null || v == MISSING) return NF.numberNode(0);
             return v.isArray() ? NF.numberNode(v.size()) : NF.numberNode(1);
         }
         int count = 0;
         for (JsonNode elem : seq) {
             if (!elem.isObject()) continue;
             JsonNode v = elem.get(fieldName);
-            if (v == null || v.isMissingNode()) continue;
+            if (v == null || v == MISSING) continue;
             count += v.isArray() ? v.size() : 1;
         }
         return NF.numberNode(count);
     }
 
     /** Fused $count(arr[pred]): counts matching elements without materializing a filtered array. */
+    /**
+     * {@code $count(seq[field = value])} — by far the most common predicate shape in reporting
+     * expressions, and worth collapsing: no predicate lambda, no intermediate nodes, one field
+     * lookup and one comparison per element.
+     */
+    public static JsonNode fn_count_field_eq(JsonNode seq, String fieldName, JsonNode expected) {
+        if (seq == null || seq == MISSING) return NF.numberNode(0);
+        // The comparison to make is a property of the constant, not of the elements, so it is
+        // decided once here rather than re-dispatched for every element.
+        if (expected.isTextual()) {
+            String text = expected.textValue();
+            return countMatching(seq, fieldName, v -> v.isTextual() && text.equals(v.textValue()));
+        }
+        if (expected.isNumber()) {
+            double number = expected.doubleValue();
+            return countMatching(seq, fieldName, v -> v.isNumber() && v.doubleValue() == number);
+        }
+        if (expected.isBoolean()) {
+            boolean flag = expected.booleanValue();
+            return countMatching(seq, fieldName, v -> v.isBoolean() && v.booleanValue() == flag);
+        }
+        return countMatching(seq, fieldName, v -> deepEquals(v, expected));
+    }
+
+    /** Counts elements of {@code seq} whose {@code fieldName} satisfies {@code matches}. */
+    private static JsonNode countMatching(JsonNode seq, String fieldName,
+                                          java.util.function.Predicate<JsonNode> matches) {
+        if (!seq.isArray()) return NF.numberNode(fieldMatches(seq, fieldName, matches) ? 1 : 0);
+        int count = 0;
+        for (int i = 0, size = seq.size(); i < size; i++) {
+            if (fieldMatches(seq.get(i), fieldName, matches)) count++;
+        }
+        return NF.numberNode(count);
+    }
+
+    private static boolean fieldMatches(JsonNode node, String fieldName,
+                                        java.util.function.Predicate<JsonNode> matches) {
+        if (!node.isObject()) return false;
+        JsonNode value = node.get(fieldName);
+        return value != null && value != MISSING && matches.test(value);
+    }
+
     public static JsonNode fn_count_filter(JsonNode seq, JsonataLambda predicate) throws RuntimeEvaluationException {
         if (missing(seq)) return NF.numberNode(0);
         if (!seq.isArray()) return isTruthy(predicate.apply(seq)) ? NF.numberNode(1) : NF.numberNode(0);
         int count = 0;
-        for (JsonNode elem : seq) { if (isTruthy(predicate.apply(elem))) count++; }
+        for (int i = 0, size = seq.size(); i < size; i++) {
+            if (isTruthy(predicate.apply(seq.get(i)))) count++;
+        }
         return NF.numberNode(count);
     }
 
@@ -1221,7 +1355,7 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v = elem.get(fieldName);
-            if (v == null || v.isMissingNode()) continue;
+            if (v == null || v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$sum"); sum += sub.doubleValue(); any = true; }
             } else { requireT0412(v, "$sum"); sum += v.doubleValue(); any = true; }
@@ -1237,7 +1371,7 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v = elem.get(fieldName);
-            if (v == null || v.isMissingNode()) continue;
+            if (v == null || v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireAverageArg(sub); sum += sub.doubleValue(); count++; }
             } else { requireAverageArg(v); sum += v.doubleValue(); count++; }
@@ -1253,7 +1387,7 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v = elem.get(fieldName);
-            if (v == null || v.isMissingNode()) continue;
+            if (v == null || v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$max"); double d = sub.doubleValue(); if (d > max) max = d; any = true; }
             } else { requireT0412(v, "$max"); double d = v.doubleValue(); if (d > max) max = d; any = true; }
@@ -1269,12 +1403,12 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1.isMissingNode()) continue;
+            if (v1 == null || v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
                 if (!s.isObject()) continue;
                 JsonNode v2 = s.get(f2);
-                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2 == null || v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$sum"); sum += n.doubleValue(); any = true; } }
                 else { requireT0412(v2, "$sum"); sum += v2.doubleValue(); any = true; }
             }
@@ -1290,12 +1424,12 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1.isMissingNode()) continue;
+            if (v1 == null || v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
                 if (!s.isObject()) continue;
                 JsonNode v2 = s.get(f2);
-                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2 == null || v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireAverageArg(n); sum += n.doubleValue(); count++; } }
                 else { requireAverageArg(v2); sum += v2.doubleValue(); count++; }
             }
@@ -1311,12 +1445,12 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1.isMissingNode()) continue;
+            if (v1 == null || v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
                 if (!s.isObject()) continue;
                 JsonNode v2 = s.get(f2);
-                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2 == null || v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$max"); double d = n.doubleValue(); if (d > max) max = d; any = true; } }
                 else { requireT0412(v2, "$max"); double d = v2.doubleValue(); if (d > max) max = d; any = true; }
             }
@@ -1332,12 +1466,12 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1.isMissingNode()) continue;
+            if (v1 == null || v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
                 if (!s.isObject()) continue;
                 JsonNode v2 = s.get(f2);
-                if (v2 == null || v2.isMissingNode()) continue;
+                if (v2 == null || v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$min"); double d = n.doubleValue(); if (d < min) min = d; any = true; } }
                 else { requireT0412(v2, "$min"); double d = v2.doubleValue(); if (d < min) min = d; any = true; }
             }
@@ -1353,7 +1487,7 @@ public final class JsonataRuntime {
         for (JsonNode elem : items) {
             if (!elem.isObject()) continue;
             JsonNode v = elem.get(fieldName);
-            if (v == null || v.isMissingNode()) continue;
+            if (v == null || v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$min"); double d = sub.doubleValue(); if (d < min) min = d; any = true; }
             } else { requireT0412(v, "$min"); double d = v.doubleValue(); if (d < min) min = d; any = true; }
@@ -1448,7 +1582,7 @@ public final class JsonataRuntime {
     }
 
     private static int deepHashCode(JsonNode n) {
-        if (n == null || n.isMissingNode() || n.isNull()) return 0;
+        if (n == null || n == MISSING || n.isNull()) return 0;
         if (n.isNumber())  return Double.hashCode(n.doubleValue());
         if (n.isTextual()) return n.textValue().hashCode();
         if (n.isBoolean()) return Boolean.hashCode(n.booleanValue());
@@ -1478,7 +1612,7 @@ public final class JsonataRuntime {
 
     private static void flattenInto(JsonNode node, ArrayNode acc) {
         if (node.isArray()) { for (JsonNode e : node) flattenInto(e, acc); }
-        else if (!node.isMissingNode()) acc.add(node);
+        else if (node != MISSING) acc.add(node);
     }
 
     public static JsonNode fn_shuffle(JsonNode arg) {
@@ -1550,6 +1684,96 @@ public final class JsonataRuntime {
         return SequenceBuiltins.fn_filter(arr, predicate);
     }
 
+    // -------------------------------------------------------------------------
+    // Higher-order built-ins whose callback arrives as a value
+    // -------------------------------------------------------------------------
+    // When the callback is written inline the translator knows its arity and wires the right
+    // variant directly. When it arrives as a value — a variable holding a function, a partial
+    // application, a ~> chain, a function exported from a library — the arity is only known at
+    // runtime, so these overloads make the same decision there. Without them a two-parameter
+    // callback silently lost its index/key argument.
+
+    /**
+     * Wraps a callback so that a long-running loop over it observes {@link
+     * org.json_kula.jsonata_jvm.JsonataExpression#setTimeout(int)}.
+     *
+     * <p>Built-in higher-order functions invoke inline callbacks directly rather than through
+     * {@code fn_apply}, so without this a {@code $map} over millions of elements never noticed the
+     * deadline. The wrapper is only created when a deadline is actually set, so expressions without
+     * a timeout — the overwhelming majority — pay nothing at all.
+     */
+    public static JsonataLambda deadlineGuard(JsonataLambda fn) {
+        // Checked before the thread-local: most processes never call setTimeout at all, and this
+        // guard is installed at every higher-order call site.
+        if (!TIMEOUTS_IN_USE || !EvaluationContext.hasDeadline()) return fn;
+        return new JsonataLambda() {
+            private int calls;
+
+            @Override
+            public JsonNode apply(JsonNode element) throws RuntimeEvaluationException {
+                if ((++calls & 0x3F) == 0) EvaluationContext.checkTimeout();
+                return fn.apply(element);
+            }
+        };
+    }
+
+    /** Adapts a function value to a callback that receives the element alone. */
+    public static JsonataLambda elementCallback(JsonNode fn) {
+        return elem -> fn_apply(fn, elem);
+    }
+
+    /**
+     * Adapts a function value to a callback that receives a tuple: the whole tuple when the
+     * function declares two or more parameters, its first slot otherwise.
+     */
+    public static JsonataLambda tupleCallback(JsonNode fn) {
+        return lambdaArity(fn) >= 2
+                ? tuple -> fn_apply(fn, tuple)
+                : tuple -> fn_apply(fn, tuple.get(0));
+    }
+
+    /** {@code $map} with the callback supplied as a value. */
+    public static JsonNode fn_map(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        return lambdaArity(fn) >= 2
+                ? SequenceBuiltins.fn_map_indexed(arr, tupleCallback(fn))
+                : SequenceBuiltins.fn_map(arr, elementCallback(fn));
+    }
+
+    /** {@code $filter} with the predicate supplied as a value. */
+    public static JsonNode fn_filter(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        return lambdaArity(predicate) >= 2
+                ? SequenceBuiltins.fn_filter_indexed(arr, tupleCallback(predicate))
+                : SequenceBuiltins.fn_filter(arr, elementCallback(predicate));
+    }
+
+    /** {@code $single} with the predicate supplied as a value. */
+    public static JsonNode fn_single(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        return lambdaArity(predicate) >= 2
+                ? SequenceBuiltins.fn_single_indexed(arr, tupleCallback(predicate))
+                : SequenceBuiltins.fn_single(arr, elementCallback(predicate));
+    }
+
+    /** {@code $sift} with the predicate supplied as a value. */
+    public static JsonNode fn_sift(JsonNode obj, JsonNode fn) throws RuntimeEvaluationException {
+        return SequenceBuiltins.fn_sift(obj, tupleCallback(fn));
+    }
+
+    /** {@code $each} with the callback supplied as a value. */
+    public static JsonNode fn_each(JsonNode obj, JsonNode fn) throws RuntimeEvaluationException {
+        return fn_each(obj, tupleCallback(fn));
+    }
+
+    /**
+     * {@code $sort} with the callback supplied as a value: two or more parameters means a
+     * comparator, anything else a key extractor — the same rule the translator applies to a
+     * literal lambda.
+     */
+    public static JsonNode fn_sort(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        return lambdaArity(fn) >= 2
+                ? SequenceBuiltins.fn_sort_comparator(arr, tupleCallback(fn))
+                : SequenceBuiltins.fn_sort(arr, elementCallback(fn));
+    }
+
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
         return SequenceBuiltins.fn_reduce(arr, fn, init);
@@ -1581,16 +1805,16 @@ public final class JsonataRuntime {
      */
     public static JsonNode eachIndexed(JsonNode seq, JsonataLambda fn)
             throws RuntimeEvaluationException {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         ArrayNode result = NF.arrayNode();
         if (seq.isArray()) {
             for (int i = 0; i < seq.size(); i++) {
                 JsonNode val = fn.apply(NF.arrayNode().add(seq.get(i)).add(NF.numberNode(i)));
-                if (!val.isMissingNode()) appendToSequence(result, val);
+                if (val != MISSING) appendToSequence(result, val);
             }
         } else {
             JsonNode val = fn.apply(NF.arrayNode().add(seq).add(NF.numberNode(0)));
-            if (!val.isMissingNode()) appendToSequence(result, val);
+            if (val != MISSING) appendToSequence(result, val);
         }
         return unwrap(result);
     }
@@ -1603,7 +1827,7 @@ public final class JsonataRuntime {
      * group-by semantics for the same key appearing across iterations).
      */
     public static JsonNode mergeGroupByObjects(JsonNode seq) {
-        if (seq == null || seq.isMissingNode()) return MISSING;
+        if (seq == null || seq == MISSING) return MISSING;
         if (!seq.isArray()) return seq.isObject() ? seq : MISSING;
         ObjectNode result = NF.objectNode();
         for (JsonNode item : seq) {
@@ -1771,14 +1995,14 @@ public final class JsonataRuntime {
         if (k == null) return MISSING;
         if (obj.isObject()) {
             JsonNode v = obj.get(k);
-            return (v == null || v.isMissingNode()) ? MISSING : v;
+            return (v == null || v == MISSING) ? MISSING : v;
         }
         if (obj.isArray()) {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : obj) {
                 if (elem.isObject()) {
                     JsonNode v = elem.get(k);
-                    if (v != null && !v.isMissingNode()) appendToSequence(result, v);
+                    if (v != null && v != MISSING) appendToSequence(result, v);
                 }
             }
             return unwrap(result);
@@ -1828,6 +2052,7 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_each(JsonNode obj, JsonataLambda fn)
             throws RuntimeEvaluationException {
+        fn = deadlineGuard(fn);
         if (missing(obj) || !obj.isObject()) return MISSING;
         ArrayNode result = NF.arrayNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
@@ -2001,12 +2226,25 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Registers {@code fn} in the lambda registry and returns a sentinel
-     * {@link TextNode} that can be stored as a {@link JsonNode} value and
-     * later resolved by {@link #fn_apply}.
+     * Wraps {@code fn} as a JSONata function value — a {@link LambdaNode} that can be stored
+     * anywhere a {@link JsonNode} can and later called by {@link #fn_apply}.
      */
     public static JsonNode lambdaNode(JsonataLambda fn) {
         return LambdaRegistry.lambdaNode(fn);
+    }
+
+    /**
+     * As {@link #lambdaNode(JsonataLambda)}, recording how many parameters the function declares.
+     * Built-in higher-order functions consult the arity when a callback reaches them as a value
+     * rather than as a literal lambda, so that a two-parameter callback still receives its index.
+     */
+    public static JsonNode lambdaNode(JsonataLambda fn, int arity) {
+        return LambdaRegistry.lambdaNode(fn, arity);
+    }
+
+    /** Returns the declared parameter count of a function value, or -1 if it is unknown. */
+    public static int lambdaArity(JsonNode fn) {
+        return LambdaRegistry.arityOf(fn);
     }
 
     // =========================================================================
@@ -2014,10 +2252,8 @@ public final class JsonataRuntime {
     // =========================================================================
 
     /**
-     * Compiles a JSONata regex literal and stores it in the registry.
-     * Returns a sentinel {@link TextNode} with prefix {@code "__rx:"} that
-     * can be passed through the Jackson type system and later resolved by
-     * the regex runtime.
+     * Compiles a JSONata regex literal (caching the compilation) and returns it as a
+     * {@link RegexNode}.
      *
      * @param pattern the regex pattern string (without delimiters)
      * @param flags   flags string: {@code "i"} for case-insensitive,
@@ -2033,22 +2269,51 @@ public final class JsonataRuntime {
     // =========================================================================
 
     /**
-     * Merges permanent bindings from the generated class with per-evaluation
-     * bindings and installs the result as the active bindings for this thread.
+     * Installs the bindings for an evaluation on this thread: {@code permanent} overlaid with
+     * {@code perEval}. Must be paired with {@link #endEvaluation()} in a finally block.
      *
-     * <p>Must be paired with a {@link #endEvaluation()} call in a finally block.
+     * @param permanent       the expression's permanent bindings, pre-merged and reused across
+     *                        calls; {@code null} means "none"
+     * @param perEval         per-evaluation bindings, or {@code null}
+     * @param instanceRegexes per-instance regex cache from the expression instance
+     */
+    public static void beginEvaluation(JsonataBindings permanent,
+                                       JsonataBindings perEval,
+                                       Map<String, org.joni.Regex> instanceRegexes,
+                                       int timeoutMs) {
+        beginEvaluation(permanent, perEval, instanceRegexes, timeoutMs, null);
+    }
+
+    /**
+     * As {@link #beginEvaluation(JsonataBindings, JsonataBindings, Map, int)}, additionally
+     * installing the {@code $eval} delegate of the expression being evaluated.
+     */
+    public static void beginEvaluation(JsonataBindings permanent,
+                                       JsonataBindings perEval,
+                                       Map<String, org.joni.Regex> instanceRegexes,
+                                       int timeoutMs,
+                                       EvalDelegate evalDelegate) {
+        EvaluationContext.beginEvaluation(
+                permanent != null ? permanent : EvaluationContext.emptyBindings(),
+                perEval, instanceRegexes, timeoutMs, evalDelegate);
+    }
+
+    /**
+     * Installs bindings held as separate value and function maps.
      *
-     * @param permanentValues    permanent named values registered on the expression instance
-     * @param permanentFunctions permanent named functions registered on the expression instance
-     * @param perEval            per-evaluation bindings, or {@code null}
-     * @param instanceRegexes    per-instance regex cache from the expression instance
+     * <p>Kept for hand-written {@link JsonataExpression} implementations; classes generated by this
+     * library use {@link #beginEvaluation(JsonataBindings, JsonataBindings, Map, int)}, which does
+     * not rebuild the binding set on every call.
      */
     public static void beginEvaluation(Map<String, JsonNode> permanentValues,
                                        Map<String, JsonataBoundFunction> permanentFunctions,
                                        JsonataBindings perEval,
                                        Map<String, org.joni.Regex> instanceRegexes,
                                        int timeoutMs) {
-        EvaluationContext.beginEvaluation(permanentValues, permanentFunctions, perEval, instanceRegexes, timeoutMs);
+        JsonataBindings permanent = new JsonataBindings();
+        permanentValues.forEach(permanent::bindValue);
+        permanentFunctions.forEach(permanent::bindFunction);
+        EvaluationContext.beginEvaluation(permanent, perEval, instanceRegexes, timeoutMs, null);
     }
 
     /**
@@ -2057,6 +2322,15 @@ public final class JsonataRuntime {
      */
     public static void endEvaluation() {
         EvaluationContext.endEvaluation();
+    }
+
+    /**
+     * Returns {@code true} when an evaluation is active on the current thread. Callers that invoke
+     * runtime helpers outside {@code evaluate()} — such as a function exported from a library —
+     * use this to decide whether they must open an evaluation frame of their own.
+     */
+    public static boolean isEvaluationActive() {
+        return EvaluationContext.isActive();
     }
 
     /**
@@ -2086,22 +2360,28 @@ public final class JsonataRuntime {
     // Internal helpers (package-private so helper classes can call them)
     // =========================================================================
 
+    /**
+     * Evaluates a value and discards it. Generated blocks use this for expressions whose result is
+     * unused, since Java rejects a bare constant or variable reference as a statement.
+     */
+    public static void discard(JsonNode ignored) {}
+
     /** Public variant used by generated coalesce expressions ({@code ??}). */
     public static boolean isMissing(JsonNode n) {
-        return n == null || n.isMissingNode();
+        return n == null || n == MISSING;
     }
 
-    /** Returns {@code true} when {@code node} is an internal lambda-registry token. */
+    /** Returns {@code true} when {@code node} is a JSONata function value. */
     public static boolean isLambdaToken(JsonNode node) {
         return LambdaRegistry.isLambdaToken(node);
     }
 
-    /** Returns {@code true} when {@code node} is an internal regex-registry token. */
+    /** Returns {@code true} when {@code node} is a compiled regex value. */
     public static boolean isRegexToken(JsonNode node) {
         return RegexRegistry.isRegexToken(node);
     }
 
-    /** Resolves a regex sentinel token to the compiled {@link org.joni.Regex}. */
+    /** Returns the compiled {@link org.joni.Regex} carried by a {@link RegexNode}. */
     public static org.joni.Regex lookupRegex(JsonNode token) throws RuntimeEvaluationException {
         return RegexRegistry.lookupRegex(token);
     }
@@ -2112,11 +2392,15 @@ public final class JsonataRuntime {
     }
 
     public static boolean missing(JsonNode n) {
-        return n == null || n.isMissingNode();
+        // Reference comparison, not isMissingNode(): MissingNode is a singleton, and this method is
+        // called on every operand of every operation. Against the dozen JsonNode subclasses a path
+        // expression touches, the virtual call is megamorphic and cannot be inlined; a pointer
+        // compare can.
+        return n == null || n == MISSING;
     }
 
     static boolean missingOrEmpty(JsonNode n) {
-        return n == null || n.isMissingNode() || n.isTextual() && n.asText().isEmpty();
+        return n == null || n == MISSING || n.isTextual() && n.asText().isEmpty();
     }
 
     /**
@@ -2137,34 +2421,64 @@ public final class JsonataRuntime {
 
     /** Converts a {@link JsonNode} to a String representation. */
     public static String toText(JsonNode n) throws RuntimeEvaluationException {
-        if (n.isTextual()) {
-            // Lambda/function tokens serialize as empty string per JSONata spec
-            if (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n)) return "";
-            return n.textValue();
-        }
+        if (n.isTextual()) return n.textValue();
         if (n.isNumber()) return numberToString(n.doubleValue());
         if (n.isBoolean()) return String.valueOf(n.booleanValue());
         if (n.isNull()) return "null";
-        // Arrays/objects may contain lambda-valued fields — sanitize before serializing
-        return sanitizeForString(n).toString();
+        // Function and regex values render as the empty string (JSONata spec); LambdaNode and
+        // RegexNode serialize themselves that way, so containers need no defensive copy.
+        if (n instanceof LambdaNode || n instanceof RegexNode) return "";
+        return n.toString();
     }
 
-    /** Replaces lambda/regex tokens with empty string nodes recursively for JSON serialization. */
+    /**
+     * Returns {@code n} with function and regex values replaced by empty strings.
+     *
+     * <p>Both node types already serialise as {@code ""}, so this is only needed by callers that
+     * inspect the tree rather than serialise it. Nothing is copied unless such a value is present.
+     */
     public static JsonNode sanitizeForString(JsonNode n) {
-        if (n.isTextual() && (LambdaRegistry.isLambdaToken(n) || RegexRegistry.isRegexToken(n))) {
-            return NF.textNode("");
-        }
+        if (n instanceof LambdaNode || n instanceof RegexNode) return NF.textNode("");
+        if (!containsFunctionValue(n)) return n;
         if (n.isArray()) {
             com.fasterxml.jackson.databind.node.ArrayNode copy = NF.arrayNode();
             n.forEach(elem -> copy.add(sanitizeForString(elem)));
             return copy;
         }
-        if (n.isObject()) {
-            com.fasterxml.jackson.databind.node.ObjectNode copy = NF.objectNode();
-            n.fields().forEachRemaining(e -> copy.set(e.getKey(), sanitizeForString(e.getValue())));
-            return copy;
+        com.fasterxml.jackson.databind.node.ObjectNode copy = NF.objectNode();
+        n.fields().forEachRemaining(e -> copy.set(e.getKey(), sanitizeForString(e.getValue())));
+        return copy;
+    }
+
+    /** True if {@code n} is, or contains anywhere below it, a function or regex value. */
+    private static boolean containsFunctionValue(JsonNode n) {
+        if (n instanceof LambdaNode || n instanceof RegexNode) return true;
+        if (n.isArray() || n.isObject()) {
+            for (JsonNode child : n) {
+                if (containsFunctionValue(child)) return true;
+            }
         }
-        return n;
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if {@code s} — the output of {@link Double#toString} for a fractional
+     * value — is already what the 15-significant-digit rounding would produce: no exponent, no
+     * leading run of zeros that would switch the result to scientific notation, and few enough
+     * significant digits that rounding cannot change it.
+     */
+    private static boolean isPlainWithin15SignificantDigits(String s) {
+        int significant = 0;
+        boolean seenNonZero = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == 'E' || c == 'e') return false;
+            if (c == '-' || c == '.') continue;
+            if (c != '0') seenNonZero = true;
+            if (seenNonZero && ++significant > 15) return false;
+        }
+        // "0.0000…" and below are rendered in scientific notation by the reference path.
+        return !s.startsWith("0.0000") && !s.startsWith("-0.0000");
     }
 
     /**
@@ -2188,7 +2502,12 @@ public final class JsonataRuntime {
             s = s.replaceAll("\\.0+e", "e").replaceAll("e(\\d)", "e+$1");
             return s;
         }
-        // Fractional: round to 15 significant figures to match JSONata / JavaScript behavior
+        // Fractional. The reference behaviour is "round to 15 significant figures, then print
+        // plainly", which needs BigDecimal — but only when the shortest round-trip form is longer
+        // than 15 significant digits. It usually is not (4.32, 26.3, 0.05 …), and Double.toString
+        // already produces exactly that form, so the common case skips BigDecimal entirely.
+        String shortest = Double.toString(v);
+        if (isPlainWithin15SignificantDigits(shortest)) return shortest;
         java.math.BigDecimal bd = new java.math.BigDecimal(v)
                 .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP))
                 .stripTrailingZeros();
@@ -2221,7 +2540,7 @@ public final class JsonataRuntime {
      */
     static void appendToSequence(ArrayNode acc, JsonNode val) {
         if (val.isArray()) val.forEach(acc::add);
-        else if (!val.isMissingNode()) acc.add(val);
+        else if (val != MISSING) acc.add(val);
     }
 
     /**
@@ -2237,7 +2556,7 @@ public final class JsonataRuntime {
     }
 
     public static JsonNode unwrap(JsonNode node) {
-        if (node == null || node.isMissingNode()) return MISSING;
+        if (node == null || node == MISSING) return MISSING;
         if (!node.isArray()) return node;
         return unwrap((ArrayNode) node);
     }

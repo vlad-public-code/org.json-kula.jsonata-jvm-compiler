@@ -14,7 +14,10 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import static org.json_kula.jsonata_jvm.JsonNodeTestHelper.EMPTY_OBJECT;
@@ -27,6 +30,12 @@ public class JsonataTestSuiteTest {
     private static JsonNode[] DATASETS;
     private static java.util.Map<String, JsonNode> NAMED_DATASETS;
     private static JsonataExpressionFactory FACTORY;
+
+    /** Expressions per {@code javac} invocation during {@link #precompile}. */
+    private static final int COMPILE_BATCH = 250;
+
+    /** Pre-compiled expressions, keyed by source text. Shared by every case that uses one. */
+    private static final Map<String, JsonataExpression> COMPILED = new ConcurrentHashMap<>();
 
     @BeforeAll
     static void loadDatasets() throws IOException {
@@ -65,24 +74,82 @@ public class JsonataTestSuiteTest {
     @TestFactory
     Stream<DynamicTest> runAllTestCases() throws IOException {
         Path groupsDir = Path.of("src/test/resources", TEST_SUITE_PATH, "groups");
+        List<Path> testFiles;
+        try (Stream<Path> walk = Files.walk(groupsDir)) {
+            testFiles = walk.filter(p -> p.toString().endsWith(".json")).sorted().toList();
+        }
+
+        precompile(testFiles);
+
         List<DynamicTest> tests = new ArrayList<>();
-        
-        Files.walk(groupsDir)
-            .filter(p -> p.toString().endsWith(".json"))
-            .filter(p -> !p.toString().endsWith(".jsonata"))
-            .filter(p -> !p.getFileName().toString().contains("sequences"))
-            .filter(p -> !p.getFileName().toString().contains("large.json"))
-            .sorted()
-            .forEach(testFile -> {
-                String testName = groupsDir.relativize(testFile).toString().replace('\\', '/');
-                
-                DynamicTest test = DynamicTest.dynamicTest(testName, () -> {
-                    runTestCaseByFile(testFile);
-                });
-                tests.add(test);
-            });
-        
+        for (Path testFile : testFiles) {
+            String testName = groupsDir.relativize(testFile).toString().replace('\\', '/');
+            tests.add(DynamicTest.dynamicTest(testName, () -> runTestCaseByFile(testFile)));
+        }
         return tests.stream();
+    }
+
+    /**
+     * Compiles every expression the suite expects to compile, in batches.
+     *
+     * <p>{@code javac} costs far more per invocation than per class, so compiling ~1 500 expressions
+     * one at a time dominated this suite's wall time. Batching them cuts it several-fold.
+     *
+     * <p>Cases that expect a <em>compilation error</em> are left out: a batch aborts as a whole, so a
+     * deliberately invalid expression would take its batch with it. Those still compile on demand in
+     * {@link #evaluate}, which is where their error is asserted. If a batch fails anyway — a real
+     * regression — its expressions are recompiled one by one, so the failure lands on the case that
+     * owns it rather than on every case in the batch.
+     */
+    private static void precompile(List<Path> testFiles) {
+        LinkedHashSet<String> expressions = new LinkedHashSet<>();
+        for (Path testFile : testFiles) {
+            try {
+                JsonNode content = MAPPER.readTree(testFile.toFile());
+                for (JsonNode testCase : content.isArray() ? content : List.of(content)) {
+                    if (expectsError(testCase)) continue;
+                    String expression = expressionOf(testFile, testCase);
+                    if (expression != null) expressions.add(expression);
+                }
+            } catch (IOException e) {
+                // A file that cannot be read fails its own test, with a better message than here.
+            }
+        }
+
+        List<String> pending = new ArrayList<>(expressions);
+        for (int start = 0; start < pending.size(); start += COMPILE_BATCH) {
+            List<String> batch = pending.subList(start, Math.min(start + COMPILE_BATCH, pending.size()));
+            try {
+                List<JsonataExpression> compiled = FACTORY.compileAll(batch);
+                for (int i = 0; i < batch.size(); i++) COMPILED.put(batch.get(i), compiled.get(i));
+            } catch (JsonataCompilationException batchFailure) {
+                for (String expression : batch) {
+                    try {
+                        COMPILED.put(expression, FACTORY.compile(expression));
+                    } catch (JsonataCompilationException individualFailure) {
+                        // Left out on purpose: the case that uses it compiles on demand and reports.
+                    }
+                }
+            }
+        }
+    }
+
+    /** True if the case asserts an error code rather than a value. */
+    private static boolean expectsError(JsonNode testCase) {
+        return testCase.has("code")
+                || (testCase.has("error") && testCase.path("error").has("code"));
+    }
+
+    /** The expression a case runs, read from {@code expr} or {@code expr-file}. */
+    private static String expressionOf(Path testFile, JsonNode testCase) {
+        try {
+            if (testCase.has("expr-file")) {
+                return Files.readString(testFile.resolveSibling(testCase.get("expr-file").asText()));
+            }
+            return testCase.has("expr") ? testCase.get("expr").asText() : null;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     private void runTestCaseByFile(Path testFile) throws IOException {
@@ -147,7 +214,9 @@ public class JsonataTestSuiteTest {
             if (expectedCode != null) {
                 String actualCode = e.getErrorCode();
                 assertEquals(expectedCode, actualCode, "Error code mismatch for expression: " + expression);
-            } else if (undefinedResult || expectedResult != null) {
+            } else {
+                // Covers both "expected a result" and "the case declares no expectation at all" —
+                // the latter must not pass silently just because the expression happened to throw.
                 fail("Expected success but got error: " + e.getMessage() +  " for expression: " + expression);
             }
         }
@@ -182,7 +251,8 @@ public class JsonataTestSuiteTest {
             jsonataBindings.bindValue(entry.getKey(), entry.getValue());
         });
         
-        JsonataExpression compiled = FACTORY.compile(expression);
+        JsonataExpression compiled = COMPILED.get(expression);
+        if (compiled == null) compiled = FACTORY.compile(expression);
         return compiled.evaluate(data, jsonataBindings);
     }
 }

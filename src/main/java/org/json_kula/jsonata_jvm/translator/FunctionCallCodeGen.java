@@ -59,8 +59,12 @@ final class FunctionCallCodeGen {
             String lambdaExpr = genUnpackLambda(t, lam, ctx, 2);
             return "fn_sort_comparator(" + args.get(0) + ", " + lambdaExpr + ")";
         }
-        // 1-param or expression: key extractor
-        return genHigherOrder(t, "fn_sort", n, args, ctx, 0, 1);
+        if (fnArg instanceof Lambda) {
+            // 1-param lambda: key extractor
+            return genHigherOrder(t, "fn_sort", n, args, ctx, 0, 1);
+        }
+        // The callback is a value: its arity — and so comparator-vs-key — is a runtime question.
+        return "fn_sort(" + args.get(0) + ", " + fnArg.accept(t, ctx) + ")";
     }
 
     /**
@@ -92,14 +96,12 @@ final class FunctionCallCodeGen {
             return indexedMethod + "(" + seqExpr + ", " + lambdaExpr + ")";
         }
 
-        String lambdaExpr;
-        if (fnArg instanceof Lambda lam) {
-            lambdaExpr = inlineLambda(t, lam, ctx);
-        } else {
-            // fn is some expression that evaluates to a lambdaNode — wrap it
-            String fnExpr = fnArg.accept(t, ctx);
-            lambdaExpr = "(__elem -> fn_apply(" + fnExpr + ", __elem))";
+        if (!(fnArg instanceof Lambda)) {
+            // The callback is a value; the runtime overload picks the plain or indexed variant
+            // from its arity, so a two-parameter callback still receives its index.
+            return rtMethod + "(" + seqExpr + ", " + fnArg.accept(t, ctx) + ")";
         }
+        String lambdaExpr = inlineLambda(t, (Lambda) fnArg, ctx);
         return rtMethod + "(" + seqExpr + ", " + lambdaExpr + ")";
     }
 
@@ -119,14 +121,10 @@ final class FunctionCallCodeGen {
             String lambdaExpr = genUnpackLambda(t, lam, ctx, 3);
             return "fn_single_indexed(" + seqExpr + ", " + lambdaExpr + ")";
         }
-        String lambdaExpr;
-        if (fnArg instanceof Lambda lam) {
-            lambdaExpr = inlineLambda(t, lam, ctx);
-        } else {
-            String fnExpr = fnArg.accept(t, ctx);
-            lambdaExpr = "(__elem -> fn_apply(" + fnExpr + ", __elem))";
+        if (!(fnArg instanceof Lambda)) {
+            return "fn_single(" + seqExpr + ", " + fnArg.accept(t, ctx) + ")";
         }
-        return "fn_single(" + seqExpr + ", " + lambdaExpr + ")";
+        return "fn_single(" + seqExpr + ", " + inlineLambda(t, (Lambda) fnArg, ctx) + ")";
     }
 
     /**
@@ -181,14 +179,12 @@ final class FunctionCallCodeGen {
         }
         AstNode fnArg = n.args().get(fnArgIdx);
         String lambdaExpr;
-        if (fnArg instanceof Lambda lam) {
-            lambdaExpr = genUnpackLambda(t, lam, ctx, 3);
-        } else {
-            // External function reference: fn_each passes [value, key, obj] tuple.
-            // Pass only the value (element 0) to single-arg function references.
-            String fnExpr = fnArg.accept(t, ctx);
-            lambdaExpr = "(__elem -> fn_apply(" + fnExpr + ", __elem.get(0)))";
+        if (!(fnArg instanceof Lambda lam)) {
+            // A callback supplied as a value: the runtime passes the [value, key, object] tuple
+            // when it declares two or more parameters, the value alone otherwise.
+            return "fn_each(" + objExpr + ", " + fnArg.accept(t, ctx) + ")";
         }
+        lambdaExpr = genUnpackLambda(t, lam, ctx, 3);
         return "fn_each(" + objExpr + ", " + lambdaExpr + ")";
     }
 
@@ -210,13 +206,10 @@ final class FunctionCallCodeGen {
         }
         AstNode fnArg = n.args().get(fnArgIdx);
         String lambdaExpr;
-        if (fnArg instanceof Lambda lam) {
-            lambdaExpr = genUnpackLambda(t, lam, ctx, 3);
-        } else {
-            // External function: pass just the value (tuple element 0) for 1-arity functions
-            String fnExpr = fnArg.accept(t, ctx);
-            lambdaExpr = "(__elem -> fn_apply(" + fnExpr + ", __elem.get(0)))";
+        if (!(fnArg instanceof Lambda lam)) {
+            return "fn_sift(" + objExpr + ", " + fnArg.accept(t, ctx) + ")";
         }
+        lambdaExpr = genUnpackLambda(t, lam, ctx, 3);
         return "fn_sift(" + objExpr + ", " + lambdaExpr + ")";
     }
 
@@ -243,8 +236,11 @@ final class FunctionCallCodeGen {
         lam.params().forEach(ctx.state::addLocalVar);
         try {
             StringBuilder sb = new StringBuilder();
+            // __root is a parameter, not a captured local: the body may need to reach the document
+            // root (directly via $, or indirectly via a block helper that takes it), and a method
+            // reference has no enclosing scope to capture it from.
             sb.append("\nprivate JsonNode ").append(methodName)
-              .append("(JsonNode __el) throws RuntimeEvaluationException {\n");
+              .append("(JsonNode __root, JsonNode __el) throws RuntimeEvaluationException {\n");
             for (int i = 0; i < lam.params().size(); i++) {
                 if (i < tupleLen) {
                     sb.append("    JsonNode $").append(lam.params().get(i))
@@ -261,7 +257,8 @@ final class FunctionCallCodeGen {
             ctx.state.popScope();
         }
 
-        return "this::" + methodName;
+        String arg = "__ua" + id;
+        return "(" + arg + " -> " + methodName + "(" + ctx.rootVar + ", " + arg + "))";
     }
 
     /**
@@ -438,8 +435,9 @@ final class FunctionCallCodeGen {
         lam.params().forEach(ctx.state::addLocalVar);
         try {
             StringBuilder sb = new StringBuilder();
+            // __root is a parameter for the same reason as in genUnpackLambda.
             sb.append("\nprivate JsonNode ").append(methodName)
-              .append("(JsonNode __el) throws RuntimeEvaluationException {\n");
+              .append("(JsonNode __root, JsonNode __el) throws RuntimeEvaluationException {\n");
             for (int i = 0; i < lam.params().size(); i++) {
                 if (i == 0) {
                     sb.append("    JsonNode $").append(lam.params().get(i)).append(" = __el;\n");
@@ -455,7 +453,8 @@ final class FunctionCallCodeGen {
             ctx.state.popScope();
         }
 
-        return "this::" + methodName;
+        String arg = "__la" + id;
+        return "(" + arg + " -> " + methodName + "(" + ctx.rootVar + ", " + arg + "))";
     }
 
     /**
@@ -667,10 +666,11 @@ final class FunctionCallCodeGen {
                 while (j < inner.length() && "+-?".indexOf(inner.charAt(j)) >= 0) { mod.append(inner.charAt(j++)); }
                 result.add(union + mod);
                 i = j;
-            } else if (c == 'a' || c == 'o' || c == 'b' || c == 'n' || c == 's' || c == 'l' || c == 'j' || c == 'u') {
+            } else if (c == 'a' || c == 'o' || c == 'b' || c == 'n' || c == 's' || c == 'l'
+                    || c == 'j' || c == 'u' || c == 'f' || c == 'x') {
                 StringBuilder spec = new StringBuilder(String.valueOf(c));
                 i++;
-                // Array type param: a<n>
+                // Array or function type param: a<n>, f<n:n>
                 if (i < inner.length() && inner.charAt(i) == '<') {
                     int j = i + 1;
                     int d = 1;
@@ -690,9 +690,9 @@ final class FunctionCallCodeGen {
                 result.add("-");
                 i++;
             } else {
-                // Unknown type char (e.g. 'f' for function — not supported).
-                // Skip any trailing angle-bracket type param so that e.g. f<n:n>
-                // is consumed entirely and the 'n' inside is not parsed as a spec.
+                // Unknown type char. Skipping it without adding a spec would shift every later
+                // spec onto the wrong parameter, so this stays a last resort for genuinely
+                // unrecognised syntax. Skip any trailing angle-bracket type param with it.
                 i++;
                 if (i < inner.length() && inner.charAt(i) == '<') {
                     int j = i + 1, d = 1;
@@ -727,7 +727,13 @@ final class FunctionCallCodeGen {
             if (base.equals("n") || base.equals("s") || base.equals("b")) return null;
         }
         String guard = focus ? "if (!" + paramVar + ".isMissingNode()) " : "";
-        if (base.equals("n")) {
+        if (base.charAt(0) == 'f') {
+            // "f" and its parametrised form "f<n:n>": the argument must be a function value. The
+            // argument function's own parameter and return types are not checked, matching jsonata-js.
+            return guard + "if (!" + paramVar + ".isMissingNode() && !isLambdaToken(" + paramVar + ")) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a function\");";
+        } else if (base.equals("x")) {
+            return null;   // any type at all, functions included — nothing to check
+        } else if (base.equals("n")) {
             return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isNumber()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a number\");";
         } else if (base.equals("s")) {
             return guard + "if (!" + paramVar + ".isMissingNode() && !" + paramVar + ".isTextual()) throw new RuntimeEvaluationException(\"T0410\",\"Argument " + argNum + " of function is not a string\");";

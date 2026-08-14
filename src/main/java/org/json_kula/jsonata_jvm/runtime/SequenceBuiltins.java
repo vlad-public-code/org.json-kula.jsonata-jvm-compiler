@@ -29,6 +29,7 @@ final class SequenceBuiltins {
     }
 
     static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn) throws RuntimeEvaluationException {
+        keyFn = JsonataRuntime.deadlineGuard(keyFn);
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isArray()) {
             // Scalar: wrap in a 1-element array
@@ -53,7 +54,7 @@ final class SequenceBuiltins {
         boolean hasNumber = false, hasString = false;
         for (int i = 0; i < list.size(); i++) {
             JsonNode k = keyFn != null ? keyFn.apply(list.get(i)) : list.get(i);
-            if (k == null || k.isMissingNode()) {
+            if (k == null || k == JsonataRuntime.MISSING) {
                 // No keyFn result / undefined: skip without error
                 keys[i] = JsonataRuntime.MISSING;
                 continue;
@@ -80,8 +81,8 @@ final class SequenceBuiltins {
         Comparator<Integer> cmp = (ia, ib) -> {
             JsonNode ka = keys[ia];
             JsonNode kb = keys[ib];
-            if (ka.isMissingNode() || ka.isNull()) return kb.isMissingNode() || kb.isNull() ? 0 : 1;
-            if (kb.isMissingNode() || kb.isNull()) return -1;
+            if (ka == JsonataRuntime.MISSING || ka.isNull()) return kb == JsonataRuntime.MISSING || kb.isNull() ? 0 : 1;
+            if (kb == JsonataRuntime.MISSING || kb.isNull()) return -1;
             if (allNumbers)
                 return Double.compare(ka.doubleValue(), kb.doubleValue());
             return ka.textValue().compareTo(kb.textValue());
@@ -102,15 +103,18 @@ final class SequenceBuiltins {
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isArray()) return arg;
+        final JsonataLambda compare = JsonataRuntime.deadlineGuard(comparatorFn);
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
+        // The comparator answers one question — "should $a come after $b?" — so the mirrored
+        // question has to be asked as well to tell "equal" from "before": answering -1 for both
+        // makes the comparator inconsistent, and equal elements then get reordered rather than
+        // keeping their input order (the official suite's $sort-by-price case proves it).
+        // The mirror is only needed when the first answer is falsy, so an already-ordered pair
+        // still costs one call.
         Comparator<JsonNode> cmp = (a, b) -> {
-            // comparatorFn(a, b) returns true if a should come AFTER b (ascending semantics)
-            JsonNode resultAB = comparatorFn.apply(NF.arrayNode().add(a).add(b));
-            if (JsonataRuntime.isTruthy(resultAB)) return 1;  // a > b
-            // Check if b > a; if neither, they are equal → return 0 for stable ordering
-            JsonNode resultBA = comparatorFn.apply(NF.arrayNode().add(b).add(a));
-            return JsonataRuntime.isTruthy(resultBA) ? -1 : 0;
+            if (JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(a).add(b)))) return 1;
+            return JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(b).add(a))) ? -1 : 0;
         };
         list.sort(cmp);
         ArrayNode result = NF.arrayNode();
@@ -190,6 +194,7 @@ final class SequenceBuiltins {
     }
 
     static JsonNode fn_map(JsonNode arr, JsonataLambda fn) throws RuntimeEvaluationException {
+        fn = JsonataRuntime.deadlineGuard(fn);
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         ArrayNode result = NF.arrayNode();
         if (arr.isArray()) {
@@ -202,11 +207,13 @@ final class SequenceBuiltins {
 
     static JsonNode fn_filter(JsonNode arr, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = JsonataRuntime.deadlineGuard(predicate);
         return JsonataRuntime.filter(arr, predicate);
     }
 
     static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
+        fn = JsonataRuntime.deadlineGuard(fn);
         if (JsonataRuntime.missing(arr)) return init;
         // fn receives a pair array [acc, elem]; the translator unpacks this for
         // multi-param lambdas via genUnpackLambda.
@@ -240,6 +247,7 @@ final class SequenceBuiltins {
      * {@code $i} and {@code $a} parameters are available.
      */
     static JsonNode fn_map_indexed(JsonNode arr, JsonataLambda fn) throws RuntimeEvaluationException {
+        fn = JsonataRuntime.deadlineGuard(fn);
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -257,6 +265,7 @@ final class SequenceBuiltins {
      */
     static JsonNode fn_filter_indexed(JsonNode arr, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = JsonataRuntime.deadlineGuard(predicate);
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -275,6 +284,7 @@ final class SequenceBuiltins {
      */
     static JsonNode fn_single(JsonNode arr, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = JsonataRuntime.deadlineGuard(predicate);
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -306,6 +316,7 @@ final class SequenceBuiltins {
     /** Multi-param $single: passes [value, index, array] to the predicate. */
     static JsonNode fn_single_indexed(JsonNode arr, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = JsonataRuntime.deadlineGuard(predicate);
         if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         List<JsonNode> items = new ArrayList<>();
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
@@ -333,6 +344,7 @@ final class SequenceBuiltins {
      * {@code $v} and {@code $k} parameters are available.
      */
     static JsonNode fn_sift(JsonNode obj, JsonataLambda fn) throws RuntimeEvaluationException {
+        fn = JsonataRuntime.deadlineGuard(fn);
         if (JsonataRuntime.missing(obj) || !obj.isObject()) return JsonataRuntime.MISSING;
         ObjectNode result = NF.objectNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
