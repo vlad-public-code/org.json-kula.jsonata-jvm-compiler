@@ -162,8 +162,9 @@ class JsonataFunctionValueBindingsTest {
                     throw new AssertionError(e);
                 }
             });
-            JsonataBindings b = new JsonataBindings().bindFunction("applyTwice", applyTwice);
-            lib.getFunctions().forEach(b::bindFunction);
+            JsonataBindings b = new JsonataBindings()
+                    .bindFunction("applyTwice", applyTwice)
+                    .useLibrary(lib);
             assertEquals(7.0, eval("$applyTwice($inc, 5)", b).doubleValue(), 1e-9);
             assertJson("[2,3,4]", eval("$map([1,2,3], $inc)", b));
         }

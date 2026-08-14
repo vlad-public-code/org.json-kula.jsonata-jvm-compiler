@@ -8,7 +8,7 @@ sitemap: false
 > jsonata-jvm-compiler is a Java 21 library that compiles [JSONata](https://jsonata.org) expressions
 > into native JVM bytecode at runtime. Each expression is parsed, optimised, translated to Java
 > source, compiled in-memory, and returned as a ready-to-call, thread-safe `JsonataExpression`.
-> Repeated evaluation is around 39× faster than interpreter-based alternatives (e.g. IBM's
+> Repeated evaluation is around 40× faster than interpreter-based alternatives (e.g. IBM's
 > JSONata4Java) on a realistic analytical benchmark. All cases in the official JSONata test suite
 > pass. Apache-2.0.
 
@@ -44,7 +44,7 @@ Key facts:
 - [Getting started]({{ '/#getting-started' | absolute_url }}): add the dependency, compile an expression (single or batch), and evaluate against JSON.
 - [Bindings]({{ '/#bindings' | absolute_url }}): per-evaluation vs permanent bindings, `JsonataBoundFunction`, and the function-signature syntax.
 - [JSONata libraries]({{ '/#jsonata-libraries' | absolute_url }}): write a set of bindings once as a JSONata definition expression and apply it to any expression — exported functions and constants, private helpers, signatures, and lifetime.
-- [Performance]({{ '/#performance' | absolute_url }}): the ~39× benchmark vs JSONata4Java and how to reproduce it.
+- [Performance]({{ '/#performance' | absolute_url }}): the ~40× benchmark vs JSONata4Java and how to reproduce it.
 - [Architecture]({{ '/#architecture' | absolute_url }}): the pipeline and package structure (`parser`, `optimizer`, `translator`, `runtime`, `loader`).
 - [Source on GitHub](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler): code and README. Apache-2.0.
 

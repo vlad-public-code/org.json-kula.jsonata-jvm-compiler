@@ -18,7 +18,10 @@ import java.util.Map;
  * for bindings that persist for the lifetime of the expression instance.
  *
  * <p>Within a JSONata expression, bound values are referenced as {@code $name}
- * and bound functions are called as {@code $name(args...)}.
+ * and bound functions are called as {@code $name(args...)}. A bound function is also usable as a
+ * value, and a bound value that is a function is callable; see {@link JsonataBoundFunction}.
+ *
+ * <p>To apply everything a {@link JsonataLibrary} exports in one call, use {@link #useLibrary}.
  *
  * <pre>{@code
  * JsonataBindings b = new JsonataBindings()
@@ -61,6 +64,34 @@ public final class JsonataBindings {
      */
     public JsonataBindings bindFunctions(Map<String, JsonataBoundFunction> fns) {
         functions.putAll(fns);
+        return this;
+    }
+
+    /**
+     * Binds everything {@code library} exports: its functions as function bindings, its constants as
+     * value bindings.
+     *
+     * <p>Which of the two a name belongs to is the library's business — the definition decides it by
+     * what each name evaluates to — so taking both maps together is almost always what a caller
+     * wants:
+     *
+     * <pre>{@code
+     * JsonataBindings b = new JsonataBindings()
+     *         .useLibrary(billing)
+     *         .bindValue("today", today);
+     * }</pre>
+     *
+     * <p>Applying two libraries that export the same name leaves the later call's binding in place,
+     * as re-binding a name always does. A library still open when this is called can be closed
+     * later; its exported functions then refuse to run, whether they were bound through here or not.
+     *
+     * @param library the library to apply; its exports are copied, so later changes to it — short of
+     *                {@link JsonataLibrary#close()} — do not affect these bindings
+     * @return {@code this} for chaining
+     */
+    public JsonataBindings useLibrary(JsonataLibrary library) {
+        functions.putAll(library.getFunctions());
+        values.putAll(library.getConstants());
         return this;
     }
 

@@ -39,6 +39,13 @@ import java.util.Map;
  * trig.getConstants().forEach(report::assign);
  * }</pre>
  *
+ * <p>Per evaluation rather than permanently, {@link JsonataBindings#useLibrary} applies both maps in
+ * one call:
+ *
+ * <pre>{@code
+ * report.evaluate(input, new JsonataBindings().useLibrary(trig));
+ * }</pre>
+ *
  * <h2>Semantics worth knowing</h2>
  * <ul>
  *   <li><b>The definition is self-contained.</b> Every name it uses must be one it binds, a JSONata

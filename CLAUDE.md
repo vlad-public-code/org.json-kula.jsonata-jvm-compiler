@@ -121,7 +121,8 @@ Besides implementing JsonataBoundFunction in Java, a bound function can be writt
 a `JsonataLibrary` with `getFunctions()` (`Map<String, JsonataBoundFunction>`) and `getConstants()`
 (`Map<String, JsonNode>`), both keyed by name without the leading `$`. Each exported name lands in one
 map or the other according to what it evaluated to. Both are shaped for the binding API:
-`getFunctions().forEach(expr::registerFunction)` and `getConstants().forEach(expr::assign)`.
+`getFunctions().forEach(expr::registerFunction)` and `getConstants().forEach(expr::assign)` for permanent
+bindings, or `new JsonataBindings().useLibrary(lib)` to apply both maps at once per evaluation.
 
 A definition expression must be a valid JSONata expression that binds named functions and returns an
 array of strings — the names of the functions to export. There is no name list on the Java side: the

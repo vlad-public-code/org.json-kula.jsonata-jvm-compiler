@@ -5,7 +5,7 @@
 
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 39× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -49,7 +49,7 @@ List<JsonataExpression> exprs = factory.compileAll(List.of(
         "status = \"active\""));
 ```
 
-`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — on the order of **10–16× for 20 expressions** in the project's own benchmark. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
+`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — **around 10× for 20 expressions** in the project's own benchmark (`JsonataBatchCompilationPerfTest`). The saving is one fixed `javac` cost per batch instead of one per expression, so how large it is depends on how many expressions the batch holds. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
 
 ### 3. Evaluate against JSON
 
@@ -282,15 +282,28 @@ billing.getFunctions().forEach(invoice::registerFunction);   // permanent bindin
 billing.getConstants().forEach(invoice::assign);
 ```
 
-or per evaluation, when different calls need different libraries:
+or per evaluation, when different calls need different libraries — `useLibrary` applies a whole
+library, functions and constants together, so the caller never has to know which name is which:
 
 ```java
 JsonataBindings bindings = new JsonataBindings()
-        .bindFunctions(billing.getFunctions());
-billing.getConstants().forEach(bindings::bindValue);
+        .useLibrary(billing);
 
 invoice.evaluate(input, bindings);
 ```
+
+It returns the same `JsonataBindings`, so libraries and one-off bindings compose in a single
+expression:
+
+```java
+JsonataBindings bindings = new JsonataBindings()
+        .useLibrary(billing)
+        .useLibrary(formatting)
+        .bindValue("today", today);
+```
+
+Applying two libraries that export the same name leaves the later one in place, exactly as re-binding
+a name always does.
 
 Either way the expression sees `$gross(...)`, `$format(...)` and `$vatRate` exactly as if they had been written in Java — the precedence rules above apply unchanged, so a per-evaluation binding still wins over a library one registered permanently.
 
@@ -459,9 +472,9 @@ Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the 
 | Compilation | ~800 ms | ~145 ms |
 | 100,000 evaluations | ~1,020 ms | ~40,400 ms |
 | Throughput | **~98,000 eval/s** | ~2,500 eval/s |
-| **Speedup** | **~39× faster** | baseline |
+| **Speedup** | **~40× faster** | baseline |
 
-> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch is around 35× faster than one per expression.
+> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch instead of one per expression, worth [around 10× for 20 expressions](#compiling-many-expressions-at-once).
 
 Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys build an exactly-sized map in one pass; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; and the runtime's hot type checks are single dispatches rather than chains of megamorphic calls.
 
