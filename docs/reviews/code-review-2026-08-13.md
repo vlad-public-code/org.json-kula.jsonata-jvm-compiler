@@ -1,6 +1,6 @@
 # JSonata2Java — code review
 
-Date: 2026-08-13 · Reviewed at branch `feature/jsonata-function-library` (`575fb4d`, v1.1.0-SNAPSHOT)
+Date: 2026-08-13 · Reviewed at branch `feature/jsonata-function-library` (`575fb4d`, v1.0.5-SNAPSHOT)
 Dimensions: functionality coverage · code purity · CPU performance · memory performance
 
 > **Status: every finding below has been fixed** (2026-08-14, same branch). See
@@ -566,10 +566,11 @@ registry, the per-evaluation lambda map and the defining-evaluation mode all wen
 translated twice); the `$eval` delegate is per expression instance with the global as a fallback
 (P2); the four arithmetic operators share one operand check (P4); the loader is told the class name
 rather than parsing it out of the source (P5); `evaluate(input, bindings)`'s default throws rather
-than discarding the bindings (P6); small items in P7 done. P3 — extracting `PathCodeGen` from
-`Translator.compilePathSteps` — is the one item left open: it is a pure reorganisation with no
-behavioural payload, and doing it alongside this many semantic changes would have made the diff hard
-to review.
+than discarding the bindings (P6); small items in P7 done. P3 is done too: path compilation moved to a
+`PathCodeGen` of its own (14 methods, 786 lines), taking `Translator.java` from 2 012 lines to
+1 225 and `compilePathSteps` from 336 to 97 — its two largest branches, the context binding
+(`@$v`) and the positional binding (`#$i`), are now named methods. No behaviour changed, which is
+what the 2 656 tests confirm.
 
 ### Performance
 
@@ -606,6 +607,11 @@ comparator that answers only "should $a come after $b?".
 
 Remaining floor: roughly 45% of evaluation time is now `HashMap.getNode` — Jackson field lookups.
 That is the data model, not the compiler.
+
+The suite itself was the other place paying for per-expression compilation: it compiled every one of
+its ~1 500 expressions individually. Pre-compiling them in batches of 250 — skipping the cases that
+assert a compilation error, since a batch aborts as a whole — took the official suite from **140.8 s
+to 29.3 s**.
 
 ### Memory
 

@@ -1,6 +1,6 @@
 # Design: building a `Map<String, JsonataBoundFunction>` from a JSONata definition expression
 
-Status: implemented (v1.1.0) — see `JsonataExpressionFactory.compileFunctions`
+Status: implemented (v1.0.5) — see `JsonataExpressionFactory.compileFunctions`
 Date: 2026-08-13
 Affects: `org.json_kula.jsonata_jvm` (public API), `…runtime` (lambda registry, evaluation context)
 
@@ -411,10 +411,12 @@ function: `Error calling exported function $sin: Lambda expired or not found: s3
 Steps 1–4 are the only runtime-touching ones and are additive; nothing on the existing hot path
 changes behaviour.
 
-**As built** (v1.1.0): the registry lives inside `LambdaScope` rather than in a separate
-`LambdaScopes` class, and `JsonataFunctionLibrary` additionally exposes `lambdaCount()` and
-`isOpen()`. Everything else matches the design above. The full suite (2 616 tests) passes, including
-51 new ones.
+**As built** (v1.0.5): the durable-scope design in §4.2 was superseded during the code review that
+followed. Function values are now nodes that carry their closure directly ([`LambdaNode`](../../src/main/java/org/json_kula/jsonata_jvm/runtime/LambdaNode.java)),
+so there is no scope to register, qualify keys against, or close: a library simply holds the nodes
+the definition produced, and they stay callable while referenced. `JsonataFunctionLibrary` keeps
+`close()` and `isOpen()` as an explicit-lifetime convenience. Everything else — the export rewrite,
+the arity and signature derivation, the adapter — matches the design above.
 
 ---
 

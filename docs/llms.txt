@@ -15,7 +15,7 @@ sitemap: false
 Use it when you evaluate the same JSONata expression many times and want native-bytecode throughput
 instead of an interpreter — compile once at startup, evaluate on the hot path. Requires a Java 21
 **JDK** (the in-memory compiler needs `javac`), Jackson Databind 2.18+, and joni 2.2+. Maven
-coordinates: `io.github.vlad-public-code:jsonata-jvm-compiler:1.1.0`.
+coordinates: `io.github.vlad-public-code:jsonata-jvm-compiler:1.0.5`.
 
 Key facts:
 - **Compile then evaluate:** `factory.compile("Account.Order.Product.Price * 1.2")` →

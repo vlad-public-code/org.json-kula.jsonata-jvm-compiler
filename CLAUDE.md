@@ -18,6 +18,9 @@ Stack:
   - Rewrites applied: constant folding (arithmetic, string concatenation, comparisons, boolean logic), arithmetic identity/absorption rules (`x+0`, `x*1`, `x*0`, etc.), string identity (`x & ""`), boolean short-circuit identities, conditional folding on literal conditions, unary-minus elimination (including double negation), block unwrapping (single-expression blocks), and `PathExpr` flattening.
 - Translator which generates Java 21 code by AST. Implemented in package `org.json_kula.jsonata_jvm.translator`:
   - `Translator` — visitor-based code generator; entry point is `Translator.translate(AstNode, String pkg, String className)` returning a complete Java source string.
+  - `PathCodeGen` — path expressions: step chains, predicates, context (`@$v`) and positional (`#$i`) bindings, parent (`%`) tracking and cross-joins. Split out of `Translator` because the code emitted for one step depends on what later steps do, and that reasoning belongs in one place.
+  - `FunctionCallCodeGen`, `BlockCodeGen`, `ScopeAnalyzer` — function calls and lambdas, blocks and variable bindings, and the free-variable/holder analysis they share.
+  - Literal nodes and object-constructor key arrays are hoisted to `private static final` fields of the generated class (`GenState.constant` / `GenState.keyArray`), so a predicate does not rebuild them per element per evaluation.
   - All AST node types are handled: literals, field/path/wildcard/descendant navigation, predicates, subscripts, all binary and unary operators, conditionals, function calls (built-ins + user-defined), lambdas, variable bindings, blocks, array/object constructors, range, sort, group-by, chain (`~>`), transform.
   - Blocks with variable bindings are emitted as private helper methods; lambdas are either inlined or also emitted as helper methods.
   - Generated classes import `static org.json_kula.jsonata_jvm.runtime.JsonataRuntime.*` and use the runtime for all JSONata operations.

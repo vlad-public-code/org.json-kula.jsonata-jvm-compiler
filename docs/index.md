@@ -29,7 +29,7 @@ All test cases from the [official JSONata test suite](https://github.com/jsonata
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.1.0</version>
+    <version>1.0.5</version>
 </dependency>
 ```
 
