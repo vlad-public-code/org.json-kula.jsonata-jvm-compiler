@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for function libraries — turning a JSONata definition expression into
- * {@link JsonataBoundFunction}s via {@link JsonataExpressionFactory#compileFunctions(String)}.
+ * {@link JsonataBoundFunction}s via {@link JsonataExpressionFactory#compileLibrary(String)}.
  *
  * <p>A definition expression is ordinary JSONata: it binds named functions and returns the names of
  * the ones to export. The definitions below are the lambda examples from the language-feature suite
@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * replaced by that export list — the invocation now happens from Java, or from a different
  * expression, which is what a library is for.
  */
-class JsonataFunctionLibraryTest {
+class JsonataLibraryTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static JsonataExpressionFactory FACTORY;
@@ -82,7 +82,11 @@ class JsonataFunctionLibraryTest {
     }
 
     private static Map<String, JsonataBoundFunction> export(String definition) throws Exception {
-        return FACTORY.compileFunctions(definition);
+        return FACTORY.compileLibrary(definition).getFunctions();
+    }
+
+    private static JsonataLibrary library(String definition) throws Exception {
+        return FACTORY.compileLibrary(definition);
     }
 
     // =========================================================================
@@ -339,6 +343,113 @@ class JsonataFunctionLibraryTest {
     }
 
     // =========================================================================
+    // Constants — exported names that are not functions
+    // =========================================================================
+
+    @Test
+    void constants_areSortedFromFunctionsByWhatTheyEvaluateTo() throws Exception {
+        JsonataLibrary lib = library(TRIG.replace("[\"sin\", \"cos\"]", "[\"sin\", \"cos\", \"pi\"]"));
+
+        assertEquals(List.of("sin", "cos"), new ArrayList<>(lib.getFunctions().keySet()));
+        assertEquals(List.of("pi"), new ArrayList<>(lib.getConstants().keySet()));
+        assertEquals(Math.PI, lib.getConstants().get("pi").doubleValue(), 1e-12);
+    }
+
+    @Test
+    void constants_areEmptyWhenOnlyFunctionsAreExported() throws Exception {
+        JsonataLibrary lib = library(TRIG);
+        assertTrue(lib.getConstants().isEmpty());
+        assertEquals(2, lib.getFunctions().size());
+    }
+
+    @Test
+    void constants_ofEveryJsonType() throws Exception {
+        JsonataLibrary lib = library("""
+                (
+                  $count := 42;
+                  $name := "acme";
+                  $active := true;
+                  $nothing := null;
+                  $rates := {"vat": 0.2, "duty": 0.1};
+                  $regions := ["eu", "us"];
+
+                  ["count", "name", "active", "nothing", "rates", "regions"]
+                )""");
+
+        Map<String, JsonNode> constants = lib.getConstants();
+        assertTrue(lib.getFunctions().isEmpty());
+        assertEquals(42, constants.get("count").intValue());
+        assertEquals("acme", constants.get("name").textValue());
+        assertTrue(constants.get("active").booleanValue());
+        assertTrue(constants.get("nothing").isNull());
+        assertEquals(0.2, constants.get("rates").get("vat").doubleValue(), 1e-12);
+        assertEquals("[\"eu\",\"us\"]", constants.get("regions").toString());
+    }
+
+    @Test
+    void constants_areComputedOnceAtCompileTime() throws Exception {
+        // A constant is a value, not an expression: whatever the definition evaluated to.
+        JsonataLibrary lib = library("($total := $sum([1..10]); [\"total\"])");
+        assertEquals(55, lib.getConstants().get("total").intValue());
+    }
+
+    @Test
+    void constants_dropStraightIntoAnExpression() throws Exception {
+        JsonataLibrary lib = library("""
+                (
+                  $pi := 3.14159;
+                  $area := function($r){ $pi * $r * $r };
+                  ["area", "pi"]
+                )""");
+
+        JsonataExpression expr = FACTORY.compile("{\"area\": $area(2), \"pi\": $pi}");
+        lib.getFunctions().forEach(expr::registerFunction);
+        lib.getConstants().forEach(expr::assign);
+
+        JsonNode result = expr.evaluate(EMPTY_OBJECT);
+        assertEquals(12.56636, result.get("area").doubleValue(), 1e-9);
+        assertEquals(3.14159, result.get("pi").doubleValue(), 1e-9);
+    }
+
+    @Test
+    void constants_bindPerEvaluationToo() throws Exception {
+        JsonataLibrary lib = library("($vat := 0.2; [\"vat\"])");
+
+        JsonataExpression expr = FACTORY.compile("100 * (1 + $vat)");
+        JsonataBindings bindings = new JsonataBindings();
+        lib.getConstants().forEach(bindings::bindValue);
+
+        assertEquals(120.0, expr.evaluate(EMPTY_OBJECT, bindings).doubleValue(), 1e-9);
+    }
+
+    @Test
+    void constants_fromADefinitionThatMixesBothAndDependsOnItsOwnValues() throws Exception {
+        JsonataLibrary lib = library("""
+                (
+                  $rates := {"standard": 0.2, "reduced": 0.05};
+                  $gross := function($net, $band){ $net * (1 + $lookup($rates, $band)) };
+                  ["gross", "rates"]
+                )""");
+
+        assertEquals(120.0,
+                call(lib.getFunctions().get("gross"), num(100), str("standard")).doubleValue(), 1e-9);
+        assertEquals(0.05, lib.getConstants().get("rates").get("reduced").doubleValue(), 1e-12);
+    }
+
+    @Test
+    void constants_survivesClose() throws Exception {
+        // Constants are ordinary nodes; only functions stop working.
+        JsonataLibrary lib = library("($pi := 3.14159; $f := function($x){ $x }; [\"pi\", \"f\"])");
+        JsonNode pi = lib.getConstants().get("pi");
+        JsonataBoundFunction f = lib.getFunctions().get("f");
+        lib.close();
+
+        assertEquals(3.14159, pi.doubleValue(), 1e-9);
+        assertEquals(3.14159, lib.getConstants().get("pi").doubleValue(), 1e-9);
+        assertThrows(JsonataEvaluationException.class, () -> call(f, num(1)));
+    }
+
+    // =========================================================================
     // Signatures and argument handling
     // =========================================================================
 
@@ -365,14 +476,14 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void signatureOverride_appliesCoercion() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
+        JsonataLibrary lib = FACTORY.compileLibrary(
                 "($twice := function($x){ $x * 2 }; [\"twice\"])",
-                new JsonataFunctionLibraryOptions().signature("$twice", "<n:n>"));
+                new JsonataLibraryOptions().signature("$twice", "<n:n>"));
 
-        assertEquals("<n:n>", lib.get("twice").getFunctionSignature());
+        assertEquals("<n:n>", lib.getFunctions().get("twice").getFunctionSignature());
 
         JsonataExpression expr = FACTORY.compile("$twice(\"21\")");
-        lib.asMap().forEach(expr::registerFunction);
+        lib.getFunctions().forEach(expr::registerFunction);
         assertEquals(42, expr.evaluate(EMPTY_OBJECT).intValue());
     }
 
@@ -414,12 +525,12 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void freeVariable_resolvesAgainstDefinitionBindingsWhenCalledFromJava() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
+        JsonataLibrary lib = FACTORY.compileLibrary(
                 "($withVat := function($net){ $net * (1 + $vatRate) }; [\"withVat\"])",
-                new JsonataFunctionLibraryOptions()
+                new JsonataLibraryOptions()
                         .bindings(new JsonataBindings().bindValue("vatRate", num(0.2))));
 
-        assertEquals(120.0, call(lib.get("withVat"), num(100)).doubleValue(), 1e-9);
+        assertEquals(120.0, call(lib.getFunctions().get("withVat"), num(100)).doubleValue(), 1e-9);
     }
 
     @Test
@@ -437,12 +548,12 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void definitionInput_isAvailableToTheDefinition() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(
+        JsonataLibrary lib = FACTORY.compileLibrary(
                 "($factor := rates.vat; $rate := function($net){ $net * $factor }; [\"rate\"])",
-                new JsonataFunctionLibraryOptions()
+                new JsonataLibraryOptions()
                         .input(MAPPER.readTree("{\"rates\": {\"vat\": 1.2}}")));
 
-        assertEquals(120.0, call(lib.get("rate"), num(100)).doubleValue(), 1e-9);
+        assertEquals(120.0, call(lib.getFunctions().get("rate"), num(100)).doubleValue(), 1e-9);
     }
 
     // =========================================================================
@@ -450,22 +561,24 @@ class JsonataFunctionLibraryTest {
     // =========================================================================
 
     @Test
-    void library_getAcceptsEitherForm() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
-        assertSame(lib.get("sin"), lib.get("$sin"));
-        assertNull(lib.get("nope"));
+    void library_keysNeverCarryTheDollar() throws Exception {
+        JsonataLibrary lib = library(TRIG);
+        assertNotNull(lib.getFunctions().get("sin"));
+        assertNull(lib.getFunctions().get("$sin"), "map keys are the bare names");
+        assertNull(lib.getFunctions().get("nope"));
     }
 
     @Test
-    void library_mapIsImmutable() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
-        assertThrows(UnsupportedOperationException.class, () -> lib.asMap().remove("sin"));
+    void library_mapsAreImmutable() throws Exception {
+        JsonataLibrary lib = library(TRIG);
+        assertThrows(UnsupportedOperationException.class, () -> lib.getFunctions().remove("sin"));
+        assertThrows(UnsupportedOperationException.class, () -> lib.getConstants().clear());
     }
 
     @Test
     void library_closeReleasesTheFunctions() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
-        JsonataBoundFunction sin = lib.get("sin");
+        JsonataLibrary lib = FACTORY.compileLibrary(TRIG);
+        JsonataBoundFunction sin = lib.getFunctions().get("sin");
         assertTrue(lib.isOpen());
         assertEquals(Math.sin(1), call(sin, num(1)).doubleValue(), 1e-12);
 
@@ -479,25 +592,25 @@ class JsonataFunctionLibraryTest {
 
     @Test
     void library_closeIsIdempotent() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
+        JsonataLibrary lib = FACTORY.compileLibrary(TRIG);
         lib.close();
         assertDoesNotThrow(lib::close);
     }
 
     @Test
     void library_reportsItsSource() throws Exception {
-        JsonataFunctionLibrary lib = FACTORY.compileFunctionLibrary(TRIG);
+        JsonataLibrary lib = FACTORY.compileLibrary(TRIG);
         assertEquals(TRIG, lib.getSourceJsonata());
     }
 
     @Test
     void twoLibraries_areIndependent() throws Exception {
         Map<String, JsonataBoundFunction> a = export("($f := function($x){ $x + 1 }; [\"f\"])");
-        JsonataFunctionLibrary b =
-                FACTORY.compileFunctionLibrary("($f := function($x){ $x + 100 }; [\"f\"])");
+        JsonataLibrary b =
+                FACTORY.compileLibrary("($f := function($x){ $x + 100 }; [\"f\"])");
 
         assertEquals(2, call(a.get("f"), num(1)).intValue());
-        assertEquals(101, call(b.get("f"), num(1)).intValue());
+        assertEquals(101, call(b.getFunctions().get("f"), num(1)).intValue());
 
         b.close();
         assertEquals(2, call(a.get("f"), num(1)).intValue(), "closing one library must not affect another");
@@ -556,20 +669,6 @@ class JsonataFunctionLibraryTest {
         JsonataCompilationException e =
                 assertThrows(JsonataCompilationException.class, () -> export(definition));
         assertTrue(e.getMessage().contains("$inner"), e.getMessage());
-    }
-
-    @Test
-    void error_nameBoundToALiteralValue() {
-        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
-                () -> export(TRIG.replace("[\"sin\", \"cos\"]", "[\"pi\"]")));
-        assertTrue(e.getMessage().contains("not a function"), e.getMessage());
-    }
-
-    @Test
-    void error_nameBoundToAComputedNonFunction() {
-        JsonataCompilationException e = assertThrows(JsonataCompilationException.class,
-                () -> export("($label := $string(42); [\"label\"])"));
-        assertTrue(e.getMessage().contains("not a function"), e.getMessage());
     }
 
     @Test

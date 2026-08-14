@@ -7,20 +7,19 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Optional settings for {@link JsonataExpressionFactory#compileFunctionLibrary}.
+ * Optional settings for {@link JsonataExpressionFactory#compileLibrary(String, JsonataLibraryOptions)}.
  *
  * <p>All settings have sensible defaults; a definition expression that only binds lambdas needs
  * none of them.
  *
  * <pre>{@code
- * JsonataFunctionLibrary lib = factory.compileFunctionLibrary(
- *         List.of("$netOf"), definition,
- *         new JsonataFunctionLibraryOptions()
+ * JsonataLibrary lib = factory.compileLibrary(definition,
+ *         new JsonataLibraryOptions()
  *                 .bindings(new JsonataBindings().bindValue("vatRate", rate))
  *                 .signature("netOf", "<n:n>"));
  * }</pre>
  */
-public final class JsonataFunctionLibraryOptions {
+public final class JsonataLibraryOptions {
 
     private JsonNode input = NullNode.instance;
     private JsonataBindings bindings;
@@ -30,7 +29,7 @@ public final class JsonataFunctionLibraryOptions {
      * Sets the document the definition expression is evaluated against. Defaults to JSON
      * {@code null}; only needed when the definition reads from the input to build its functions.
      */
-    public JsonataFunctionLibraryOptions input(JsonNode input) {
+    public JsonataLibraryOptions input(JsonNode input) {
         this.input = input != null ? input : NullNode.instance;
         return this;
     }
@@ -40,7 +39,7 @@ public final class JsonataFunctionLibraryOptions {
      * function is called directly from Java, outside any evaluation — inside an expression the
      * caller's own bindings apply instead.
      */
-    public JsonataFunctionLibraryOptions bindings(JsonataBindings bindings) {
+    public JsonataLibraryOptions bindings(JsonataBindings bindings) {
         this.bindings = bindings;
         return this;
     }
@@ -54,7 +53,7 @@ public final class JsonataFunctionLibraryOptions {
      * ({@code function($x)<n:n>{…}}) reports that signature, and any other function reports an
      * all-optional {@code <j?…:j>} — the same permissiveness a JSONata call site has.
      */
-    public JsonataFunctionLibraryOptions signature(String functionName, String signature) {
+    public JsonataLibraryOptions signature(String functionName, String signature) {
         signatures.put(FunctionExportRewriter.normalize(functionName), signature);
         return this;
     }

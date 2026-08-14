@@ -1,6 +1,6 @@
 # Design: building a `Map<String, JsonataBoundFunction>` from a JSONata definition expression
 
-Status: implemented (v1.0.5) — see `JsonataExpressionFactory.compileFunctions`
+Status: implemented (v1.0.5) — see `JsonataExpressionFactory.compileLibrary`
 Date: 2026-08-13
 Affects: `org.json_kula.jsonata_jvm` (public API), `…runtime` (lambda registry, evaluation context)
 
@@ -14,7 +14,7 @@ returns the names of the ones to export — into Java-callable `JsonataBoundFunc
 ```java
 JsonataExpressionFactory factory = new JsonataExpressionFactory();
 
-Map<String, JsonataBoundFunction> trig = factory.compileFunctions("""
+Map<String, JsonataBoundFunction> trig = factory.compileLibrary("""
         (
           $pi := 3.1415926535897932384626;
           $product := function($a, $b) { $a * $b };
@@ -201,7 +201,7 @@ Consequences worth stating explicitly:
 builder through a package-private `AbstractJsonataExpression.evaluateDefining(JsonNode, JsonataBindings, LambdaScope)`
 — a sibling of the existing `final evaluate(...)`, sharing its try/finally scaffold.
 
-**Lifetime.** `LambdaScope` keeps a static `ConcurrentHashMap<String, LambdaScope>`. `JsonataFunctionLibrary`
+**Lifetime.** `LambdaScope` keeps a static `ConcurrentHashMap<String, LambdaScope>`. `JsonataLibrary`
 holds the only strong reference and deregisters on `close()`; a `java.lang.ref.Cleaner` deregisters
 scopes whose library became unreachable without being closed. A leaked scope costs one map entry
 plus the closure graph — bounded by the definition expression's size, not by call volume.
@@ -220,7 +220,7 @@ final class ExportedJsonataFunction implements JsonataBoundFunction {
     private final JsonNode token;        // "__λ:<scope>/<n>"
     private final String signature;      // §4.4
     private final int arity;             // declared parameter count
-    private final JsonataFunctionLibrary owner;   // keeps the scope reachable
+    private final JsonataLibrary owner;   // keeps the scope reachable
 
     @Override public String getFunctionSignature() { return signature; }
 
@@ -295,17 +295,17 @@ package org.json_kula.jsonata_jvm;
 public class JsonataExpressionFactory {
 
     /** Compiles a definition expression and exports the functions it names. */
-    public Map<String, JsonataBoundFunction> compileFunctions(String functionDefinition)
+    public Map<String, JsonataBoundFunction> compileLibrary(String definition)
             throws JsonataCompilationException;
 
     /** As above, with control over the definition-time input, bindings and signatures. */
-    public JsonataFunctionLibrary compileFunctionLibrary(String functionDefinition,
-                                                         JsonataFunctionLibraryOptions options)
+    public JsonataLibrary compileLibrary(String functionDefinition,
+                                                         JsonataLibraryOptions options)
             throws JsonataCompilationException;
 }
 
 /** Owns the durable lambda scope and the generated class of one definition expression. */
-public final class JsonataFunctionLibrary implements AutoCloseable {
+public final class JsonataLibrary implements AutoCloseable {
     public Map<String, JsonataBoundFunction> asMap();      // immutable, in export-list order
     public JsonataBoundFunction get(String name);          // null if not exported; $ optional
     public String getSourceJsonata();
@@ -317,7 +317,7 @@ The signature is one argument: the definition. Which functions come out is a pro
 definition, not of the call site — the same file yields the same library everywhere it is loaded,
 and there is no way for a caller's name list to drift out of sync with the file it names.
 
-`compileFunctions` is the 90 % case. It leaks no lifetime control — the library is kept alive by the
+`compileLibrary` is the 90 % case. It leaks no lifetime control — the library is kept alive by the
 exported functions' strong reference to it, and released when the last one is dropped.
 
 **Name normalisation.** Export lists may be written with or without the `$` (`"$sin"` and `"sin"`
@@ -339,7 +339,7 @@ These follow from the design and should be documented in the Javadoc, not "fixed
 compiles to `resolveBinding("rate")`, which reads the *consumer's* bindings at call time. Helper
 bindings defined in the definition block (`$pi`) are Java locals and are captured — those are early
 bound. If a caller wants definition-time values for free variables, they pass them in
-`JsonataFunctionLibraryOptions.bindings`, and the adapter installs them **only** when it opens its
+`JsonataLibraryOptions.bindings`, and the adapter installs them **only** when it opens its
 own frame; inside a consumer evaluation the consumer wins. This asymmetry is worth an explicit note.
 
 **Recursion budget is shared.** `LambdaRegistry.MAX_CALL_DEPTH` is 100 per evaluation. An exported
@@ -404,17 +404,20 @@ function: `Error calling exported function $sin: Lambda expired or not found: s3
 | 3 | `definingScope` on `EvalState`; `beginEvaluation` overload; `isEvaluationActive()` accessor | `EvaluationContext`, `JsonataRuntime` |
 | 4 | `evaluateDefining(...)` package-private sibling of `evaluate`, plus accessors for the permanent bindings and regex cache | `AbstractJsonataExpression` |
 | 5 | `FunctionExportRewriter` — collect top-level bindings, rewrite the tail, read the export list, recover per-name arity/signature | new, `org.json_kula.jsonata_jvm` |
-| 6 | `JsonataFunctionLibrary`, `JsonataFunctionLibraryOptions`, `ExportedJsonataFunction`, factory methods | new + `JsonataExpressionFactory` |
+| 6 | `JsonataLibrary`, `JsonataLibraryOptions`, `ExportedJsonataFunction`, factory methods | new + `JsonataExpressionFactory` |
 | 7 | `JsonataBindings.bindFunctions(Map)` convenience | `JsonataBindings` |
 | 8 | Docs: a "Function libraries" section in `README.md` and `docs/index.md`, `llms.txt` entries, `CLAUDE.md` | docs |
 
 Steps 1–4 are the only runtime-touching ones and are additive; nothing on the existing hot path
 changes behaviour.
 
-**As built** (v1.0.5): the durable-scope design in §4.2 was superseded during the code review that
+**As built** (v1.0.5): the entry point is `compileLibrary(definition)` returning a `JsonataLibrary`
+with `getFunctions()` and `getConstants()` — an exported name that is not a function is a constant
+rather than an error, so a definition can carry a whole set of bindings, not only callable ones.
+The durable-scope design in §4.2 was superseded during the code review that
 followed. Function values are now nodes that carry their closure directly ([`LambdaNode`](../../src/main/java/org/json_kula/jsonata_jvm/runtime/LambdaNode.java)),
 so there is no scope to register, qualify keys against, or close: a library simply holds the nodes
-the definition produced, and they stay callable while referenced. `JsonataFunctionLibrary` keeps
+the definition produced, and they stay callable while referenced. `JsonataLibrary` keeps
 `close()` and `isOpen()` as an explicit-lifetime convenience. Everything else — the export rewrite,
 the arity and signature derivation, the adapter — matches the design above.
 
@@ -422,7 +425,7 @@ the arity and signature derivation, the adapter — matches the design above.
 
 ## 8. Testing plan
 
-Unit tests in `src/test/java/org/json_kula/jsonata_jvm/JsonataFunctionLibraryTest.java`. The
+Unit tests in `src/test/java/org/json_kula/jsonata_jvm/JsonataLibraryTest.java`. The
 definitions are the lambda samples from `ProgrammingTest` / `HigherOrderFunctionsTest` with their
 trailing invocation replaced by an export list — the invocation now comes from Java or from another
 expression, which is the point.
@@ -454,7 +457,7 @@ expression, which is the point.
 
 ## 9. Alternatives considered
 
-**A0. Pass the export list to Java: `compileFunctions(List.of("$sin", "$cos"), definition)`.**
+**A0. Pass the export list to Java: `compileLibrary(List.of("$sin", "$cos"), definition)`.**
 The first cut of this design, and the reason the rest of it exists. It let the definition be *almost*
 JSONata — it typically ended on a binding, so evaluating it elsewhere returned a stray function
 value, and the set of exports lived in the calling code rather than in the file that defines them.
@@ -488,7 +491,7 @@ key is the 5 % of that change that solves this problem.
 
 ## 10. Open questions
 
-1. **Should `compileFunctions` also export values?** A `Map<String, JsonNode>` sibling for `$pi` is
+1. **Should `compileLibrary` also export values?** A `Map<String, JsonNode>` sibling for `$pi` is
    nearly free once the export object exists. Deferred until asked for.
 2. **Should the free-variable rule be strict?** Option: reject at build time any definition body that
    references a name bound neither locally nor in the definition-time bindings, instead of silently

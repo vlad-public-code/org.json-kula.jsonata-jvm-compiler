@@ -55,8 +55,7 @@ public final class JsonataBindings {
 
     /**
      * Binds every entry of {@code fns}, keyed by function name without the leading {@code $}.
-     * Convenient for the map returned by
-     * {@link JsonataExpressionFactory#compileFunctions(java.util.List, String)}.
+     * Convenient for {@link JsonataLibrary#getFunctions()}.
      *
      * @return {@code this} for chaining
      */

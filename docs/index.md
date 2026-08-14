@@ -208,55 +208,98 @@ Example: `$length` has signature `<s-:n>` — accepts a string (using context as
 
 ---
 
-## Function libraries
+## JSONata libraries
 
-A **function library** turns a JSONata *definition expression* into ready-to-use `JsonataBoundFunction`s. The definition binds named functions and **returns the names of the ones to export** — it is ordinary JSONata, and evaluating it in any JSONata engine simply yields that list.
+The bindings above are written in Java: a `JsonataBoundFunction` per function, an `assign` per value, repeated for every expression that needs them. A **library** is the same set of bindings written in JSONata instead — once, in one file — and applied to any expression that needs it.
 
-```java
-JsonataExpressionFactory factory = new JsonataExpressionFactory();
+A library is nothing more than a **definition expression**: ordinary JSONata that binds names and returns the names to export.
 
-Map<String, JsonataBoundFunction> trig = factory.compileFunctions("""
-        (
-          $pi := 3.1415926535897932384626;
+```
+(
+  $vatRate := 0.2;
+  $round2  := function($n){ $round($n, 2) };
+  $gross   := function($net){ $round2($net * (1 + $vatRate)) };
+  $format  := function($n){ "£" & $string($round2($n)) };
 
-          /* Factorial is the product of the integers 1..n */
-          $product := function($a, $b) { $a * $b };
-          $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
-
-          $sin := function($x){ $cos($x - $pi/2) };
-          $cos := function($x){
-            $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
-              $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
-          };
-
-          ["sin", "cos"]
-        )
-        """);
-
-JsonataExpression expr = factory.compile("angles.$sin($)");
-trig.forEach(expr::registerFunction);        // or: new JsonataBindings().bindFunctions(trig)
-
-expr.evaluate(mapper.readTree("{\"angles\": [0, 1, 2]}"));
-// → [0, 0.8414709848078965, 0.9092974268256817]
+  ["gross", "format", "vatRate"]
+)
 ```
 
-The definition is compiled and evaluated **once**, inside `compileFunctions`. What matters is what it bound and what it named:
+That is a complete, valid JSONata expression. Evaluate it in any JSONata engine and it returns `["gross", "format", "vatRate"]` — the export list *is* the expression's result, not a parameter passed from Java. So a definition file can be linted, tested and run by tools that know nothing about this library, and it states its own interface: nothing outside it decides what it provides.
 
-- **Only the names in the export list are exported.** `$pi`, `$product` and `$factorial` stay internal, yet the exported functions still reach them — helpers do not have to be exported to be usable.
-- **The export list lives with the functions**, not at the call site, so a definition file says what it provides and stays in step with itself when a function is renamed.
-- **Mutual recursion works**: `$sin` calls `$cos`, which calls itself and `$factorial`.
-- **Names may be written with or without the `$`.** Map keys never carry it, so the map drops straight into `registerFunction` or `bindFunction`. The map preserves the order of the export list.
-- **Any lambda shape works**: multi-parameter, recursive, tail-recursive, `λ`, a function returned by another function (`$twice($add3)`), a `~>` chain (`$uppercase ~> $trim`), or a partial application (`$substring(?, 0, 5)`).
-- **The export list is an expression** like any other — `["sin", "cos"]` is the usual form, a single `"sin"` works, and so does a list computed at definition time.
+```java
+JsonataLibrary billing = factory.compileLibrary(definition);
+
+billing.getFunctions();   // Map<String, JsonataBoundFunction> — gross, format
+billing.getConstants();   // Map<String, JsonNode>             — vatRate
+```
+
+Each exported name lands in one map or the other according to **what it evaluated to** — the definition never says which is which. Names it binds but does not export (`$round2` here) stay private, while remaining reachable from the exported functions.
+
+### Providing bindings from a library
+
+The two maps are shaped for the binding API. Keys never carry the `$`, so they drop straight in:
+
+```java
+JsonataExpression invoice = factory.compile("lines.$gross(amount) ~> $sum() ~> $format()");
+
+billing.getFunctions().forEach(invoice::registerFunction);   // permanent bindings
+billing.getConstants().forEach(invoice::assign);
+```
+
+or per evaluation, when different calls need different libraries:
+
+```java
+JsonataBindings bindings = new JsonataBindings()
+        .bindFunctions(billing.getFunctions());
+billing.getConstants().forEach(bindings::bindValue);
+
+invoice.evaluate(input, bindings);
+```
+
+Either way the expression sees `$gross(...)`, `$format(...)` and `$vatRate` exactly as if they had been written in Java — the precedence rules above apply unchanged, so a per-evaluation binding still wins over a library one registered permanently.
+
+Applying a library to every expression in an application is one line each:
+
+```java
+for (JsonataExpression expr : factory.compileAll(expressions)) {
+    billing.getFunctions().forEach(expr::registerFunction);
+    billing.getConstants().forEach(expr::assign);
+}
+```
+
+### What a definition can contain
+
+Anything JSONata can express. Exported functions may be recursive, mutually recursive, closures over private helpers, `λ`-notation, functions returned by other functions, `~>` chains, or partial applications:
+
+```
+(
+  $pi := 3.1415926535897932384626;
+
+  /* private helpers — not exported, still reachable */
+  $product   := function($a, $b) { $a * $b };
+  $factorial := function($n) { $n = 0 ? 1 : $reduce([1..$n], $product) };
+
+  $sin := function($x){ $cos($x - $pi/2) };
+  $cos := function($x){
+    $x > $pi ? $cos($x - 2 * $pi) : $x < -$pi ? $cos($x + 2 * $pi) :
+      $sum([0..12].($power(-1, $) * $power($x, 2*$) / $factorial(2*$)))
+  };
+
+  ["sin", "cos", "pi"]
+)
+```
+
+Constants are values, not expressions: the definition runs **once**, when the library is compiled, so `$total := $sum([1..10])` exports the number `55`. Functions, by contrast, run whenever they are called.
+
+The export list is itself an expression — `["sin", "cos"]` is the usual form, a single `"sin"` works, and so does a list computed at definition time. A definition that forgets its export list ends on its last binding and therefore returns a *function*; that is rejected with `must return an array of function names`.
 
 Exported functions can also be called straight from Java, with no expression involved:
 
 ```java
-JsonataBoundFunction sin = trig.get("sin");
-JsonNode result = sin.apply(new JsonataFunctionArguments(List.of(DoubleNode.valueOf(1.0))));
+JsonataBoundFunction gross = billing.getFunctions().get("gross");
+JsonNode result = gross.apply(new JsonataFunctionArguments(List.of(DoubleNode.valueOf(100))));
 ```
-
-> A definition that ends on its last `$name := function…` binding returns *that function* rather than a list of names, and is rejected with `must return an array of function names`. Finish it with the export list.
 
 ### Signatures
 
@@ -271,25 +314,24 @@ Each exported function reports a JSONata signature:
 The synthesised form is deliberately permissive: JSONata lets a lambda be called with fewer arguments than it declares (the rest are *undefined*), and `j` applies no coercion — so an exported function accepts exactly what the same function accepts inside JSONata. Ask for something stricter with a signature override:
 
 ```java
-JsonataFunctionLibrary lib = factory.compileFunctionLibrary(
-        "($twice := function($x){ $x * 2 }; [\"twice\"])",
-        new JsonataFunctionLibraryOptions().signature("$twice", "<n:n>"));
+JsonataLibrary lib = factory.compileLibrary(definition,
+        new JsonataLibraryOptions().signature("$gross", "<n:n>"));
 
-// "<n:n>" coerces at the boundary: $twice("21") → 42
+// "<n:n>" coerces at the boundary: $gross("100") works
 ```
 
 ### Lifetime and options
 
-`compileFunctions` returns just the map; the underlying library stays alive as long as the functions are referenced. Use `compileFunctionLibrary` when the lifetime should be explicit — `JsonataFunctionLibrary` is `AutoCloseable`, and `close()` releases the compiled functions (calling them afterwards throws `JsonataEvaluationException`).
+A library owns one generated class, so build it once at startup and keep it — the same advice as `compile()`. Exported functions are thread-safe and may be called concurrently.
 
-`JsonataFunctionLibraryOptions` also carries the document the definition is evaluated against (`input`) and the bindings visible while it runs (`bindings`).
+`JsonataLibrary` is `AutoCloseable`; `close()` retires the exported functions (calling one afterwards throws `JsonataEvaluationException`), which is only worth doing when the lifetime should be explicit. Constants keep working — they are ordinary nodes. Letting the library become unreachable releases everything.
+
+`JsonataLibraryOptions` also carries the document the definition is evaluated against (`input`, for a definition that reads from data) and the bindings visible while it runs (`bindings`).
 
 Two semantics worth knowing:
 
-- **Bound names are captured; free names are late-bound.** A name the definition binds (`$pi`) is baked into the closure. A name it never binds (`$vatRate`) resolves against the bindings active where the function is *called* — or against the library's own `bindings` option when it is called directly from Java.
+- **Bound names are captured; free names are late-bound.** A name the definition binds (`$vatRate`) is baked into the closure. A name it never binds resolves against the bindings active where the function is *called* — or against the library's own `bindings` option when it is called directly from Java.
 - **The caller's evaluation is reused.** Called from inside an expression, an exported function shares that evaluation's recursion budget (100 nested calls) and its `setTimeout` deadline.
-
-A library owns one generated class, so build it once at startup and keep it, exactly as with `compile()`. Exported functions are thread-safe and may be called concurrently.
 
 ---
 

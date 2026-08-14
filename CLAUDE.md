@@ -100,10 +100,13 @@ Each type symbol may also have options applied.
 
 Class JsonataFunctionArguments represents a list of JsonNode.
 
-# Function libraries
+# JSONata libraries
 Besides implementing JsonataBoundFunction in Java, a bound function can be written in JSONata itself.
-`JsonataExpressionFactory.compileFunctions(String functionDefinition)` takes a definition expression
-and returns `Map<String, JsonataBoundFunction>` keyed by name without the leading `$`.
+`JsonataExpressionFactory.compileLibrary(String definition)` takes a definition expression and returns
+a `JsonataLibrary` with `getFunctions()` (`Map<String, JsonataBoundFunction>`) and `getConstants()`
+(`Map<String, JsonNode>`), both keyed by name without the leading `$`. Each exported name lands in one
+map or the other according to what it evaluated to. Both are shaped for the binding API:
+`getFunctions().forEach(expr::registerFunction)` and `getConstants().forEach(expr::assign)`.
 
 A definition expression must be a valid JSONata expression that binds named functions and returns an
 array of strings — the names of the functions to export. There is no name list on the Java side: the
@@ -112,7 +115,8 @@ A single string is accepted as a one-element list, and names may carry the leadi
 
 Only the names in the export list are exported; other bindings in the definition (helper values and
 helper functions) stay internal but remain reachable from the exported closures, and mutual recursion
-between exported functions works.
+between exported functions works. Constants are values, not expressions: the definition runs once, at
+compile time.
 
 How it works:
 1. `FunctionExportRewriter` binds the definition's last expression (the export list) to a synthetic
@@ -125,9 +129,9 @@ How it works:
    While a scope is installed, `LambdaRegistry.lambdaNode` mints scope-qualified token keys
    (`__λ:<scopeId>/<n>`) into that durable scope instead of the per-evaluation map, so the functions
    stay callable after the defining evaluation ends — on any thread, inside any evaluation, or none.
-4. Each exported token is wrapped in an `ExportedJsonataFunction`, which applies the runtime calling
+4. Each exported function value is wrapped in an `ExportedJsonataFunction`, which applies the runtime calling
    convention (no arg → `null`, one arg → passed through, several → `packArgs` tuple).
 
-`JsonataFunctionLibrary` owns the scope and the generated class; `close()` releases it. See
+`JsonataLibrary` owns the generated class; `close()` retires the exported functions. See
 [docs/design/function-library.md](docs/design/function-library.md) for the full design and the
 alternatives that were rejected.

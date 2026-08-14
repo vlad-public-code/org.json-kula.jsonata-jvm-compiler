@@ -1,5 +1,6 @@
 package org.json_kula.jsonata_jvm;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 
 import java.util.Collections;
@@ -7,11 +8,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * A set of JSONata functions compiled from a <em>definition expression</em> and exposed to Java as
- * {@link JsonataBoundFunction}s.
+ * What a JSONata <em>definition expression</em> exports: functions as {@link JsonataBoundFunction}s,
+ * and everything else as plain {@link com.fasterxml.jackson.databind.JsonNode} constants.
  *
- * <p>A definition expression binds named functions and returns the names of the ones to export. It
- * is ordinary JSONata — evaluated in any JSONata engine it simply yields that list:
+ * <p>A definition expression binds names and returns the ones to export. It is ordinary JSONata —
+ * evaluated in any JSONata engine it simply yields that list:
  *
  * <pre>{@code
  * (
@@ -21,20 +22,21 @@ import java.util.Map;
  *   $sin := function($x){ $cos($x - $pi/2) };
  *   $cos := function($x){ ... };
  *
- *   ["sin", "cos"]
+ *   ["sin", "cos", "pi"]
  * )
  * }</pre>
  *
- * <p>The two named functions come back as bound functions that can be registered on any expression
- * or called directly from Java. Bindings they depend on ({@code $pi}, {@code $product},
- * {@code $factorial}) stay reachable through the exported closures without being exported
- * themselves, and mutual recursion between exported functions works.
+ * <p>Each exported name lands in {@link #getFunctions()} or {@link #getConstants()} according to
+ * what it evaluated to — the definition does not have to say which is which. Names it binds but does
+ * not export ({@code $product}, {@code $factorial}) stay internal, while remaining reachable from
+ * the exported closures; mutual recursion between exported functions works.
  *
  * <pre>{@code
- * Map<String, JsonataBoundFunction> trig = factory.compileFunctions(definition);
+ * JsonataLibrary trig = factory.compileLibrary(definition);
  *
- * JsonataExpression report = factory.compile("angles.$sin($)");
- * trig.forEach(report::registerFunction);
+ * JsonataExpression report = factory.compile("angles.$sin($) * $pi");
+ * trig.getFunctions().forEach(report::registerFunction);
+ * trig.getConstants().forEach(report::assign);
  * }</pre>
  *
  * <h2>Semantics worth knowing</h2>
@@ -56,44 +58,55 @@ import java.util.Map;
  * exported functions for callers that want the lifetime to be explicit; otherwise simply dropping
  * every reference to them releases everything.
  */
-public final class JsonataFunctionLibrary implements AutoCloseable {
+public final class JsonataLibrary implements AutoCloseable {
 
     private final String sourceJsonata;
     private final AbstractJsonataExpression definition;
     private final JsonataBindings definitionBindings;
     private volatile boolean closed;
     private final Map<String, JsonataBoundFunction> functions = new LinkedHashMap<>();
+    private final Map<String, JsonNode> constants = new LinkedHashMap<>();
     private final Map<String, JsonataBoundFunction> functionsView =
             Collections.unmodifiableMap(functions);
+    private final Map<String, JsonNode> constantsView =
+            Collections.unmodifiableMap(constants);
 
-    JsonataFunctionLibrary(String sourceJsonata, AbstractJsonataExpression definition,
-                           JsonataBindings definitionBindings) {
+    JsonataLibrary(String sourceJsonata, AbstractJsonataExpression definition,
+                   JsonataBindings definitionBindings) {
         this.sourceJsonata = sourceJsonata;
         this.definition = definition;
         this.definitionBindings = definitionBindings;
     }
 
     /** Called only from {@link JsonataExpressionFactory} while building this library. */
-    void export(String name, JsonataBoundFunction fn) {
+    void exportFunction(String name, JsonataBoundFunction fn) {
         functions.put(name, fn);
     }
 
+    /** Called only from {@link JsonataExpressionFactory} while building this library. */
+    void exportConstant(String name, JsonNode value) {
+        constants.put(name, value);
+    }
+
     /**
-     * Returns the exported functions keyed by name <b>without</b> the leading {@code $}, in the
-     * order they were requested. The map is immutable and can be passed straight to
-     * {@link JsonataBindings#bindFunctions} or iterated into
-     * {@link JsonataExpression#registerFunction}.
+     * Returns the exported functions, keyed by name <b>without</b> the leading {@code $}, in the
+     * order the definition listed them. Immutable, and ready for
+     * {@link JsonataBindings#bindFunctions} or {@link JsonataExpression#registerFunction}.
      */
-    public Map<String, JsonataBoundFunction> asMap() {
+    public Map<String, JsonataBoundFunction> getFunctions() {
         return functionsView;
     }
 
     /**
-     * Returns one exported function, or {@code null} if this library does not export it.
-     * The leading {@code $} is optional.
+     * Returns the exported values — every exported name that did not evaluate to a function — keyed
+     * the same way. Immutable, and ready for {@link JsonataBindings#bindValue} or
+     * {@link JsonataExpression#assign}.
+     *
+     * <p>They are values, not expressions: the definition ran once, at compile time, so a constant
+     * is whatever it evaluated to then.
      */
-    public JsonataBoundFunction get(String name) {
-        return functions.get(FunctionExportRewriter.normalize(name));
+    public Map<String, JsonNode> getConstants() {
+        return constantsView;
     }
 
     /** Returns the definition expression this library was compiled from. */
@@ -108,8 +121,9 @@ public final class JsonataFunctionLibrary implements AutoCloseable {
 
     /**
      * Retires the exported functions: calling one afterwards throws a
-     * {@link JsonataEvaluationException}. Idempotent, and never required — a library that simply
-     * becomes unreachable is collected like any other object.
+     * {@link JsonataEvaluationException}. Constants already handed out keep working — they are
+     * ordinary nodes. Idempotent, and never required: a library that simply becomes unreachable is
+     * collected like any other object.
      */
     @Override
     public void close() {
@@ -121,7 +135,7 @@ public final class JsonataFunctionLibrary implements AutoCloseable {
         if (closed)
             throw new JsonataEvaluationException(null,
                     "Error calling exported function $" + functionName
-                            + ": its function library has been closed");
+                            + ": its library has been closed");
     }
 
     /**
@@ -136,6 +150,6 @@ public final class JsonataFunctionLibrary implements AutoCloseable {
 
     @Override
     public String toString() {
-        return "JsonataFunctionLibrary" + functions.keySet();
+        return "JsonataLibrary[functions=" + functions.keySet() + ", constants=" + constants.keySet() + "]";
     }
 }

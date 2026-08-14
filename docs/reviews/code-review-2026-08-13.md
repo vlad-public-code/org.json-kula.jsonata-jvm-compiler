@@ -325,7 +325,7 @@ make it abstract or throw `UnsupportedOperationException`.
 
 * `FunctionExportRewriter.exportedNames` uses `List.contains` for duplicate detection — fine at
   export-list sizes, but a `LinkedHashSet` states the intent better.
-* `JsonataFunctionLibraryOptions.getSignatureOverrides()` is unused; either use it or drop it.
+* `JsonataLibraryOptions.getSignatureOverrides()` is unused; either use it or drop it.
 * `EvaluationContext.EMPTY_BINDINGS` is a shared *mutable* `JsonataBindings` instance used as an
   immutable empty; safe today because nothing writes to it, but one accidental `bindValue` would be a
   cross-evaluation bug. Make it a genuinely immutable instance.

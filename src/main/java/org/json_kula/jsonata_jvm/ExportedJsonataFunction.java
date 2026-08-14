@@ -6,7 +6,7 @@ import org.json_kula.jsonata_jvm.runtime.JsonataRuntime;
 import org.json_kula.jsonata_jvm.runtime.RuntimeEvaluationException;
 
 /**
- * Adapts one lambda exported from a {@link JsonataFunctionLibrary} to the
+ * Adapts one lambda exported from a {@link JsonataLibrary} to the
  * {@link JsonataBoundFunction} contract.
  *
  * <p>Calls are forwarded to the runtime's {@code fn_apply}, which resolves the lambda token, runs
@@ -20,10 +20,10 @@ final class ExportedJsonataFunction implements JsonataBoundFunction {
     private final String signature;
     private final int arity;
     /** Keeps the library — and therefore the closure graph and generated class — reachable. */
-    private final JsonataFunctionLibrary owner;
+    private final JsonataLibrary owner;
 
     ExportedJsonataFunction(String name, JsonNode token, String signature, int arity,
-                            JsonataFunctionLibrary owner) {
+                            JsonataLibrary owner) {
         this.name = name;
         this.token = token;
         this.signature = signature;
