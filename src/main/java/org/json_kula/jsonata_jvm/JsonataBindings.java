@@ -81,6 +81,9 @@ public final class JsonataBindings {
      *         .bindValue("today", today);
      * }</pre>
      *
+     * <p>For the lifetime of one expression instead of one evaluation,
+     * {@link JsonataExpression#useLibrary} does the same thing permanently.
+     *
      * <p>Applying two libraries that export the same name leaves the later call's binding in place,
      * as re-binding a name always does. A library still open when this is called can be closed
      * later; its exported functions then refuse to run, whether they were bound through here or not.

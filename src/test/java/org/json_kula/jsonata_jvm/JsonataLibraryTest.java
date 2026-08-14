@@ -488,6 +488,84 @@ class JsonataLibraryTest {
                 () -> FACTORY.compile("$gross(100)").evaluate(EMPTY_OBJECT, bindings));
     }
 
+    // =========================================================================
+    // useLibrary on the expression — the same thing, permanently
+    // =========================================================================
+
+    @Test
+    void useLibraryOnExpression_bindsFunctionsAndConstantsTogether() throws Exception {
+        JsonataLibrary lib = library("""
+                (
+                  $pi := 3.14159;
+                  $area := function($r){ $pi * $r * $r };
+                  ["area", "pi"]
+                )""");
+
+        JsonataExpression expr = FACTORY.compile("{\"area\": $area(2), \"pi\": $pi}");
+        expr.useLibrary(lib);
+
+        // Permanent: no bindings passed at evaluation time, and it holds for every call.
+        for (int i = 0; i < 2; i++) {
+            JsonNode result = expr.evaluate(EMPTY_OBJECT);
+            assertEquals(12.56636, result.get("area").doubleValue(), 1e-9);
+            assertEquals(3.14159, result.get("pi").doubleValue(), 1e-9);
+        }
+    }
+
+    @Test
+    void useLibraryOnExpression_appliesSeveralLibraries_lastNameWins() throws Exception {
+        JsonataLibrary first  = library("($tag := function(){ \"first\" }; $n := 1; [\"tag\", \"n\"])");
+        JsonataLibrary second = library("($tag := function(){ \"second\" }; [\"tag\"])");
+
+        JsonataExpression expr = FACTORY.compile("{\"tag\": $tag(), \"n\": $n}");
+        expr.useLibrary(first);
+        expr.useLibrary(second);
+
+        JsonNode result = expr.evaluate(EMPTY_OBJECT);
+        assertEquals("second", result.get("tag").textValue(), "the later library wins the name");
+        assertEquals(1, result.get("n").intValue(), "a name only the first exports survives");
+    }
+
+    @Test
+    void useLibraryOnExpression_perEvaluationBindingWins() throws Exception {
+        JsonataLibrary lib = library("($vat := 0.2; $gross := function($n){ $n * 1.2 }; [\"gross\", \"vat\"])");
+
+        JsonataExpression expr = FACTORY.compile("{\"vat\": $vat, \"gross\": $gross(100)}");
+        expr.useLibrary(lib);
+
+        JsonNode overridden = expr.evaluate(EMPTY_OBJECT, new JsonataBindings()
+                .bindValue("vat", num(0.05))
+                .bindFunction("gross", new JsonataBoundFunction() {
+                    public String getFunctionSignature() { return "<n:n>"; }
+                    public JsonNode apply(JsonataFunctionArguments args) {
+                        return num(1);
+                    }
+                }));
+        assertEquals(0.05, overridden.get("vat").doubleValue(), 1e-9);
+        assertEquals(1, overridden.get("gross").intValue());
+
+        // The permanent bindings are untouched by that evaluation.
+        JsonNode plain = expr.evaluate(EMPTY_OBJECT);
+        assertEquals(0.2, plain.get("vat").doubleValue(), 1e-9);
+        assertEquals(120.0, plain.get("gross").doubleValue(), 1e-9);
+    }
+
+    @Test
+    void useLibraryOnExpression_ofAClosedLibrary_bindsButRefusesToRun() throws Exception {
+        JsonataLibrary lib = library("($vat := 0.2; $gross := function($n){ $n * (1 + $vat) }; [\"gross\", \"vat\"])");
+
+        JsonataExpression constant = FACTORY.compile("$vat");
+        JsonataExpression call = FACTORY.compile("$gross(100)");
+        constant.useLibrary(lib);
+        call.useLibrary(lib);
+        lib.close();
+
+        // A constant is a plain value and outlives the library.
+        assertEquals(0.2, constant.evaluate(EMPTY_OBJECT).doubleValue(), 1e-9);
+        // A function belongs to the library and stops working with it.
+        assertThrows(JsonataEvaluationException.class, () -> call.evaluate(EMPTY_OBJECT));
+    }
+
     @Test
     void constants_fromADefinitionThatMixesBothAndDependsOnItsOwnValues() throws Exception {
         JsonataLibrary lib = library("""
