@@ -5,7 +5,7 @@ title: jsonata-jvm-compiler
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **over 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 39× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
@@ -467,14 +467,14 @@ jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated ev
 
 The benchmark compiles one expression once, then runs 100,000 evaluations against the same JSON document (with a 1,000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
-Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11:
+Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM; two consecutive runs agreed to within 2%:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | ~760 ms | ~145 ms |
-| 100,000 evaluations | ~1,000 ms | ~41,600 ms |
-| Throughput | **~100,000 eval/s** | ~2,400 eval/s |
-| **Speedup** | **~41× faster** | baseline |
+| Compilation | ~800 ms | ~145 ms |
+| 100,000 evaluations | ~1,020 ms | ~40,400 ms |
+| Throughput | **~98,000 eval/s** | ~2,500 eval/s |
+| **Speedup** | **~39× faster** | baseline |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times, the throughput advantage dominates. Compiling several expressions? Use `compileAll` — one `javac` invocation for the batch is around 35× faster than one per expression.
 
@@ -483,8 +483,10 @@ Where the speed comes from, beyond compiling to bytecode: literal values are hoi
 The benchmark is reproducible via:
 
 ```
-mvn test -Dtest=PerformanceComparisonTest#benchmark_comparison_sideBy_side
+mvn test -Dtest=PerformanceComparisonTest -DargLine="-Djunit.jupiter.conditions.deactivate=org.junit.jupiter.engine.extension.DisabledCondition"
 ```
+
+The benchmark class carries `@Disabled` so that a normal `mvn test` does not spend minutes on it, which is why the run needs that condition switched off — selecting the test with `-Dtest=` alone silently skips it.
 
 ---
 
