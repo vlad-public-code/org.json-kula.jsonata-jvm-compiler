@@ -2,12 +2,16 @@
 title: jsonata-jvm-compiler
 ---
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
 Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
+
+This is the compiler behind [valem.run](https://valem.run)'s reactive engine — every derived field in its 100+ live tax and cost models is a JSONata expression compiled through this library.
+
+A Python port is available as [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) ([PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py)) — the same parse → optimise → translate → compile pipeline targeting CPython 3.11+, generating Python source instead of Java. It passes the same official JSONata test suite, and evaluates about 26× faster than the pure-Python reference interpreter. The ~40× headline above does not carry over: it comes from JIT-compiled bytecode replacing an AST interpreter, and CPython has no JIT.
 
 ---
 
@@ -556,10 +560,11 @@ expression string
 
 ## License
 
-This project is licensed under the [Apache License 2.0](https://github.com/vlad-public-code/JSonata2Java/blob/main/LICENSE).
+This project is licensed under the [Apache License 2.0](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler/blob/main/LICENSE).
 
 ## See also
 
+- [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) — the Python port of this library: same pipeline, same official-suite acceptance gate, CPython instead of the JVM.
 - [tracked-json](https://vlad-public-code.github.io/org.json-kula.tracked-json/) — Jackson JsonNode wrapper that tracks each node's location (JsonPointer) and document root through every navigation — get, path, at, parent(), and JSONPath (RFC 9535). Includes JSON Patch (RFC 6902).
 - [Valem](https://vlad-public-code.github.io/org.json-kula.valem/) — deterministic reactive computation runtime for AI-generated structured data models.
 - [Valem Sandbox](https://valem.run/)

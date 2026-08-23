@@ -9,6 +9,10 @@ Repeated evaluation of a `JsonataExpression` instance is significantly faster th
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
+This is the compiler behind [valem.run](https://valem.run)'s reactive engine — every derived field in its 100+ live tax and cost models is a JSONata expression compiled through this library.
+
+A Python port is available as [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) ([PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py)) — the same parse → optimise → translate → compile pipeline targeting CPython 3.11+, generating Python source instead of Java. It passes the same official JSONata test suite, and evaluates about 26× faster than the pure-Python reference interpreter. The ~40× headline above does not carry over: it comes from JIT-compiled bytecode replacing an AST interpreter, and CPython has no JIT.
+
 ## Requirements
 
 | Requirement                           | Version |
