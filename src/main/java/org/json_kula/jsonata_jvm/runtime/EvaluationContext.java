@@ -58,9 +58,14 @@ final class EvaluationContext {
                 this.callDepth = null;
                 this.pendingTailCall = null;
             }
+            boolean nested = this.suspended != null && active;
             this.active = true;
             this.bindings = bindings;
-            this.millis = millis;
+            // $now/$millis are frozen for a top-level evaluation, and a nested $eval is
+            // part of that evaluation rather than a new one — so it inherits the snapshot
+            // instead of taking a fresh reading. That is what makes
+            // `$eval("$millis()") = $millis()` true, as the reference guarantees.
+            this.millis = nested ? this.suspended.millis() : millis;
             this.instanceRegexes = instanceRegexes;
             this.timeoutDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
             this.evalDelegate = evalDelegate;

@@ -40,12 +40,28 @@ final class SequenceBuiltins {
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
         if (list.isEmpty()) return arg;
-        // When no key function, check that elements are sortable primitives
+        // Without a comparator the default one compares elements directly, so anything it
+        // cannot order is D3070 — including a number/string mix, which belongs to $sort
+        // and not to the `^(key)` order-by operator's T2007/T2008.
+        //
+        // The check runs only when there is something to compare: the default comparator
+        // is never invoked for a single element, so $sort([{"a":1}]) succeeds.
+        // Nothing to compare: the default comparator is never invoked, so a one-element
+        // array of anything sorts to itself rather than reporting an unsortable element.
+        if (keyFn == null && list.size() <= 1) return arg;
         if (keyFn == null) {
+            boolean sawNumber = false, sawString = false;
             for (JsonNode elem : list) {
-                if (elem.isObject() || elem.isArray()) {
-                    throw new RuntimeEvaluationException("D3070", "$sort() cannot sort arrays of objects without a comparator function");
+                if (elem.isNumber()) sawNumber = true;
+                else if (elem.isTextual()) sawString = true;
+                else {
+                    throw new RuntimeEvaluationException("D3070",
+                            "$sort() cannot sort arrays of objects without a comparator function");
                 }
+            }
+            if (sawNumber && sawString) {
+                throw new RuntimeEvaluationException("D3070",
+                        "$sort() cannot sort a mix of numbers and strings without a comparator function");
             }
         }
 
@@ -214,7 +230,9 @@ final class SequenceBuiltins {
     static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
         fn = JsonataRuntime.deadlineGuard(fn);
-        if (JsonataRuntime.missing(arr)) return init;
+        // An absent sequence reduces to absent regardless of the initial value: there is
+        // nothing to fold the initial value into.
+        if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         // fn receives a pair array [acc, elem]; the translator unpacks this for
         // multi-param lambdas via genUnpackLambda.
         List<JsonNode> items = new ArrayList<>();

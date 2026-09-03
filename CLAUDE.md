@@ -20,12 +20,27 @@ Stack:
   - `Translator` — visitor-based code generator; entry point is `Translator.translate(AstNode, String pkg, String className)` returning a complete Java source string.
   - `PathCodeGen` — path expressions: step chains, predicates, context (`@$v`) and positional (`#$i`) bindings, parent (`%`) tracking and cross-joins. Split out of `Translator` because the code emitted for one step depends on what later steps do, and that reasoning belongs in one place.
   - `FunctionCallCodeGen`, `BlockCodeGen`, `ScopeAnalyzer` — function calls and lambdas, blocks and variable bindings, and the free-variable/holder analysis they share.
+  - `SequenceScanFusion` — collapses the several operations a block performs over one sequence
+    (`$sum($e.salary)`, `$max($e.salary)`, `$count($e[level = "senior"])`, `$e[level = "lead"]`, …)
+    into a single pass that reads each distinct field once per element rather than once per
+    operation. Planned per block before any statement is compiled; absorbed operations are
+    redirected to the scan's result slots through a node-identity memo on `GenState`. The fused loop
+    is emitted as its own `private static` helper — inlining it into the block method measured
+    *slower* than not fusing, because the block method grows past what C2 compiles well. Aggregates
+    record their first bad value rather than throwing, so the error the unfused statements would
+    have raised is still the one reported.
   - Literal nodes and object-constructor key arrays are hoisted to `private static final` fields of the generated class (`GenState.constant` / `GenState.keyArray`), so a predicate does not rebuild them per element per evaluation.
   - All AST node types are handled: literals, field/path/wildcard/descendant navigation, predicates, subscripts, all binary and unary operators, conditionals, function calls (built-ins + user-defined), lambdas, variable bindings, blocks, array/object constructors, range, sort, group-by, chain (`~>`), transform.
   - Blocks with variable bindings are emitted as private helper methods; lambdas are either inlined or also emitted as helper methods.
   - Generated classes import `static org.json_kula.jsonata_jvm.runtime.JsonataRuntime.*` and use the runtime for all JSONata operations.
 - Runtime support library implemented in package `org.json_kula.jsonata_jvm.runtime`:
   - `JsonataRuntime` — all static helper methods used by generated classes: field navigation with sequence mapping, filter/subscript, arithmetic, string concat, comparisons, boolean logic, array/object constructors, range, sort/reverse/distinct/flatten/map/filter/reduce/each, string functions, numeric functions, date/time, error, and chain-operator support via a lambda registry.
+  - `ConstructedObjectMap` — backing store for objects built by a constructor with literal keys.
+    The translator proves the keys distinct at compile time and emits `objectOfDistinct`, so the
+    object is filled into two parallel arrays with no hashing and no duplicate check, rather than
+    through a `LinkedHashMap`. Reads scan below 8 fields and build a hash index on the first read
+    above it — on the read, not the write. Duplicated literal keys keep the checking `objectOf`,
+    which still raises D1009.
   - `LambdaNode` / `RegexNode` — function and regex values, carried directly as `JsonNode`s. They are
     node types rather than specially-prefixed strings, so no input document can be mistaken for one,
     and a function value stays callable for as long as something references it (there is no registry

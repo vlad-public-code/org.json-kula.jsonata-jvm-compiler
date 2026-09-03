@@ -70,6 +70,7 @@ public final class Optimizer {
         @Override public AstNode visitNumberLiteral(NumberLiteral n, Void c)   { return n; }
         @Override public AstNode visitBooleanLiteral(BooleanLiteral n, Void c) { return n; }
         @Override public AstNode visitNullLiteral(NullLiteral n, Void c)       { return n; }
+        @Override public AstNode visitDeferredError(DeferredError n, Void c)   { return n; }
         @Override public AstNode visitRegexLiteral(RegexLiteral n, Void c)     { return n; }
         @Override public AstNode visitContextRef(ContextRef n, Void c)         { return n; }
         @Override public AstNode visitRootRef(RootRef n, Void c)               { return n; }
@@ -403,9 +404,15 @@ public final class Optimizer {
             if (numFold != null) return numFold;
 
             // --- String identity ---
+            // `x & ""` is only the identity when x is *already* a string: `&` stringifies,
+            // so `5 & ""` is "5" and `true & ""` is "true". Dropping the concat turned
+            // every such expression into its unconverted operand — the acceptance suite
+            // never concatenates a non-string with "", so this went unnoticed.
             if ("&".equals(op)) {
-                if (left  instanceof StringLiteral sl && sl.value().isEmpty()) return right;
-                if (right instanceof StringLiteral sl && sl.value().isEmpty()) return left;
+                if (left  instanceof StringLiteral sl && sl.value().isEmpty()
+                        && right instanceof StringLiteral) return right;
+                if (right instanceof StringLiteral sr && sr.value().isEmpty()
+                        && left instanceof StringLiteral) return left;
             }
             return null;
         }

@@ -18,6 +18,7 @@ public sealed interface AstNode permits
         AstNode.NumberLiteral,
         AstNode.BooleanLiteral,
         AstNode.NullLiteral,
+        AstNode.DeferredError,
         AstNode.RegexLiteral,
         AstNode.ContextRef,
         AstNode.RootRef,
@@ -69,6 +70,20 @@ public sealed interface AstNode permits
 
     /** The literal {@code null}. */
     record NullLiteral() implements AstNode {}
+
+    /**
+     * An error the expression must raise <em>when evaluated</em>, not when compiled.
+     *
+     * <p>Some JSONata errors are the evaluator's, not the parser's: a bare
+     * {@code count(...)} — a built-in called without its {@code $} — is T1005, but the
+     * reference raises it only if control actually reaches the call, so
+     * {@code false ? count([1,2]) : 1} evaluates to 1. Reporting it at compile time
+     * instead would reject an expression the reference happily runs.
+     *
+     * @param code    the JSONata error code
+     * @param message the error message
+     */
+    record DeferredError(String code, String message) implements AstNode {}
 
     /**
      * A regex literal, e.g. {@code /foo/i}.
@@ -142,8 +157,22 @@ public sealed interface AstNode permits
      * Array constructor: {@code [expr, expr, ...]}.
      *
      * @param elements the element expressions (may be empty)
+     * @param pathHead {@code true} when this constructor was written as the <em>first
+     *                 step</em> of a path. JSONata treats that position specially: the
+     *                 constructor is evaluated as a value rather than iterated, and an
+     *                 empty one ends the path there, uncollapsed — so {@code [].x} is
+     *                 {@code []} while {@code ([]).x} is undefined. The flag is set by the
+     *                 parser, mirroring the reference, because the distinction is
+     *                 syntactic and does not survive optimisation: the optimizer unwraps
+     *                 the {@code Parenthesized} that is the only thing telling the two
+     *                 apart by then. Defaults false, so every other construction site is
+     *                 unaffected.
      */
-    record ArrayConstructor(List<AstNode> elements) implements AstNode {}
+    record ArrayConstructor(List<AstNode> elements, boolean pathHead) implements AstNode {
+        public ArrayConstructor(List<AstNode> elements) {
+            this(elements, false);
+        }
+    }
 
     /**
      * A single key-value pair inside an object constructor.
@@ -223,7 +252,24 @@ public sealed interface AstNode permits
      * @param name the function name (without leading {@code $})
      * @param args the argument expressions (may be empty)
      */
-    record FunctionCall(String name, List<AstNode> args) implements AstNode {}
+    /**
+     * A function call: {@code $name(args)}, {@code name(args)} inside a path step, or a
+     * call of a bound function.
+     *
+     * @param name       the function name, without any leading {@code $}
+     * @param args       the argument expressions
+     * @param isVariable {@code true} for {@code $name(...)} — resolve the name as a
+     *                   variable or built-in. {@code false} for a bare {@code name(...)}
+     *                   written as a path step, where JSONata resolves the name as a
+     *                   <em>field</em> of the step context and never as a built-in.
+     *                   Defaults to {@code true} so every synthetic construction site
+     *                   keeps the meaning it already had; only the parser sets it false.
+     */
+    record FunctionCall(String name, List<AstNode> args, boolean isVariable) implements AstNode {
+        public FunctionCall(String name, List<AstNode> args) {
+            this(name, args, true);
+        }
+    }
 
     /**
      * A lambda (anonymous function): {@code function($x, $y) { body }}.
@@ -429,6 +475,7 @@ public sealed interface AstNode permits
         R visitNumberLiteral(NumberLiteral node, C ctx);
         R visitBooleanLiteral(BooleanLiteral node, C ctx);
         R visitNullLiteral(NullLiteral node, C ctx);
+        R visitDeferredError(DeferredError node, C ctx);
         R visitRegexLiteral(RegexLiteral node, C ctx);
         R visitContextRef(ContextRef node, C ctx);
         R visitRootRef(RootRef node, C ctx);
@@ -481,6 +528,7 @@ public sealed interface AstNode permits
             case NumberLiteral  n -> visitor.visitNumberLiteral(n, ctx);
             case BooleanLiteral n -> visitor.visitBooleanLiteral(n, ctx);
             case NullLiteral    n -> visitor.visitNullLiteral(n, ctx);
+            case DeferredError  n -> visitor.visitDeferredError(n, ctx);
             case RegexLiteral   n -> visitor.visitRegexLiteral(n, ctx);
             case ContextRef     n -> visitor.visitContextRef(n, ctx);
             case RootRef        n -> visitor.visitRootRef(n, ctx);

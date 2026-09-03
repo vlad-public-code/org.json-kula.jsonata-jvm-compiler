@@ -126,12 +126,15 @@ Drives `$match` when the pattern is a custom lambda matcher. The protocol:
 
 ### `encode(String s, boolean preserveReserved)`
 
-Percent-encodes per RFC 3986.
+Percent-encodes to match JavaScript's `encodeURIComponent`/`encodeURI`, which is *not*
+quite RFC 3986's unreserved/reserved split.
 
-- **`preserveReserved = false`** (`$encodeUrlComponent`): only unreserved characters
-  (`A-Za-z0-9 - _ . ~`) pass through unencoded.
-- **`preserveReserved = true`** (`$encodeUrl`): additionally keeps RFC 3986 reserved characters
-  (`: / ? # [ ] @ ! $ & ' ( ) * + , ; =`) unencoded.
+- **`preserveReserved = false`** (`$encodeUrlComponent`): `A-Za-z0-9` and
+  `- _ . ~ ! * ' ( )` pass through unencoded. The four sub-delimiters `! * ' ( )` are
+  RFC-reserved but `encodeURIComponent` leaves them alone.
+- **`preserveReserved = true`** (`$encodeUrl`): additionally keeps `# $ & + , / : ; = ? @`.
+  Note that `[` and `]` are *not* kept — `encodeURI` escapes them, though RFC 3986 lists
+  them as reserved.
 - Lone surrogates throw `D3140` immediately (detected before UTF-8 encoding).
 
 ### `decode(String s)`
@@ -143,8 +146,38 @@ Decodes percent-encoded sequences.
 
 ---
 
-## `$replace` zero-length match
+## Zero-length matches, and the shared regex cursor
 
-When a regex matches a zero-length string in `$replace`, the function throws `D1004`
-("Regular expression matches zero length string"). This matches the JSONata reference
-implementation behaviour.
+`$match`, `$split`, `$replace` and `$contains` all drive one cursor
+(`RegexOps.MatchCursor`). They used to run their own scan loops and disagreed: only
+`$replace` raised `D1004`, and it raised it on the *first* empty match.
+
+The rule is subtler than "reject empty matches". The cursor is the previous match's end,
+and the guard fires only on a **produced subsequent** empty match — so
+`$match("abc", /$/)` is legal (one match at index 3) while `$match("abc", /^/)` is `D1004`,
+because that is the case that could never progress.
+
+The guard is also what bounds the scan. Joni re-anchors `^` at the subject start, so a scan
+told to resume past a match still found offset 0; without the guard the cursor never
+advanced and the call built matches until the heap was exhausted.
+
+## Regex flags are JavaScript's, not Oniguruma's
+
+Joni is Oniguruma, and its option names do not mean what the JavaScript flag letters of the
+same name mean. `RegexRegistry.joniOptions` maps them:
+
+| JSONata flag | Oniguruma option |
+|---|---|
+| *(none)* | `SINGLELINE` — `^`/`$` anchor the whole string |
+| `m` | *no option* — `^`/`$` are line anchors |
+| `i` | `IGNORECASE` |
+
+(Oniguruma's `MULTILINE` is JavaScript's `/s`, which JSONata does not expose.)
+
+Two constructs need rewriting on top of that, in `RegexRegistry.toEcmaScriptDialect`:
+`$` becomes `\z` outside `/m`, because Oniguruma's `$` still matches before a trailing
+newline; and `.` becomes an explicit class excluding all four ECMAScript line terminators,
+where Oniguruma's excludes only `
+`. Under `/m` the anchors are widened the same way.
+
+See [design/CONFORMANCE-REVIEW.md](design/CONFORMANCE-REVIEW.md) §6-7.

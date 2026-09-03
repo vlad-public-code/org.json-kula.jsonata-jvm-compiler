@@ -222,12 +222,12 @@ assertTrue(result.isArray());
     // $match
     // =========================================================================
 
+    /** Exactly one match collapses to the bare object, not a one-element array. */
     @Test
     void match_basic() throws Exception {
         JsonNode result = eval("$match(\"hello world\", /wor/)");
-        assertTrue(result.isArray());
-        assertEquals(1, result.size());
-        assertEquals("wor", result.get(0).get("match").textValue());
+        assertFalse(result.isArray());
+        assertEquals("wor", result.get("match").textValue());
     }
 
     @Test
@@ -238,8 +238,8 @@ assertTrue(result.isArray());
     @Test
     void match_with_groups() throws Exception {
         JsonNode result = eval("$match(\"2024-01-15\", /([0-9]+)-([0-9]+)-([0-9]+)/)");
-        assertTrue(result.isArray());
-        JsonNode first = result.get(0);
+        assertFalse(result.isArray());
+        JsonNode first = result;
         assertEquals("2024-01-15", first.get("match").textValue());
         assertEquals(3, first.get("groups").size());
         assertEquals("2024", first.get("groups").get(0).textValue());
@@ -527,8 +527,8 @@ assertTrue(result.isArray());
     @Test
     void match_with_limit() throws Exception {
         JsonNode result = eval("$match(\"abab\", /a/, 1)");
-        assertTrue(result.isArray());
-        assertEquals(1, result.size());
+        assertFalse(result.isArray());
+        assertEquals("a", result.get("match").textValue());
     }
 
     // --- $replace: group references ---
@@ -563,10 +563,14 @@ assertTrue(result.isArray());
         assertThrows(Exception.class, () -> eval("$base64encode(42)"));
     }
 
-    // --- $base64decode: invalid base64 throws ---
+    // --- $base64decode: lenient, like Node's Buffer.from(s, "base64") ---
 
+    /**
+      * Characters outside the base64 alphabet are skipped rather than rejected, so a
+      * string of pure punctuation decodes to the empty string.
+      */
     @Test
-    void base64decode_invalid_throws() {
-        assertThrows(Exception.class, () -> eval("$base64decode(\"!!!not-base64!!!\")"));
+    void base64decode_invalid_is_lenient() throws Exception {
+        assertEquals("", eval("$base64decode(\"!!!\")").textValue());
     }
 }

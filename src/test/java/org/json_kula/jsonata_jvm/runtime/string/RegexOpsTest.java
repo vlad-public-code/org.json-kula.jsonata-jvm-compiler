@@ -56,41 +56,50 @@ class RegexOpsTest {
     // expandReplacement
     // =========================================================================
 
-    private static String expand(String repl, String whole, String input, org.joni.Region region) {
-        byte[] bytes = input.getBytes(StandardCharsets.UTF_8);
-        return RegexOps.expandReplacement(repl, whole, bytes, region);
+    /**
+     * expandReplacement now takes the already-extracted capture groups rather than the
+     * raw byte buffer and Joni region, because the one shared match cursor produces them
+     * once for every regex built-in.
+     */
+    private static String expand(String repl, String whole, String... groups) {
+        com.fasterxml.jackson.databind.node.ArrayNode captures =
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+        for (String group : groups) {
+            if (group == null) captures.addNull(); else captures.add(group);
+        }
+        return RegexOps.expandReplacement(repl, whole, captures);
     }
 
     @Test void expand_no_groups_literal() {
-        assertEquals("XYZ", expand("XYZ", "match", "anything", null));
+        assertEquals("XYZ", expand("XYZ", "match"));
     }
 
     @Test void expand_dollar_zero_whole_match() {
-        assertEquals("[match]", expand("[$0]", "match", "anything", null));
+        assertEquals("[match]", expand("[$0]", "match"));
     }
 
     @Test void expand_dollar_dollar_literal() {
-        assertEquals("$", expand("$$", "match", "anything", null));
+        assertEquals("$", expand("$$", "match"));
     }
 
     @Test void expand_dollar_dollar_in_context() {
-        assertEquals("a$b", expand("a$$b", "match", "anything", null));
+        assertEquals("a$b", expand("a$$b", "match"));
     }
 
     @Test void expand_no_region_group_ref_produces_empty() {
-        // $1 with null region — no capture group, should produce empty + remaining literal
-        String result = expand("$1", "match", "hello", null);
+        // $1 with no capture groups at all — produces empty + any remaining literal
+        String result = expand("$1", "match");
         assertEquals("", result);
     }
 
     @Test void expand_trailing_literal_after_dollar_zero() {
         // "$0world" — $0 = whole match, then literal "world"
-        assertEquals("matchworld", expand("$0world", "match", "anything", null));
+        assertEquals("matchworld", expand("$0world", "match"));
     }
 
     @Test void expand_plain_dollar_at_end() {
         // "$" with no digit following — emitted literally (no group reference)
-        String result = expand("hello$", "match", "anything", null);
+        String result = expand("hello$", "match");
         assertEquals("hello$", result);
     }
 }

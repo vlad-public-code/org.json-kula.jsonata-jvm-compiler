@@ -148,8 +148,37 @@ final class PathCodeGen {
             }
         }
 
+        // A path headed by an explicit array constructor short-circuits when that
+        // constructor is empty: the remaining steps are not evaluated and the empty array
+        // is the result, uncollapsed. See JsonataRuntime.consarrayHead. The test is on the
+        // step's AST shape, matching the reference, which flags only a literal `[` as the
+        // first step — so `([]).x` (parenthesised), `nums.[].x` (not first) and `[][0].x`
+        // (a subscript, a different node) are all unaffected.
+        boolean consarrayHead = isFlaggedPathHead(firstStep) && steps.size() > 1;
+
         // Use recursive compile to handle ContextBinding, PositionBinding, ParentStep.
-        String result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        // Where the constructor's emptiness is decidable now, decide it now: the guard is
+        // only needed when it genuinely depends on the data.
+        ArrayConstructor bareHead = firstStep instanceof ArrayConstructor ac ? ac : null;
+        String result;
+        if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
+            // Always empty. The path is the empty array and the remaining steps are
+            // unreachable, so they are not emitted at all.
+            result = expr;
+        } else if (consarrayHead && bareHead != null && isProvablyNonEmpty(bareHead)) {
+            // Never empty, so the guard could never fire. Emitting the ordinary chain
+            // keeps the generated code byte-identical to what it was before the
+            // short-circuit existed — which is what makes `[1,2,3].x` cost nothing.
+            result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        } else if (consarrayHead) {
+            // Emptiness depends on the data (`[nope].x`, `[nums[false]].x`), or the head
+            // is a sort wrapping the constructor. Decide at runtime.
+            String headVar = "__ch" + ctx.state.nextId();
+            String rest = compilePathSteps(t, steps, startFrom, headVar, ctx);
+            result = "consarrayHead(" + expr + ", " + headVar + " -> " + rest + ")";
+        } else {
+            result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        }
         // When a GroupByExpr(ContextRef) appears as the last step and the path contains
         // binding operators (@$var / #$var), each iteration of the binding loop produces
         // a separate GroupBy object.  Merge all per-iteration objects into one.
@@ -847,5 +876,52 @@ final class PathCodeGen {
         } finally {
             ctx.state.popScope();
         }
+    }
+
+    /**
+     * Whether the path's first step is an array constructor the parser flagged as a path
+     * head — see {@link org.json_kula.jsonata_jvm.parser.ast.AstNode.ArrayConstructor}.
+     * The flag, not the node type, is the test: the optimizer unwraps the
+     * {@code Parenthesized} that distinguishes {@code ([]).x} from {@code [].x}, so by
+     * here both look alike.
+     */
+    private static boolean isFlaggedPathHead(AstNode step) {
+        if (step instanceof ArrayConstructor ac) return ac.pathHead();
+        if (step instanceof SortExpr se && se.source() instanceof ArrayConstructor inner) {
+            return inner.pathHead();
+        }
+        return false;
+    }
+
+    /**
+     * Whether an array constructor is guaranteed to produce at least one element.
+     *
+     * <p>A constructor drops elements that evaluate to nothing, so {@code [nope]} is empty
+     * — but an element that always yields a value cannot be dropped, and one such element
+     * is enough. Where that holds the emptiness short-circuit can never fire, so the guard
+     * is elided and the generated code is identical to what it was before the
+     * short-circuit existed.
+     *
+     * <p>Conservative by construction: an unrecognised node type is assumed droppable, so
+     * the guard is kept. A false positive here would silently change behaviour; a false
+     * negative only costs one array-emptiness test.
+     */
+    private static boolean isProvablyNonEmpty(ArrayConstructor constructor) {
+        for (AstNode element : constructor.elements()) {
+            if (alwaysProducesAValue(element)) return true;
+        }
+        return false;
+    }
+
+    /** Node types that always evaluate to a value, never to an absent one. */
+    private static boolean alwaysProducesAValue(AstNode node) {
+        return node instanceof StringLiteral
+                || node instanceof NumberLiteral
+                || node instanceof BooleanLiteral
+                || node instanceof NullLiteral
+                || node instanceof RegexLiteral
+                || node instanceof ArrayConstructor
+                || node instanceof ObjectConstructor
+                || node instanceof Lambda;
     }
 }

@@ -41,7 +41,19 @@ Converts a number to a string in the given radix (2–36). The number is rounded
 
 ## $formatNumber — decimal picture strings
 
-Delegates to `DecimalPicture.format(...)`. The picture string follows the W3C XSLT 2.0 §16 specification:
+Delegates to `DecimalPicture.format(...)`, a port of XPath 3.1 F&O `fn:format-number`
+(§4.7.3 validate, §4.7.4 analyse, §4.7.5 bullets 2-14). It was previously written against
+the XSLT 2.0 §16 picture *grammar* on top of `java.text.DecimalFormat`, which disagreed
+with the reference interpreter in several structural ways — see
+[design/CONFORMANCE-REVIEW.md](design/CONFORMANCE-REVIEW.md) §3.
+
+The algorithm is defined over ECMAScript numeric primitives and inherits their artefacts:
+`toFixed` hands off to plain number rendering at 1e21, so `$formatNumber(1e21, "0.00")` is
+`"1e+21.00"`; and irregular grouping positions are spliced with JavaScript's `slice`, whose
+negative-index behaviour drops digits, so `$formatNumber(1234.5678, "#,##,##0")` is
+`"12,35,"`. Both are reproduced deliberately.
+
+The picture string:
 
 - **Mandatory digit** — `0` (or the active zero-digit character).
 - **Optional digit** — `#`.
@@ -78,9 +90,26 @@ Appending `;o` to any picture requests ordinal output:
 - Decimal pictures: append `st`/`nd`/`rd`/`th` (sign-aware: `-1st`, `-11th`).
 - Word pictures: irregular ordinal words ("first", "second", "twelfth", …).
 
+`IntegerPicture` analyses a picture into an immutable `Analysis` record and formats against
+it; the two halves are separate so `datetime.PictureFormatter` can analyse once and render
+every date/time component through the same engine, which is what F&O §9.8.4.3 requires.
+
+Analyses are memoized in a bounded cache (`runtime.PictureCache`) — 512 entries, and a
+picture longer than 256 characters is analysed afresh rather than retained, because a
+picture can arrive from input data.
+
+### Sign
+
+The sign is stripped, the magnitude formatted, and `"-"` prepended — for *every* primary
+format. That is the whole of the negative handling, and it is why `$formatInteger(-7, "01")`
+is `"-07"` and a roman or alphabetic picture formats a negative rather than rejecting it.
+
 ### Decimal grouping
 
-Standard patterns (e.g. `#,##0`) are handled by `java.text.DecimalFormat`. Custom grouping (`:` separator, or more than one grouping level) is handled by `IntegerPicture.applyCustomGrouping`, which strips the sign, formats the absolute value, then re-prepends the sign.
+Grouping separators are "regular" when they share a character and are equally spaced, in
+which case they are applied by a modulo walk; otherwise they are inserted at the recorded
+positions using JavaScript `substr` semantics, whose negative-index behaviour is
+observable (`$formatInteger(3999, "#,##,##0")` is `",9"`).
 
 ### Numbers beyond `long` range
 
@@ -98,14 +127,21 @@ result = "ten billion trillion trillion trillion"
 
 ## $parseInteger — integer picture strings
 
-Delegates to `IntegerPicture.parse(String s, String pic)`. Parsing is the inverse of formatting:
+Delegates to `IntegerPicture.parse(String s, String pic)`, which returns `NaN` — surfaced
+as JSONata's undefined — when the input does not parse.
+
+**It does no validation**, because the reference does none: it builds a matcher from the
+picture and runs its parse function over whatever it is given. So `$parseInteger("MCMXCIV",
+"0")` is undefined rather than an error, `$parseInteger("1,234", "0")` is `1` (JavaScript's
+`parseInt` stops at a comma the picture does not name as a separator), and an ordinal
+picture drops the last two characters whether or not they are a suffix.
 
 | Picture | Parser |
 |---|---|
-| `w`, `W`, `Ww` | `EnglishWords.parseWords` |
-| `I`, `i` | `IntegerPicture.parseRoman` (empty string → 0) |
-| `A`, `a` | `IntegerPicture.parseAlpha` |
-| decimal | `java.text.DecimalFormat` after stripping grouping separators |
+| `w`, `W`, `Ww` | `EnglishWords.wordsToNumber` (an unknown word yields NaN) |
+| `I`, `i` | `IntegerPicture.romanToDecimal` (a non-numeral character yields NaN) |
+| `A`, `a` | spreadsheet letters, unvalidated — `"1"` against `"A"` is the offset -15 |
+| decimal | separators stripped per the picture, then JavaScript `parseInt` |
 
 ### English word parsing algorithm
 

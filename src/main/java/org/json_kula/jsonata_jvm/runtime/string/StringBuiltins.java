@@ -244,43 +244,52 @@ public final class StringBuiltins {
                 throw new RuntimeEvaluationException("D3020", "$split: limit must be non-negative");
         }
         String s = str.textValue();
-        int lim = JsonataRuntime.missing(limit) ? -1 : (int) limit.doubleValue();
+        // Compared as a number rather than truncated to an int: the reference tests
+        // `count < limit`, so a limit of 1.5 admits two pieces, not one.
+        double lim = JsonataRuntime.missing(limit) ? -1 : limit.doubleValue();
         ArrayNode result = NF.arrayNode();
 
         if (JsonataRuntime.isRegexToken(separator)) {
             org.joni.Regex rx = JsonataRuntime.lookupRegex(separator);
-            byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
-            int start = 0, count = 0;
-            org.joni.Matcher m = rx.matcher(bytes);
-            while (start <= bytes.length) {
-                if (lim >= 0 && count >= lim) break;
-                int found = m.search(start, bytes.length, org.joni.Option.NONE);
-                if (found < 0) {
-                    result.add(new String(bytes, start, bytes.length - start, StandardCharsets.UTF_8));
-                    break;
-                }
-                result.add(new String(bytes, start, found - start, StandardCharsets.UTF_8));
-                count++;
-                int end = m.getEnd();
-                start = (end > found) ? end : end + 1;
-            }
-        } else {
-            String sep = JsonataRuntime.toText(separator);
-            if (sep.isEmpty()) {
-                // Split into codepoints, honouring limit
-                int[] cps = s.codePoints().toArray();
-                int n = (lim >= 0) ? Math.min(lim, cps.length) : cps.length;
-                for (int k = 0; k < n; k++)
-                    result.add(new String(Character.toChars(cps[k])));
+            RegexOps.MatchCursor cursor = new RegexOps.MatchCursor(s, rx);
+            RegexOps.Match found = lim == 0 ? null : cursor.next();
+            if (found == null) {
+                // No match at all: the whole subject is the single piece. A zero limit
+                // yields no pieces at all, which is why it short-circuits above.
+                if (lim != 0) result.add(s);
             } else {
-                int start = 0, count = 0, idx;
-                while ((idx = s.indexOf(sep, start)) >= 0) {
-                    if (lim >= 0 && count >= lim) break;
-                    result.add(s.substring(start, idx));
+                int start = 0, count = 0;
+                while (found != null && (lim < 0 || count < lim)) {
+                    result.add(s.substring(start, found.start()));
+                    start = found.end();
                     count++;
-                    start = idx + sep.length();
+                    found = cursor.next();
                 }
                 if (lim < 0 || count < lim) result.add(s.substring(start));
+            }
+        } else {
+            // A string separator splits the whole subject and then truncates, because the
+            // reference does `str.split(sep).slice(0, limit)` — and Array#slice truncates
+            // its argument toward zero. The regex branch above instead compares
+            // `count < limit` as a number, so 2.5 means two pieces here but admits a
+            // third there. The two really do differ; they are not one rule stated twice.
+            String sep = JsonataRuntime.toText(separator);
+            if (sep.isEmpty()) {
+                for (int cp : s.codePoints().toArray()) {
+                    result.add(new String(Character.toChars(cp)));
+                }
+            } else {
+                int start = 0, idx;
+                while ((idx = s.indexOf(sep, start)) >= 0) {
+                    result.add(s.substring(start, idx));
+                    start = idx + sep.length();
+                }
+                result.add(s.substring(start));
+            }
+            if (lim >= 0 && result.size() > (int) lim) {
+                ArrayNode truncated = NF.arrayNode();
+                for (int k = 0; k < (int) lim; k++) truncated.add(result.get(k));
+                result = truncated;
             }
         }
         return result;
@@ -332,39 +341,32 @@ public final class StringBuiltins {
                             : (int) JsonataRuntime.toNumber(limit));
         }
 
+        if (!JsonataRuntime.missing(limit) && JsonataRuntime.toNumber(limit) < 0)
+            throw new RuntimeEvaluationException("D3040", "$match: limit must be non-negative");
+
         org.joni.Regex rx = JsonataRuntime.isRegexToken(pattern)
                 ? JsonataRuntime.lookupRegex(pattern)
                 : JsonataRuntime.buildLiteralRegex(JsonataRuntime.toText(pattern));
-        int lim = JsonataRuntime.missing(limit) ? Integer.MAX_VALUE
-                : (int) JsonataRuntime.toNumber(limit);
-        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
-        org.joni.Matcher m = rx.matcher(bytes);
+        double lim = JsonataRuntime.missing(limit) ? Double.MAX_VALUE
+                : JsonataRuntime.toNumber(limit);
+
         ArrayNode results = NF.arrayNode();
-        int pos = 0, count = 0;
-        while (pos <= bytes.length && count < lim) {
-            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
-            if (found < 0) break;
-            int end = m.getEnd();
-            org.joni.Region region = m.getRegion();
+        RegexOps.MatchCursor cursor = new RegexOps.MatchCursor(s, rx);
+        int count = 0;
+        for (RegexOps.Match found = cursor.next();
+             found != null && count < lim;
+             found = cursor.next()) {
             ObjectNode obj = NF.objectNode();
-            obj.put("match", new String(bytes, found, end - found, StandardCharsets.UTF_8));
-            obj.put("index", RegexOps.bytePosToCharPos(s, found));
-            ArrayNode groups = NF.arrayNode();
-            if (region != null) {
-                for (int gi = 1; gi < region.getNumRegs(); gi++) {
-                    int gb = region.getBeg(gi);
-                    int ge = region.getEnd(gi);
-                    groups.add(gb >= 0
-                            ? new String(bytes, gb, ge - gb, StandardCharsets.UTF_8)
-                            : "");
-                }
-            }
-            obj.set("groups", groups);
+            obj.put("match", found.match());
+            obj.put("index", found.start());
+            obj.set("groups", found.groups());
             results.add(obj);
             count++;
-            pos = (end > found) ? end : end + 1;
         }
-        return results.isEmpty() ? JsonataRuntime.MISSING : results;
+        // A JSONata sequence collapses: no matches is absent, exactly one match is the
+        // bare object rather than a one-element array.
+        if (results.isEmpty()) return JsonataRuntime.MISSING;
+        return results.size() == 1 ? results.get(0) : results;
     }
 
     // =========================================================================
@@ -404,36 +406,28 @@ public final class StringBuiltins {
         org.joni.Regex rx = JsonataRuntime.isRegexToken(pattern)
                 ? JsonataRuntime.lookupRegex(pattern)
                 : JsonataRuntime.buildLiteralRegex(pattern.textValue());
-        int lim = JsonataRuntime.missing(limit) ? Integer.MAX_VALUE : (int) limit.doubleValue();
-        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
-        org.joni.Matcher m = rx.matcher(bytes);
+        double lim = JsonataRuntime.missing(limit) ? Double.MAX_VALUE : limit.doubleValue();
         StringBuilder sb = new StringBuilder();
-        int pos = 0, count = 0;
-        while (pos <= bytes.length && count < lim) {
-            int found = m.search(pos, bytes.length, org.joni.Option.NONE);
-            if (found < 0) break;
-            int end = m.getEnd();
-            if (end == found)
-                throw new RuntimeEvaluationException("D1004",
-                        "Regular expression matches zero length string");
-            sb.append(new String(bytes, pos, found - pos, StandardCharsets.UTF_8));
-            String matchStr = new String(bytes, found, end - found, StandardCharsets.UTF_8);
-            org.joni.Region region = m.getRegion();
+        RegexOps.MatchCursor cursor = new RegexOps.MatchCursor(s, rx);
+        int position = 0, count = 0;
+        for (RegexOps.Match found = lim == 0 ? null : cursor.next();
+             found != null && count < lim;
+             found = cursor.next()) {
+            sb.append(s, position, found.start());
             if (JsonataRuntime.isLambdaToken(replacement)) {
+                // The replacer receives the raw matcher-closure object — match, start,
+                // end and groups — not the remapped {match, index, groups} shape $match
+                // publishes. That is the reference's calling convention.
                 ObjectNode matchObj = NF.objectNode();
-                matchObj.put("match", matchStr);
-                matchObj.put("index", RegexOps.bytePosToCharPos(s, found));
-                ArrayNode groups = NF.arrayNode();
-                if (region != null) {
-                    for (int gi = 1; gi < region.getNumRegs(); gi++) {
-                        int gb = region.getBeg(gi);
-                        int ge = region.getEnd(gi);
-                        groups.add(gb >= 0
-                                ? new String(bytes, gb, ge - gb, StandardCharsets.UTF_8)
-                                : "");
-                    }
-                }
-                matchObj.set("groups", groups);
+                matchObj.put("match", found.match());
+                matchObj.put("start", found.start());
+                matchObj.put("end", found.end());
+                matchObj.set("groups", found.groups());
+                // The closure also carries `next`, which continues the same scan. It is
+                // observable — $keys of the argument lists it — and it advances the one
+                // shared cursor, exactly as the reference's does.
+                matchObj.set("next", JsonataRuntime.lambdaNode(
+                        ignored -> RegexOps.toMatchObject(cursor.next()), 0));
                 JsonNode repResult = JsonataRuntime.fn_apply(replacement, matchObj);
                 if (!JsonataRuntime.missing(repResult) && !repResult.isTextual())
                     throw new RuntimeEvaluationException("D3012",
@@ -441,13 +435,12 @@ public final class StringBuiltins {
                 sb.append(JsonataRuntime.missing(repResult) ? "" : repResult.textValue());
             } else {
                 sb.append(RegexOps.expandReplacement(
-                        JsonataRuntime.toText(replacement), matchStr, bytes, region));
+                        JsonataRuntime.toText(replacement), found.match(), found.groups()));
             }
+            position = found.start() + found.match().length();
             count++;
-            pos = end;
         }
-        if (pos <= bytes.length)
-            sb.append(new String(bytes, pos, bytes.length - pos, StandardCharsets.UTF_8));
+        sb.append(s, position, s.length());
         return NF.textNode(sb.toString());
     }
 
@@ -523,6 +516,10 @@ public final class StringBuiltins {
         if (!str.isTextual())
             throw new RuntimeEvaluationException("T0410",
                     "$base64encode: argument must be a string");
+        // btoa semantics: each UTF-16 code unit contributes its low byte. Latin-1 is
+        // exactly that mapping. Decoding reverses it with the SAME charset — decoding as
+        // UTF-8 made the pair non-invertible, so $base64decode($base64encode("e-acute"))
+        // came back as U+FFFD.
         byte[] bytes = str.textValue().getBytes(StandardCharsets.ISO_8859_1);
         return NF.textNode(java.util.Base64.getEncoder().encodeToString(bytes));
     }
@@ -530,13 +527,23 @@ public final class StringBuiltins {
     public static JsonNode fn_base64decode(JsonNode str) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         if (!str.isTextual()) return JsonataRuntime.MISSING;
-        try {
-            byte[] decoded = java.util.Base64.getDecoder().decode(str.textValue());
-            return NF.textNode(new String(decoded, StandardCharsets.UTF_8));
-        } catch (IllegalArgumentException e) {
-            throw new RuntimeEvaluationException(null,
-                    "$base64decode: invalid base64 input: " + e.getMessage());
+        // Lenient, like Node's Buffer.from(s, "base64"): characters outside the alphabet
+        // are skipped and surplus padding ignored, rather than rejected. The reference
+        // decodes "!!!!" to "" and "YQ===" to "a"; a strict decoder threw on both.
+        String encoded = str.textValue();
+        StringBuilder cleaned = new StringBuilder(encoded.length());
+        for (int i = 0; i < encoded.length(); i++) {
+            char c = encoded.charAt(i);
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '+' || c == '/' || c == '-' || c == '_') {
+                cleaned.append(c == '-' ? '+' : c == '_' ? '/' : c);
+            }
         }
+        // A trailing group of one character carries no whole byte and is discarded.
+        int usable = cleaned.length() - (cleaned.length() % 4 == 1 ? 1 : 0);
+        byte[] decoded = java.util.Base64.getMimeDecoder()
+                .decode(cleaned.substring(0, usable));
+        return NF.textNode(new String(decoded, StandardCharsets.ISO_8859_1));
     }
 
     // =========================================================================

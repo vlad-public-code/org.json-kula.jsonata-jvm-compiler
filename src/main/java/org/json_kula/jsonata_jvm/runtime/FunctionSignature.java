@@ -42,7 +42,7 @@ import java.util.List;
  *
  * <p>If the signature cannot be parsed the argument list is passed through unchanged.
  */
-final class FunctionSignature {
+public final class FunctionSignature {
 
     private FunctionSignature() {}
 
@@ -269,5 +269,50 @@ final class FunctionSignature {
             result.add(new ParamSpec(type, optional, focus, variadic));
         }
         return result;
+    }
+
+    // =========================================================================
+    // Compile-time queries used by the translator
+    // =========================================================================
+
+    /**
+     * The number of leading parameters a caller must supply, counting a context
+     * ({@code -}) parameter and excluding optional ({@code ?}) ones.
+     *
+     * <p>Returns -1 when the signature cannot be parsed, which the caller must read as
+     * "no opinion" rather than "zero".
+     */
+    public static int requiredArgCount(String signature) {
+        List<ParamSpec> params = parseParams(signature);
+        if (params == null) return -1;
+        int required = 0;
+        for (ParamSpec p : params) {
+            if (p.optional()) break;
+            required++;
+        }
+        return required;
+    }
+
+    /**
+     * Whether the signature's first parameter carries the {@code -} modifier, meaning the
+     * caller supplies the context value when the argument is absent. That is the whole of
+     * the rule for whether {@code a.$fn()} passes {@code a} to {@code $fn}.
+     */
+    public static boolean hasContextSlot(String signature) {
+        List<ParamSpec> params = parseParams(signature);
+        return params != null && !params.isEmpty() && params.get(0).focus();
+    }
+
+    /** The first parameter's type symbol, or {@code "x"} when the signature says nothing. */
+    public static String firstParamType(String signature) {
+        List<ParamSpec> params = parseParams(signature);
+        return params == null || params.isEmpty() ? "x" : params.get(0).type();
+    }
+
+    /** The type symbol of parameter {@code index} (0-based), or {@code "x"} if unknown. */
+    public static String paramType(String signature, int index) {
+        List<ParamSpec> params = parseParams(signature);
+        if (params == null || index < 0 || index >= params.size()) return "x";
+        return params.get(index).type();
     }
 }

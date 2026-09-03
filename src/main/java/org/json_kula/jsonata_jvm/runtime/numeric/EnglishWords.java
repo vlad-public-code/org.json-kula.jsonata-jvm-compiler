@@ -42,6 +42,25 @@ final class EnglishWords {
         m.put("trillion",    1_000_000_000_000L);
         m.put("quadrillion", 1_000_000_000_000_000L);
         m.put("quintillion", 1_000_000_000_000_000_000L);
+
+        // Ordinal spellings map to the same values, so $parseInteger with a "w;o" picture
+        // can read back what $formatInteger wrote. Without these, "twelfth" and
+        // "forty-second" were unknown words and the parse came out as 0.
+        String[] ordinals = {
+            "zeroth","first","second","third","fourth","fifth","sixth","seventh","eighth",
+            "ninth","tenth","eleventh","twelfth","thirteenth","fourteenth","fifteenth",
+            "sixteenth","seventeenth","eighteenth","nineteenth"
+        };
+        for (int j = 0; j < ordinals.length; j++) m.put(ordinals[j], (long) j);
+        // "twenty" -> "twentieth", and so on: drop the final "y" and add "ieth".
+        for (int j = 0; j < tens.length; j++) {
+            m.put(tens[j].substring(0, tens[j].length() - 1) + "ieth", (long) (j + 2) * 10);
+        }
+        m.put("hundredth", 100L);
+        for (String magnitude : new String[] {
+                "thousand", "million", "billion", "trillion", "quadrillion", "quintillion" }) {
+            m.put(magnitude + "th", m.get(magnitude));
+        }
         WORD_VALUES = Collections.unmodifiableMap(m);
     }
 
@@ -332,5 +351,119 @@ final class EnglishWords {
             case "seco", "secon" -> "two";
             default             -> root;
         };
+    }
+
+    // =========================================================================
+    // Reference word generator (jsonata datetime.js `numberToWords`)
+    // =========================================================================
+
+    private static final String[] FEW = {
+        "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+        "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen",
+        "Eighteen", "Nineteen"
+    };
+    private static final String[] ORDINALS = {
+        "Zeroth", "First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth",
+        "Ninth", "Tenth", "Eleventh", "Twelfth", "Thirteenth", "Fourteenth", "Fifteenth",
+        "Sixteenth", "Seventeenth", "Eighteenth", "Nineteenth"
+    };
+    private static final String[] DECADES = {
+        "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety", "Hundred"
+    };
+    private static final String[] MAGNITUDE_WORDS = { "Thousand", "Million", "Billion", "Trillion" };
+
+    /**
+     * Spells {@code value} out in English, in Title Case, exactly as the reference's
+     * {@code numberToWords} does — the caller lower-cases for {@code w}, upper-cases for
+     * {@code W}, and leaves it alone for {@code Ww}.
+     *
+     * <p>The separator placement is the part that has to be copied rather than reinvented:
+     * a magnitude or hundreds boundary is followed by {@code ", "} while a smaller
+     * remainder is joined with {@code " and "}, so 1970 is
+     * {@code "One Thousand, Nine Hundred and Seventy"} — not
+     * {@code "one thousand and nine hundred and seventy"}.
+     *
+     * <p>{@code value} must be non-negative; {@code $formatInteger} strips the sign and
+     * prepends it to the result.
+     */
+    static String numberToWords(long value, boolean ordinal) {
+        return lookup(value, false, ordinal);
+    }
+
+    private static String lookup(long num, boolean prev, boolean ord) {
+        String words;
+        if (num <= 19) {
+            words = (prev ? " and " : "") + (ord ? ORDINALS[(int) num] : FEW[(int) num]);
+        } else if (num < 100) {
+            long tens = num / 10;
+            long remainder = num % 10;
+            words = (prev ? " and " : "") + DECADES[(int) tens - 2];
+            if (remainder > 0) {
+                words += "-" + lookup(remainder, false, ord);
+            } else if (ord) {
+                words = words.substring(0, words.length() - 1) + "ieth";
+            }
+        } else if (num < 1000) {
+            long hundreds = num / 100;
+            long remainder = num % 100;
+            words = (prev ? ", " : "") + FEW[(int) hundreds] + " Hundred";
+            if (remainder > 0) {
+                words += lookup(remainder, true, ord);
+            } else if (ord) {
+                words += "th";
+            }
+        } else {
+            int mag = (int) Math.floor(Math.log10((double) num) / 3);
+            if (mag > MAGNITUDE_WORDS.length) mag = MAGNITUDE_WORDS.length;
+            long factor = (long) Math.pow(10, mag * 3.0);
+            long mant = num / factor;
+            long remainder = num - mant * factor;
+            words = (prev ? ", " : "") + lookup(mant, false, false) + " " + MAGNITUDE_WORDS[mag - 1];
+            if (remainder > 0) {
+                words += lookup(remainder, true, ord);
+            } else if (ord) {
+                words += "th";
+            }
+        }
+        return words;
+    }
+
+
+    /**
+     * English words back to a number, a port of the reference's {@code wordsToNumber}.
+     *
+     * <p>Unknown words make the running total NaN rather than raising — the reference
+     * arrives there through JavaScript's {@code undefined} arithmetic, and {@code
+     * $parseInteger} relies on it to report an unparseable input as undefined.
+     */
+    static double wordsToNumber(String text) {
+        String[] parts = text.split(",\\s|\\sand\\s|[\\s\\-]");
+        java.util.ArrayDeque<Double> segments = new java.util.ArrayDeque<>();
+        segments.push(0.0);
+        for (String part : parts) {
+            // An empty part is NOT skipped: the reference looks it up, finds nothing, and
+            // the total becomes NaN. That is what makes $parseInteger("", "w") undefined
+            // rather than 0.
+            Long known = WORD_VALUES.get(part);
+            if (known == null) {
+                // Mirrors the reference's `segs.push(segs.pop() * undefined)`.
+                segments.push(segments.pop() * Double.NaN);
+                continue;
+            }
+            double value = known;
+            if (value < 100) {
+                double top = segments.pop();
+                if (top >= 1000) {
+                    segments.push(top);
+                    top = 0;
+                }
+                segments.push(top + value);
+            } else {
+                segments.push(segments.pop() * value);
+            }
+        }
+        double total = 0;
+        for (double segment : segments) total += segment;
+        return total;
     }
 }

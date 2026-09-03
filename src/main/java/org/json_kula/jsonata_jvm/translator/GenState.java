@@ -72,6 +72,17 @@ final class GenState {
      */
     private final Deque<Map<String, String>> aliasStack = new ArrayDeque<>();
 
+    /**
+     * Operations that {@link SequenceScanFusion} has absorbed into a fused scan, keyed by the
+     * identity of the AST node they came from. When the visitor reaches one of these nodes it emits
+     * the scan's result slot instead of compiling the operation a second time.
+     *
+     * <p>Identity, not equality: two occurrences of the same expression are separate operations and
+     * only the one the pass planned for may be redirected.
+     */
+    final java.util.IdentityHashMap<org.json_kula.jsonata_jvm.parser.ast.AstNode, String> fusedScanResults =
+            new java.util.IdentityHashMap<>();
+
     /** Set to a variable name while generating a PartialApplication body. */
     String partialPhVar = null;
     boolean partialPhNeedIdx = false;

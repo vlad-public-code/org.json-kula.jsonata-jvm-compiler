@@ -63,7 +63,7 @@ public final class Parser {
         "formatBase", "formatInteger", "parseInteger", "now", "millis",
         "fromMillis", "toMillis", "error", "assert", "typeOf", "eval",
         "encodeUrl", "encodeUrlComponent", "decodeUrl", "decodeUrlComponent",
-        "base64encode", "base64decode"
+        "base64encode", "base64decode", "clone"
     );
 
     /**
@@ -74,6 +74,17 @@ public final class Parser {
     public static boolean isBuiltin(String name) {
         return BUILTIN_NAMES.contains(name);
     }
+
+    /**
+     * Set for exactly one {@link #parsePrimary()} call: the step immediately after a
+     * {@code .}. There, a bare {@code name(...)} is a call of the step context's
+     * <em>field</em> {@code name}, not of a variable or a built-in.
+     *
+     * <p>One-shot on purpose. An expression nested inside the step's own arguments —
+     * {@code $o.g($count(x))} — must not inherit it, or the built-in call in the
+     * argument would be resolved as a field too.
+     */
+    private boolean nextPrimaryIsDotStep;
 
     private Parser(List<Token> tokens) {
         this.tokens = tokens;
@@ -297,6 +308,16 @@ public final class Parser {
 
         while (true) {
             if (peek().type() == DOT) {
+                // A bare number, boolean or null literal cannot head a path step. A
+                // *parenthesised* one can — `(5).g()` is T1006, not S0213 — and a quoted
+                // string is a field name, so neither is rejected here.
+                if (node instanceof NumberLiteral || node instanceof BooleanLiteral
+                        || node instanceof NullLiteral) {
+                    Token t = peek();
+                    throw new ParseException("S0213",
+                            "The literal value cannot be used as a step within a path expression",
+                            t.position());
+                }
                 node = parseDotStep(node);
             } else if (peek().type() == AT && peekAt(1).type() == VARIABLE) {
                 // Context variable binding: node@$var
@@ -368,12 +389,43 @@ public final class Parser {
             steps.add(node);
         }
         steps.add(step);
-        return new PathExpr(steps);
+        return newPath(steps);
     }
 
     // =========================================================================
     // Postfix helpers
     // =========================================================================
+
+
+    /**
+     * Builds a {@link PathExpr}, flagging a leading array constructor.
+     *
+     * <p>Mirrors the reference's {@code firststep.consarray = true}: a {@code [...]}
+     * written as the first step of a path is evaluated as a value rather than iterated,
+     * and an empty one ends the path there. The distinction is purely syntactic —
+     * {@code [].x} and {@code ([]).x} differ — and it has to be recorded here, because by
+     * the time the optimizer has unwrapped the {@code Parenthesized} nothing else tells
+     * them apart.
+     *
+     * <p>A sort applied to the head ({@code []^(x).y}) is folded into the head node here
+     * rather than being a separate step as it is in the reference, so the constructor
+     * inside it is flagged too. Sorting an empty array is still empty, so the short-circuit
+     * lands on the same result.
+     */
+    private static AstNode newPath(List<AstNode> steps) {
+        if (steps.size() > 1) {
+            AstNode head = steps.get(0);
+            if (head instanceof ArrayConstructor ac && !ac.pathHead()) {
+                steps = new ArrayList<>(steps);
+                steps.set(0, new ArrayConstructor(ac.elements(), true));
+            } else if (head instanceof SortExpr se
+                    && se.source() instanceof ArrayConstructor inner && !inner.pathHead()) {
+                steps = new ArrayList<>(steps);
+                steps.set(0, new SortExpr(new ArrayConstructor(inner.elements(), true), se.keys()));
+            }
+        }
+        return new PathExpr(steps);
+    }
 
     private AstNode parseDotStep(AstNode left) throws ParseException {
         consume(DOT);
@@ -383,15 +435,27 @@ public final class Parser {
             cursor++;
             right = new ParentStep();
         } else if (peek().type() == STRING) {
-            // Quoted string after dot is a field name (e.g. Other."Alternative.Address")
+            // Quoted string after dot is a field name (e.g. Other."Alternative.Address").
+            // Followed by '(' it is not a field call, though: the reference treats the
+            // quoted text as a string literal being invoked, which is T1006 at runtime.
             Token t = consume(STRING);
-            right = new FieldRef(t.value());
+            // Followed by '(' it is not a field call: the reference invokes the quoted
+            // text as a string *literal*, which is T1006 at runtime. Only a bare
+            // identifier step names a field to call.
+            right = peek().type() == LPAREN
+                    ? desugarCallExpr(new StringLiteral(t.value()))
+                    : new FieldRef(t.value());
         } else if (peek().type() == NUMBER) {
             // A number literal after '.' is not a valid path step — S0213
             Token t = peek();
             throw new ParseException("S0213", "The expression on the right side of the '.' operator must be a name or a wildcard, not a number", t.position());
         } else {
-            right = parsePrimary();
+            nextPrimaryIsDotStep = true;
+            try {
+                right = parsePrimary();
+            } finally {
+                nextPrimaryIsDotStep = false;
+            }
         }
         // Flatten consecutive dot-steps into a single PathExpr
         List<AstNode> steps = new ArrayList<>();
@@ -401,7 +465,7 @@ public final class Parser {
             steps.add(left);
         }
         steps.add(right);
-        return new PathExpr(steps);
+        return newPath(steps);
     }
 
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
@@ -433,7 +497,7 @@ public final class Parser {
                 List<AstNode> steps = new ArrayList<>(pe.steps());
                 AstNode lastStep = steps.remove(steps.size() - 1);
                 steps.add(new ArraySubscript(lastStep, inner));
-                return new PathExpr(steps);
+                return newPath(steps);
             }
             // a.b.c[pred][n] — fold when source is a PredicateExpr on a PathExpr,
             // so [n] is applied per-element (per-b), not on the globally collected result.
@@ -441,7 +505,7 @@ public final class Parser {
                 List<AstNode> steps = new ArrayList<>(pp.steps());
                 AstNode lastStep = steps.remove(steps.size() - 1);
                 steps.add(new ArraySubscript(new PredicateExpr(lastStep, pe2.predicate()), inner));
-                return new PathExpr(steps);
+                return newPath(steps);
             }
             return new ArraySubscript(source, inner);
         }
@@ -455,7 +519,7 @@ public final class Parser {
                 // Fold as a PredicateExpr path step so the binding is traversed first
                 List<AstNode> steps = new ArrayList<>(pathSteps);
                 steps.add(new PredicateExpr(new ContextRef(), inner));
-                return new PathExpr(steps);
+                return newPath(steps);
             }
         }
         return new PredicateExpr(source, inner);
@@ -591,6 +655,9 @@ public final class Parser {
 
     // bareIdentifier, built-in function call, or lambda (function keyword)
     private AstNode parseIdentifierOrFunctionCall() throws ParseException {
+        // Consumed here, before anything else is parsed, so it applies to this name only.
+        boolean isDotStep = nextPrimaryIsDotStep;
+        nextPrimaryIsDotStep = false;
         Token t = consume(IDENTIFIER);
         // 'function' keyword (or Greek λ) introduces a lambda expression
         if (("function".equals(t.value()) || "\u03bb".equals(t.value())) && peek().type() == LPAREN) {
@@ -602,6 +669,13 @@ public final class Parser {
             return lambda;
         }
         if (peek().type() == LPAREN) {
+            if (isDotStep) {
+                // `a.g(...)` calls the FIELD g of the step context. A built-in name is a
+                // field here like any other, so no T1005 — `$o.count()` is $o's own
+                // `count`, and only a *missing* field reports T1005 to suggest $count.
+                List<AstNode> args = parseCallArgs();
+                return new FunctionCall(t.value(), args, false);
+            }
             AstNode call = parseFunctionArgs(t.value(), t.position());
             if (call instanceof PartialApplication) {
                 // Bare identifier partial application is invalid.
@@ -612,17 +686,20 @@ public final class Parser {
                 }
                 throw new ParseException("T1008", "The expression is not a function", t.position());
             }
-            // Regular call of a built-in function without $ prefix - throw T1005
+            // A built-in called without its `$`. The reference raises T1005 only if
+            // control actually reaches the call — `false ? count([1,2]) : 1` evaluates to
+            // 1 — so this is deferred to evaluation rather than rejected at compile time.
             if (BUILTIN_NAMES.contains(t.value())) {
-                throw new ParseException("T1005", "Attempted to invoke a non-function. Did you mean $"
-                        + t.value() + "?", t.position());
+                return new DeferredError("T1005",
+                        "Attempted to invoke a non-function. Did you mean $" + t.value() + "?");
             }
             return call;
         }
         return new FieldRef(t.value());
     }
 
-    private AstNode parseFunctionArgs(String name, int pos) throws ParseException {
+    /** Parses a parenthesised argument list, leaving the caller to build the node. */
+    private List<AstNode> parseCallArgs() throws ParseException {
         consume(LPAREN);
         List<AstNode> args = new ArrayList<>();
         if (peek().type() != RPAREN) {
@@ -631,6 +708,11 @@ public final class Parser {
             } while (tryConsume(COMMA));
         }
         consume(RPAREN);
+        return args;
+    }
+
+    private AstNode parseFunctionArgs(String name, int pos) throws ParseException {
+        List<AstNode> args = parseCallArgs();
         // If any argument is a PartialPlaceholder, produce a PartialApplication node.
         boolean hasPlaceholder = args.stream().anyMatch(a -> a instanceof PartialPlaceholder);
         if (hasPlaceholder) return new PartialApplication(name, args);

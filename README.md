@@ -5,13 +5,13 @@
 
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 40× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 50× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
 This is the compiler behind [valem.run](https://valem.run)'s reactive engine — every derived field in its 100+ live tax and cost models is a JSONata expression compiled through this library.
 
-A Python port is available as [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) ([PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py)) — the same parse → optimise → translate → compile pipeline targeting CPython 3.11+, generating Python source instead of Java. It passes the same official JSONata test suite, and evaluates about 26× faster than the pure-Python reference interpreter. The ~40× headline above does not carry over: it comes from JIT-compiled bytecode replacing an AST interpreter, and CPython has no JIT.
+A Python port is available as [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) ([PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py)) — the same parse → optimise → translate → compile pipeline targeting CPython 3.11+, generating Python source instead of Java. It passes the same official JSONata test suite, and evaluates about 26× faster than the pure-Python reference interpreter. The ~50× headline above does not carry over: it comes from JIT-compiled bytecode replacing an AST interpreter, and CPython has no JIT.
 
 ## Requirements
 
@@ -467,18 +467,18 @@ jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated ev
 ### Benchmark: [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) vs [JSONata4Java](https://github.com/IBM/JSONata4Java)
 The benchmark compiles one expression once, then runs 100 000 evaluations against the same JSON document (with a 1 000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
-Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM; two consecutive runs agreed to within 2%:
+Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM. They are the median of six runs: throughput varied between 120,000 and 128,000 eval/s across them, so treat the round numbers as the useful precision. The speedup is the steadier figure (48–52×), because both libraries meet the same machine conditions in the same JVM:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | ~800 ms | ~145 ms |
-| 100,000 evaluations | ~1,020 ms | ~40,400 ms |
-| Throughput | **~98,000 eval/s** | ~2,500 eval/s |
-| **Speedup** | **~40× faster** | baseline |
+| Compilation | ~1,150 ms | ~200 ms |
+| 100,000 evaluations | ~810 ms | ~40,000 ms |
+| Throughput | **~124,000 eval/s** | ~2,500 eval/s |
+| **Speedup** | **~50× faster** | baseline |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch instead of one per expression, worth [around 10× for 20 expressions](#compiling-many-expressions-at-once).
 
-Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys build an exactly-sized map in one pass; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; and the runtime's hot type checks are single dispatches rather than chains of megamorphic calls.
+Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys are filled into two parallel arrays with no hashing and no duplicate check, since the compiler already knows the keys are distinct; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; the several operations a block performs over one sequence are then fused again into a *single* pass that reads each field once per element rather than once per operation; and the runtime's hot type checks are single dispatches rather than chains of megamorphic calls.
 
 The benchmark is reproducible via:
 

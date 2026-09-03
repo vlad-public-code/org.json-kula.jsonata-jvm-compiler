@@ -924,6 +924,18 @@ public final class JsonataRuntime {
      * @param keys   the field names, in source order
      * @param values one value per key; a missing value omits its field, per JSONata
      */
+    /**
+     * The same, for a key array the translator has established holds no duplicates — which is every
+     * object constructor whose keys are literals, so nearly all of them.
+     *
+     * <p>Knowing that turns construction from a run of hash insertions into a run of pointer
+     * stores: there is no key to hash and no previous value to look for. See {@link
+     * ConstructedObjectMap} for what that buys and what it costs on the read side.
+     */
+    public static JsonNode objectOfDistinct(String[] keys, JsonNode[] values) {
+        return new ObjectNode(NF, new ConstructedObjectMap(keys, values));
+    }
+
     public static JsonNode objectOf(String[] keys, JsonNode[] values) throws RuntimeEvaluationException {
         ObjectNode result = new ObjectNode(NF, new java.util.LinkedHashMap<>(
                 Math.max(4, (keys.length * 4 / 3) + 1)));
@@ -1064,12 +1076,14 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_floor(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode((long) Math.floor(toNumber(arg)));
+        // numNode, not a raw (long) cast: a magnitude beyond Long.MAX_VALUE saturates
+        // there, so $floor(1e21) became 9223372036854775807 instead of staying 1e21.
+        return numNode(Math.floor(toNumber(arg)));
     }
 
     public static JsonNode fn_ceil(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode((long) Math.ceil(toNumber(arg)));
+        return numNode(Math.ceil(toNumber(arg)));
     }
 
     public static JsonNode fn_round(JsonNode arg) throws RuntimeEvaluationException {
@@ -1379,6 +1393,66 @@ public final class JsonataRuntime {
         return count == 0 ? MISSING : numNode(sum / count);
     }
 
+    // =========================================================================
+    // Fused sequence scans
+    //
+    // When a block runs several of the operations above over the same sequence, the translator
+    // (see SequenceScanFusion) collapses them into one loop that reads each field once per
+    // element instead of once per operation. These helpers are what that generated loop calls;
+    // they exist so the emitted code stays small enough for the JIT to compile well, which
+    // measurement showed matters more than the lookups saved.
+    // =========================================================================
+
+    /**
+     * True when {@code value} is present and deep-equals {@code expected} — the test
+     * {@code $count(seq[field = literal])} performs, lifted out so a fused scan can apply it to a
+     * field it has already read.
+     */
+    public static boolean fieldEq(JsonNode value, JsonNode expected) {
+        return value != null && value != MISSING && deepEquals(value, expected);
+    }
+
+    /**
+     * Starts the array a fused filter switches to on its second match, mirroring {@link
+     * #filter}: nothing is allocated for zero or one match, so a scan that selects a single
+     * element costs no more than the loop it replaced.
+     */
+    public static JsonNode seqStart(JsonNode first, JsonNode second) {
+        ArrayNode arr = NF.arrayNode(4);
+        arr.add(first);
+        arr.add(second);
+        return arr;
+    }
+
+    /** Appends to the array {@link #seqStart} created. */
+    public static void seqAdd(JsonNode array, JsonNode element) {
+        ((ArrayNode) array).add(element);
+    }
+
+    /** Collapses a fused filter's accumulator pair into its result, exactly as {@link #filter} does. */
+    public static JsonNode seqResult(JsonNode single, JsonNode array) {
+        if (array != null) return array;
+        return single != null ? single : MISSING;
+    }
+
+    /**
+     * Raises the error {@code $sum}, {@code $max} or {@code $min} reports for a non-numeric value.
+     *
+     * <p>A fused scan cannot throw where the offending element is found: the aggregates sharing the
+     * loop were separate statements in the source, and the one bound first must be the one that
+     * fails. So the scan records each aggregate's first bad value, and the generated code calls
+     * this afterwards for the earliest-bound aggregate that recorded one — which is exactly the
+     * error the unfused sequence of passes would have raised.
+     */
+    public static void aggFail(JsonNode bad, String fnName) throws RuntimeEvaluationException {
+        requireT0412(bad, fnName);
+    }
+
+    /** The {@link #aggFail} counterpart for {@code $average}, whose message names itself. */
+    public static void avgFail(JsonNode bad) throws RuntimeEvaluationException {
+        requireAverageArg(bad);
+    }
+
     /** Fused $max(arr.field): navigates field and finds max without an intermediate array. */
     public static JsonNode fn_max_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
         if (missing(seq)) return MISSING;
@@ -1557,7 +1631,13 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_reverse(JsonNode arg) {
         if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return arg;
+        // $reverse's signature is <a:a>, so a non-array argument is array-wrapped by the
+        // signature machinery rather than passed through: $reverse(1) is [1].
+        if (!arg.isArray()) {
+            ArrayNode wrapped = NF.arrayNode();
+            wrapped.add(arg);
+            return wrapped;
+        }
         ArrayNode result = NF.arrayNode();
         for (int i = arg.size() - 1; i >= 0; i--) result.add(arg.get(i));
         return result;
@@ -1895,10 +1975,10 @@ public final class JsonataRuntime {
         if (missing(obj)) return MISSING;
         // When applied to an array of objects, collect all unique keys (union)
         if (obj.isArray()) {
+            // Recurses into nested arrays: an array of arrays of objects still yields the
+            // union of the objects' keys.
             java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
-            for (JsonNode elem : obj) {
-                if (elem.isObject()) elem.fieldNames().forEachRemaining(seen::add);
-            }
+            collectKeys(obj, seen);
             if (seen.isEmpty()) return MISSING;
             ArrayNode result = NF.arrayNode();
             seen.forEach(result::add);
@@ -1908,6 +1988,15 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         obj.fieldNames().forEachRemaining(result::add);
         return result.isEmpty() ? MISSING : unwrap(result);
+    }
+
+    /** Collects the union of every object key reachable through nested arrays. */
+    private static void collectKeys(JsonNode node, java.util.LinkedHashSet<String> seen) {
+        if (node.isArray()) {
+            for (JsonNode elem : node) collectKeys(elem, seen);
+        } else if (node.isObject()) {
+            node.fieldNames().forEachRemaining(seen::add);
+        }
     }
 
     public static JsonNode fn_values(JsonNode obj) {
@@ -1998,22 +2087,167 @@ public final class JsonataRuntime {
             return (v == null || v == MISSING) ? MISSING : v;
         }
         if (obj.isArray()) {
+            // Recurses into nested arrays, for the same reason $keys does.
             ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : obj) {
-                if (elem.isObject()) {
-                    JsonNode v = elem.get(k);
-                    if (v != null && v != MISSING) appendToSequence(result, v);
-                }
-            }
+            collectLookups(obj, k, result);
             return unwrap(result);
         }
         return MISSING;
+    }
+
+    /** Appends every value of {@code key} reachable through nested arrays. */
+    private static void collectLookups(JsonNode node, String key, ArrayNode out) {
+        if (node.isArray()) {
+            for (JsonNode elem : node) collectLookups(elem, key, out);
+        } else if (node.isObject()) {
+            JsonNode v = node.get(key);
+            if (v != null && v != MISSING) appendToSequence(out, v);
+        }
     }
 
     /**
      * Splits each key/value pair of {@code obj} into a separate single-key object,
      * returning an array of those objects.
      */
+    /**
+     * {@code $clone(arg)} — a deep copy of an object or array.
+     *
+     * <p>The reference implements this as {@code JSON.parse($string(arg))}, so it is a
+     * round trip through the serialised form rather than a structural walk; a function
+     * value inside the argument therefore does not survive it.
+     */
+    /**
+     * Checks that a reducer supplied as a <em>value</em> accepts at least two arguments,
+     * and returns it.
+     *
+     * <p>The translator can check a literal {@code function($a, $b){...}} at compile time,
+     * but a variable holding one — or a built-in like {@code $sum} — reaches the runtime
+     * unchecked and was invoked with the packed 4-element tuple, quietly returning
+     * nonsense instead of D3050.
+     */
+    public static JsonNode reducerArityGuard(JsonNode fn) throws RuntimeEvaluationException {
+        if (fn instanceof LambdaNode lambda
+                && lambda.arity() != LambdaNode.UNKNOWN_ARITY && lambda.arity() < 2) {
+            throw new RuntimeEvaluationException("D3050",
+                    "The second argument of $reduce must accept at least 2 parameters, got "
+                            + lambda.arity());
+        }
+        return fn;
+    }
+
+    /**
+     * Resolves the callee of a field function call — the {@code g} in {@code a.g()}.
+     *
+     * <p>A bare name in a path step names a <em>field</em> of the step context, never a
+     * built-in: {@code $o.count()} is {@code $o}'s own {@code count}, and {@code $count}
+     * is only reachable by writing the {@code $}. A name that resolves to nothing is
+     * therefore T1006 — except when it is also a built-in name, where T1005 says what the
+     * author probably meant. Whether the name is a built-in is known at compile time, so
+     * the translator bakes it into the call.
+     *
+     * @param context    the step context; may be any JSON value
+     * @param name       the field name
+     * @param isBuiltin  whether {@code name} is also the name of a built-in
+     */
+    public static JsonNode fieldFunction(JsonNode context, String name, boolean isBuiltin)
+            throws RuntimeEvaluationException {
+        JsonNode callee = context != null && context.isObject() ? context.get(name) : null;
+        if (callee != null && isLambdaToken(callee)) return callee;
+        if (callee == null && isBuiltin) {
+            throw new RuntimeEvaluationException("T1005",
+                    "Attempted to invoke a non-function. Did you mean $" + name + "?");
+        }
+        throw new RuntimeEvaluationException("T1006", "Attempted to invoke a non-function");
+    }
+
+    /**
+     * Reports a built-in invoked with fewer arguments than its signature requires.
+     *
+     * <p>Reached when a built-in without a context ({@code -}) parameter is written as a
+     * path step: {@code [1,2].$count()} calls {@code $count} with no arguments at all,
+     * because {@code <a:n>} never takes the context.
+     */
+    public static JsonNode fn_signature_error(String name) throws RuntimeEvaluationException {
+        throw new RuntimeEvaluationException("T0410",
+                "Argument 1 of function " + name + " does not match function signature");
+    }
+
+    /**
+     * Checks the step context against the type a built-in's context parameter declares,
+     * and returns it.
+     *
+     * <p>A context of the wrong type is T0411 — "context value is not a compatible type"
+     * — where a wrong-typed <em>written</em> argument is T0410. The distinction is only
+     * visible here, because only this path substitutes the context.
+     */
+    public static JsonNode contextArg(JsonNode context, String type, String name)
+            throws RuntimeEvaluationException {
+        if (missing(context) || matchesTypeSymbol(context, type)) return context;
+        throw new RuntimeEvaluationException("T0411",
+                "Context value is not a compatible type with argument 1 of function " + name);
+    }
+
+    /** Whether {@code value} satisfies a JSONata signature type symbol. */
+    private static boolean matchesTypeSymbol(JsonNode value, String type) {
+        if (type == null || type.isEmpty()) return true;
+        if (type.startsWith("(")) {
+            // A union: satisfied by any of its members.
+            for (int i = 1; i < type.length() && type.charAt(i) != ')'; i++) {
+                if (matchesTypeSymbol(value, String.valueOf(type.charAt(i)))) return true;
+            }
+            return false;
+        }
+        return switch (type.charAt(0)) {
+            case 'b' -> value.isBoolean();
+            case 'n' -> value.isNumber();
+            case 's' -> value.isTextual() && !isRegexToken(value);
+            case 'l' -> value.isNull();
+            case 'a' -> value.isArray();
+            case 'o' -> value.isObject();
+            case 'f' -> isLambdaToken(value);
+            case 'u' -> value.isBoolean() || value.isNumber() || value.isTextual() || value.isNull();
+            case 'j' -> !isLambdaToken(value);
+            default -> true;              // 'x' and anything unrecognised accept everything
+        };
+    }
+
+    /**
+     * Applies the rest of a path to a head that is an <em>explicit array constructor</em>,
+     * short-circuiting when the constructor came out empty.
+     *
+     * <p>The reference evaluates a leading {@code [...]} as a value rather than iterating
+     * over it, and breaks out of the step loop the moment a step yields nothing — so for
+     * {@code [].x} the {@code .x} is never evaluated and the constructor's own empty array
+     * is the result. That array is a plain value, not a sequence, so it does not collapse
+     * to undefined the way an empty sequence does. Hence {@code [].x} is {@code []} while
+     * {@code empty.x} — the same value, the same step — is undefined.
+     *
+     * <p>The short-circuit is observable beyond the value: {@code [].($error("boom"))}
+     * succeeds, because the step body genuinely does not run.
+     *
+     * @param head the evaluated array constructor
+     * @param rest the remaining steps, applied only when {@code head} is non-empty
+     */
+    public static JsonNode consarrayHead(JsonNode head, JsonataLambda rest)
+            throws RuntimeEvaluationException {
+        if (head != null && head.isArray() && head.isEmpty()) return head;
+        // An absent head means the same thing here. The translator only emits this call
+        // when the first step is statically an array constructor, which always produces an
+        // array — so the only way it can arrive absent is a wrapper having already
+        // collapsed the empty one, as the sort in `[]^(x).y` does.
+        if (head == null || head.isMissingNode()) return NF.arrayNode();
+        return rest.apply(head);
+    }
+
+    public static JsonNode fn_clone(JsonNode arg) throws RuntimeEvaluationException {
+        if (missing(arg)) return MISSING;
+        if (!arg.isArray() && !arg.isObject()) {
+            throw new RuntimeEvaluationException("T0410",
+                    "$clone: argument must be an object or an array");
+        }
+        return arg.deepCopy();
+    }
+
     public static JsonNode fn_spread(JsonNode obj) {
         if (missing(obj)) return MISSING;
         if (obj.isArray()) {
@@ -2031,7 +2265,9 @@ public final class JsonataRuntime {
             single.set(e.getKey(), e.getValue());
             result.add(single);
         });
-        return result;
+        // A sequence result collapses, so a single-key object spreads to the bare
+        // one-key object rather than a one-element array.
+        return unwrap(result);
     }
 
     /**
@@ -2462,63 +2698,126 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Returns {@code true} if {@code s} — the output of {@link Double#toString} for a fractional
-     * value — is already what the 15-significant-digit rounding would produce: no exponent, no
-     * leading run of zeros that would switch the result to scientific notation, and few enough
-     * significant digits that rounding cannot change it.
+    /**
+     * Renders a double the way JavaScript does — ECMA-262 {@code Number::toString} — because
+     * a JSONata number <em>is</em> an IEEE double and the language's string form is defined by
+     * the reference implementation's own rendering.
+     *
+     * <p>The reference is `String(Number.isInteger(v) ? v : Number(v.toPrecision(15)))`: a
+     * non-integral value is first rounded to 15 significant digits to shed floating-point
+     * noise (so {@code 1/3} is {@code "0.333333333333333"}), and an integral one is
+     * <em>not</em> — rounding it would turn {@code 2^70} into {@code "1.18059162071741e+21"}
+     * instead of {@code "1.1805916207174113e+21"}.
+     *
+     * <p>The previous implementation hand-rolled the notation rules and diverged on
+     * subnormals, on the 1e21 exponential switch, on integers beyond 2^53, and on the
+     * {@code 1e-7} lower switch (its {@code "0.0000"}-prefix test put {@code 0.00001} into
+     * scientific notation, where JavaScript prints it plainly).
      */
-    private static boolean isPlainWithin15SignificantDigits(String s) {
-        int significant = 0;
+    public static String renderNumber(double v) {
+        return numberToString(v);
+    }
+
+    static String numberToString(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return String.valueOf(v);
+        if (v == 0) return "0";                       // ECMA-262 renders -0 as "0"
+
+        boolean negative = v < 0;
+        double magnitude = Math.abs(v);
+
+        // Fast path: an integral magnitude below 2^53 is exactly a long, and its plain
+        // digits are already the ECMA rendering (n <= 16, well inside the 21-digit
+        // boundary). The bound is 2^53 rather than the 1e21 notation boundary on purpose:
+        // above 2^53 a double's exact integer value has more digits than its shortest
+        // round-tripping form, so widening this silently breaks $string(12345678901234567890).
+        if (magnitude < 9007199254740992.0 && magnitude == Math.floor(magnitude)) {
+            return String.valueOf((long) v);
+        }
+
+        boolean integral = magnitude == Math.floor(magnitude);
+        if (!integral) {
+            // Fast path: Double.toString already yields the shortest round-tripping form,
+            // and where it prints plainly (1e-3 <= |v| < 1e7) JavaScript does too. If it
+            // also fits in 15 significant digits, the toPrecision(15) rounding is a no-op
+            // and the string is already the answer.
+            String shortest = Double.toString(magnitude);
+            if (shortest.indexOf('E') < 0 && significantDigits(shortest) <= 15) {
+                return negative ? "-" + shortest : shortest;
+            }
+            magnitude = new java.math.BigDecimal(magnitude)
+                    .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP))
+                    .doubleValue();
+        }
+
+        String rendered = ecmaNumberToString(magnitude);
+        return negative ? "-" + rendered : rendered;
+    }
+
+    /** Significant digits in a plain (exponent-free) decimal string. */
+    private static int significantDigits(String s) {
+        int count = 0;
         boolean seenNonZero = false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
-            if (c == 'E' || c == 'e') return false;
             if (c == '-' || c == '.') continue;
             if (c != '0') seenNonZero = true;
-            if (seenNonZero && ++significant > 15) return false;
+            if (seenNonZero) count++;
         }
-        // "0.0000…" and below are rendered in scientific notation by the reference path.
-        return !s.startsWith("0.0000") && !s.startsWith("-0.0000");
+        return count;
     }
 
     /**
-     * Converts a double to string using JSONata's number-to-string rules:
-     * integers render without decimal point, floating-point values use at most
-     * 13 significant digits (to eliminate floating-point noise beyond double
-     * precision), trailing zeros are stripped, and exponential notation uses
-     * a lowercase {@code e}.
+     * ECMA-262 {@code Number::toString} for a positive finite double.
+     *
+     * <p>The spec is stated over the shortest decimal {@code s x 10^(n-k)} that round-trips
+     * to the value, where {@code k} is the digit count. Java's {@link Double#toString} is
+     * <em>almost</em> that, but its format guarantees a digit after the decimal point, so
+     * {@code Double.MIN_VALUE} prints as {@code "4.9E-324"} where the shortest round-tripping
+     * form — and JavaScript's answer — is {@code "5e-324"}. The digits are therefore found by
+     * searching upward for the fewest that survive a round trip.
      */
-    static String numberToString(double v) {
-        if (Double.isInfinite(v) || Double.isNaN(v)) return String.valueOf(v);
-        // Whole numbers
-        if (v == Math.floor(v) && !Double.isInfinite(v)) {
-            if (Math.abs(v) < 1e15) return String.valueOf((long) v);
-            // JavaScript: values < 1e21 use plain decimal, >= 1e21 use scientific notation
-            if (Math.abs(v) < 1e21) return new java.math.BigDecimal(v).toBigInteger().toString();
-            // >= 1e21: use scientific notation (match JavaScript Number.toString())
-            java.math.BigDecimal bd = new java.math.BigDecimal(v)
-                    .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP));
-            String s = bd.toString().replace('E', 'e');
-            s = s.replaceAll("\\.0+e", "e").replaceAll("e(\\d)", "e+$1");
-            return s;
+    /**
+     * ECMA-262 {@code Number::toString} of {@code v}, with no 15-significant-digit
+     * rounding — JavaScript's {@code String(v)}, as distinct from {@code $string(v)}.
+     * {@code $round} shifts a decimal exponent through this form.
+     */
+    public static String renderNumberRaw(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return String.valueOf(v);
+        if (v == 0) return "0";
+        String rendered = ecmaNumberToString(Math.abs(v));
+        return v < 0 ? "-" + rendered : rendered;
+    }
+
+    private static String ecmaNumberToString(double magnitude) {
+        java.math.BigDecimal exact = new java.math.BigDecimal(magnitude);
+        java.math.BigDecimal shortest = exact;
+        for (int digits = 1; digits <= 17; digits++) {
+            java.math.BigDecimal candidate = exact.round(
+                    new java.math.MathContext(digits, java.math.RoundingMode.HALF_EVEN));
+            if (candidate.doubleValue() == magnitude) {
+                shortest = candidate;
+                break;
+            }
         }
-        // Fractional. The reference behaviour is "round to 15 significant figures, then print
-        // plainly", which needs BigDecimal — but only when the shortest round-trip form is longer
-        // than 15 significant digits. It usually is not (4.32, 26.3, 0.05 …), and Double.toString
-        // already produces exactly that form, so the common case skips BigDecimal entirely.
-        String shortest = Double.toString(v);
-        if (isPlainWithin15SignificantDigits(shortest)) return shortest;
-        java.math.BigDecimal bd = new java.math.BigDecimal(v)
-                .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP))
-                .stripTrailingZeros();
-        String s = bd.toPlainString();
-        // Very small numbers (< 0.001) → use scientific notation
-        if (s.startsWith("0.0000") || s.startsWith("-0.0000")) {
-            s = bd.toString(); // scientific notation from BigDecimal (uses E)
-            s = s.replace('E', 'e');
-            s = s.replaceAll("\\.0+e", "e").replaceAll("e(\\d)", "e+$1");
+        shortest = shortest.stripTrailingZeros();
+
+        String s = shortest.unscaledValue().toString();
+        int k = s.length();
+        int n = k - shortest.scale();            // value == 0.s x 10^n
+
+        if (k <= n && n <= 21) {                 // integer, no exponent needed
+            return s + "0".repeat(n - k);
         }
-        return s;
+        if (0 < n && n <= 21) {                  // decimal point inside the digits
+            return s.substring(0, n) + "." + s.substring(n);
+        }
+        if (-6 < n && n <= 0) {                  // leading "0.000..."
+            return "0." + "0".repeat(-n) + s;
+        }
+        // Exponential notation.
+        String mantissa = k == 1 ? s : s.charAt(0) + "." + s.substring(1);
+        int exponent = n - 1;
+        return mantissa + "e" + (exponent >= 0 ? "+" : "-") + Math.abs(exponent);
     }
 
     /** Converts an Object (JsonNode or RangeHolder) to a String representation. */
