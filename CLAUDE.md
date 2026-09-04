@@ -8,6 +8,13 @@ Stack:
 # Project structure
 - Parser which consumes input string containing JSONata expression and generates AST. Implemented in package `org.json_kula.jsonata_jvm.parser`:
   - `Parser` — recursive-descent parser; entry point is `Parser.parse(String expression)`.
+    Several JSONata rules are *positional* and can only be decided here, because the optimizer sees
+    a tree in which the position is gone: which node a `[...]` lands on (folded onto a path's last
+    step as a per-element stage, versus applied to a whole value — `PredicateExpr.stage` records
+    which), whether a trailing `[]` has a sequence to keep (`producesSequence`), whether a group-by
+    or a postfix operator sits on a path (`isPathLike`), and whether a literal is being used as a
+    path step (`isLiteralStep`). The parentheses in `(a.b)[]` and `nums.([1,2])` carry meaning for
+    the same reason, so the optimizer preserves the ones that do.
   - `ParseException` — checked exception carrying the source position of the error.
   - `org.json_kula.jsonata_jvm.parser.lexer.Lexer` — hand-written tokenizer; entry point is `Lexer.tokenize(String source)`.
   - `org.json_kula.jsonata_jvm.parser.lexer.Token` — record(type, value, position).
@@ -16,6 +23,10 @@ Stack:
 - Optimizer to optimize AST. Implemented in package `org.json_kula.jsonata_jvm.optimizer`:
   - `Optimizer` — single-pass, bottom-up tree rewriter; entry point is `Optimizer.optimize(AstNode)`.
   - Rewrites applied: constant folding (arithmetic, string concatenation, comparisons, boolean logic), arithmetic identity/absorption rules (`x+0`, `x*1`, `x*0`, etc.), string identity (`x & ""`), boolean short-circuit identities, conditional folding on literal conditions, unary-minus elimination (including double negation), block unwrapping (single-expression blocks), and `PathExpr` flattening.
+  - The `Parenthesized` wrapper is stripped, *except* around an array constructor or a path headed
+    by one. There the parentheses are load-bearing: only a bare `[...]` step is a constructor value,
+    so `nums.([1,2])` is `[1,2,1,2,1,2]` where `nums.[1,2]` is three arrays, and `([]).x` is not the
+    head short-circuit that `[].x` is.
 - Translator which generates Java 21 code by AST. Implemented in package `org.json_kula.jsonata_jvm.translator`:
   - `Translator` — visitor-based code generator; entry point is `Translator.translate(AstNode, String pkg, String className)` returning a complete Java source string.
   - `PathCodeGen` — path expressions: step chains, predicates, context (`@$v`) and positional (`#$i`) bindings, parent (`%`) tracking and cross-joins. Split out of `Translator` because the code emitted for one step depends on what later steps do, and that reasoning belongs in one place.
@@ -48,6 +59,22 @@ Stack:
     nested array constructors. `BoundFunctionValue` adapts a `JsonataBoundFunction` to a function
     value and back — the mirror of `ExportedJsonataFunction`, which adapts a function value to a
     `JsonataBoundFunction`.
+  - `MarkedArrayNode` — an `ArrayNode` carrying one of the two marks JSONata puts on a value rather
+    than on an expression. **cons**: the array a bare `[...]` path step built. It is a value that
+    happens to be an array, so it neither flattens into the sequence around it nor collapses when
+    alone in one — `nums.[1,2]` is three arrays, `a.[1]` is `[1]`. **keepSingleton**: what `[]`
+    leaves behind, which stops the collapse (but not the flattening) and outlives further steps and
+    a sort. The marks have to live on the *value*: every bare `[...]` step is flagged wherever it
+    sits, and the mark then travels with the array — `a.[1].$[]` is `[[1]]`. Read in exactly three
+    places, matching the reference: the step flatten loop (`appendStepResult`), the singleton
+    collapse (`unwrap`), and the promotion `[]` performs (`forceArray`). Static rules on the AST
+    shape are each an approximation of a dynamic fact and always need another case; a sibling port
+    measured that approach stalling at 285 divergences on a path sweep where the marker reached 0.
+  - Path steps that look like no-ops but are not: `contextStep` (`$`) and `wildcardStep` (a `*`
+    after another step) exist because the reference runs *every* step once per input item. A `$`
+    step flattens what it walks and collapses what it collects (`[1].$` is 1); a `*` after a step
+    sees one element at a time and a scalar contributes nothing (`nums.*` is undefined), while a
+    `*` at the head of a path enumerates its context (`*` over `[1,2,3]` is `[1,2,3]`).
   - `JsonataLambda` — single-argument functional interface (`JsonNode apply(JsonNode) throws JsonataEvaluationException`) used for predicates, map/filter callbacks, and inline lambdas.
   - `org.json_kula.jsonata_jvm.runtime.datetime` — date/time subsystem (`IsoConverter`, `TimezoneUtils`, `RomanNumerals`, `WordNumbers`, `PictureFormatter`, `PictureParser`); `DateTimeUtils` in `runtime` is a thin facade over this package. See [docs/datetime.md](docs/datetime.md) for the full reference.
   - `org.json_kula.jsonata_jvm.runtime.numeric` — numeric built-ins (`NumericBuiltins`, `DecimalPicture`, `IntegerPicture`, `EnglishWords`); `JsonataRuntime` delegates to `NumericBuiltins` for all `$number`, `$round`, `$random`, `$formatBase`, `$formatNumber`, `$formatInteger`, `$parseInteger` calls. See [docs/numeric.md](docs/numeric.md) for the full reference.
