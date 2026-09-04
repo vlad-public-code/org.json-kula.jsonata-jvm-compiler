@@ -2124,6 +2124,21 @@ public final class JsonataRuntime {
         return MISSING;
     }
 
+    /**
+     * {@code $lookup(…)[]}: the same lookup, keeping the sequence an array input produces.
+     *
+     * <p>Over an array the reference builds the result with {@code createSequence}, so a single
+     * match is a one-element sequence — invisible until a {@code []} stops it collapsing:
+     * {@code $lookup(one,"x")[]} is [1] where the bare call is 1. Over an object it builds no
+     * sequence at all, so {@code $lookup(a,"b")[]} stays 1. That is the one built-in whose answer
+     * to {@code []} depends on its argument rather than on its name.
+     */
+    public static JsonNode fn_lookup_keepArray(JsonNode obj, JsonNode key) {
+        JsonNode result = fn_lookup(obj, key);
+        if (obj == null || !obj.isArray() || missing(result) || result.isArray()) return result;
+        return NF.arrayNode().add(result);
+    }
+
     /** Appends every value of {@code key} reachable through nested arrays. */
     private static void collectLookups(JsonNode node, String key, ArrayNode out) {
         if (node.isArray()) {

@@ -256,6 +256,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         if (PathCodeGen.pathEndsWithArrayConstructor(n.source())) {
             return n.source().accept(this, ctx.withArrayConstructorPreserve());
         }
+        // $lookup is the one built-in whose answer to `[]` depends on its argument: it builds a
+        // sequence for an array input and none for an object. Wrapping unconditionally would make
+        // `$lookup(a,"b")[]` [1] instead of 1.
+        if (n.source() instanceof FunctionCall fc && "lookup".equals(fc.name()) && fc.args().size() == 2) {
+            return "fn_lookup_keepArray(" + fc.args().get(0).accept(this, ctx)
+                    + ", " + fc.args().get(1).accept(this, ctx) + ")";
+        }
         return "forceArray(" + n.source().accept(this, ctx) + ")";
     }
 

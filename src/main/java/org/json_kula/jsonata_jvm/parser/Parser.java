@@ -306,6 +306,11 @@ public final class Parser {
     private AstNode parsePostfix() throws ParseException {
         AstNode node = parsePrimary();
 
+        // A `[]` seen on a node whose result is not a sequence. It is not discarded — the mark
+        // lives on the node and is read by the next thing that does produce one — but if the
+        // postfix chain ends first, it never fires.
+        boolean pendingKeepArray = false;
+
         while (true) {
             if (peek().type() == DOT) {
                 // A bare number, boolean or null literal cannot head a path step. A
@@ -322,6 +327,7 @@ public final class Parser {
                             t.position());
                 }
                 node = parseDotStep(node);
+                if (pendingKeepArray) { pendingKeepArray = false; if (producesSequence(node)) node = new ForceArray(node); }
             } else if (peek().type() == AT && peekAt(1).type() == VARIABLE) {
                 // Context variable binding: node@$var
                 // S0215: @$var cannot follow a predicate/subscript step
@@ -350,10 +356,21 @@ public final class Parser {
                 // HASH not followed by $var — must use a variable name (S0214)
                 Token t = peek();
                 throw new ParseException("S0214", "The operand of the '#' operator must be a variable name ($var)", t.position());
+            } else if (peek().type() == LBRACKET && peekAt(1).type() == RBRACKET) {
+                // `[]` marks the node it is written on; the reference reads that mark only where
+                // the node's own result is a sequence. On a path that is the path's result, so it
+                // applies at once. On anything else it applies to whatever comes next and makes a
+                // sequence — a `[...]` stage, or a `.step` that turns the node into a path — and
+                // if nothing does, `[]` does nothing at all: `1[]` is 1 but `1[][0]` is [1].
+                cursor += 2;
+                if (producesSequence(node)) node = new ForceArray(node);
+                else pendingKeepArray = true;
             } else if (peek().type() == LBRACKET) {
                 node = parseSubscriptOrPredicate(node);
+                if (pendingKeepArray) { pendingKeepArray = false; if (producesSequence(node)) node = new ForceArray(node); }
             } else if (peek().type() == CARET) {
                 node = parseSortExpr(node);
+                if (pendingKeepArray) { pendingKeepArray = false; if (producesSequence(node)) node = new ForceArray(node); }
             } else if (peek().type() == LBRACE) {
                 node = parseGroupBy(node);
             } else if (peek().type() == PIPE && transformPatternDepth == 0) {
@@ -465,6 +482,56 @@ public final class Parser {
         };
     }
 
+    /**
+     * The built-ins whose result the reference builds with {@code createSequence}, and so the only
+     * calls a trailing {@code []} has anything to keep from.
+     *
+     * <p>Everything else returns a plain array, an object or a scalar. Two that look like they
+     * belong and do not: {@code $append} concatenates, which yields a plain array and returns one
+     * argument verbatim when the other is absent ({@code $append(1, nope)[]} is 1); and
+     * {@code $eval} returns whatever the evaluated expression returned ({@code $eval("1")[]} is 1).
+     *
+     * <p>{@code $lookup} is here but is not syntactic: it builds a sequence only for an
+     * <em>array</em> input, so {@code $lookup(one,"x")[]} is [1] while {@code $lookup(a,"b")[]} is
+     * 1. The translator gives it its own keepArray-aware entry point.
+     */
+    private static final java.util.Set<String> SEQUENCE_BUILTINS = java.util.Set.of(
+            "map", "filter", "keys", "spread", "each", "match", "distinct", "lookup");
+
+    /**
+     * Whether a trailing {@code []} has anything to keep.
+     *
+     * <p>{@code keepArray} is only ever read inside {@code evaluate}'s {@code isSequence(result)}
+     * branch, so {@code []} after anything whose result is not a sequence does nothing whatsoever:
+     * {@code 1[]} is 1, {@code {}[]} is {}, {@code (a.b)[]} is 1 where {@code a.b[]} is [1], and
+     * {@code $sum(nums)[]} is 6. Wrapping those in an array was the single largest divergence
+     * family in a {@code []}-suffix sweep.
+     *
+     * <p>The decision is syntactic and has to be taken here: the optimizer strips the
+     * {@code Parenthesized} that separates {@code (a.b)[]} from {@code a.b[]}.
+     */
+    private static boolean producesSequence(AstNode node) {
+        if (node instanceof FunctionCall fc) return SEQUENCE_BUILTINS.contains(fc.name());
+        // A predicate or subscript stage always builds its result with createSequence, whatever it
+        // ran over — so `1[0][]` is [1] and `$sum(nums)[0][]` is [6], not the bare value.
+        if (node instanceof PredicateExpr || node instanceof ArraySubscript) return true;
+        // `a ~> $f()` carries keepArray on the apply node, whose result is whatever the last
+        // stage returned — so it inherits that stage's answer.
+        if (node instanceof ChainExpr ce && !ce.steps().isEmpty()) {
+            return producesSequence(ce.steps().get(ce.steps().size() - 1));
+        }
+        // `@$v` hangs the focus off whatever the left side already was and never wraps it into a
+        // path, so `$@$e` is still a variable and its `[]` does nothing. `#$i` does wrap, which is
+        // why `$#$i[]` keeps its array. Here both are steps, so the bindings are looked through.
+        if (node instanceof PathExpr pe) {
+            List<AstNode> steps = pe.steps();
+            int i = steps.size() - 1;
+            while (i > 0 && steps.get(i) instanceof ContextBinding) i--;
+            return i > 0 || producesSequence(steps.get(0));
+        }
+        return isPathLike(node);
+    }
+
     /** Whether any step binds a context ({@code @$v}) or a position ({@code #$v}). */
     private static boolean hasBindingStep(List<AstNode> steps) {
         for (AstNode step : steps) {
@@ -563,9 +630,10 @@ public final class Parser {
         }
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
-            // Empty [] — force-array operator: wraps the result in an array
+            // Empty [] — the keep-array operator. parsePostfix handles the ordinary route,
+            // including the deferred case; this is the group-by push-through calling in.
             consume(RBRACKET);
-            return new ForceArray(source);
+            return producesSequence(source) ? new ForceArray(source) : source;
         }
         // Range expression inside brackets: [from..to]
         AstNode inner = parseExpression();
