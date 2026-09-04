@@ -597,6 +597,13 @@ public final class Parser {
         if (left instanceof GroupByExpr gbe && isPathLike(gbe.source())) {
             return new GroupByExpr(parseDotStep(gbe.source()), gbe.pairs());
         }
+        // A `[]` between two steps belongs to the step it was written on, not between two paths:
+        // the reference flags keepArray there and flags keepSingletonArray on the path as a whole.
+        // Keeping the marker outside a *nested* path instead hides the earlier steps from the one
+        // being added, which is how `o.p[].%` lost the parent it should reach.
+        if (left instanceof ForceArray fa && fa.source() instanceof PathExpr) {
+            return new ForceArray(parseDotStep(fa.source()));
+        }
         consume(DOT);
         // % after a dot means "parent step"
         AstNode right;

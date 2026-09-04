@@ -565,7 +565,7 @@ final class PathCodeGen {
             }
             case WildcardStep ws   -> "wildcardStep(" + prevExpr + ")";
             case DescendantStep ds -> "descendant(" + prevExpr + ")";
-            case ContextRef cr     -> prevExpr;
+            case ContextRef cr     -> "contextStep(" + prevExpr + ")";
             case RootRef rr        -> ctx.rootVar;
             // A `[...]` the parser folded onto this step is a per-element stage: the reference
             // runs it inside the per-input-item loop, on that item's own step result. For a

@@ -167,6 +167,25 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Evaluates {@code $} as a path step: it rebinds the context to itself, but it is still a step.
+     *
+     * <p>The reference runs it once per input item and pushes each result into a fresh sequence,
+     * so an array-valued item that is not a constructor's own array is flattened into it:
+     * {@code $each(a, fn).$} over {@code {"b":1,"c":[7,8]}} is [1,7,8], not [1,[7,8]]. A cons array
+     * is pushed whole, which is why {@code a.[1].$} keeps its [1].
+     */
+    public static JsonNode contextStep(JsonNode node) {
+        if (node == null || node == MISSING) return MISSING;
+        // A constructor's array is one value, not a sequence to walk: `$` over it yields a sequence
+        // of one holding it, which collapses straight back to it. `a.([].x).$` is [].
+        if (MarkedArrayNode.isCons(node)) return node;
+        if (!node.isArray()) return node;
+        ArrayNode result = NF.arrayNode(node.size());
+        for (JsonNode elem : node) appendStepResult(result, elem);
+        return unwrap(result);
+    }
+
+    /**
      * Evaluates {@code *} as a path step: it maps over the sequence reaching it.
      *
      * <p>The reference runs each step once per input item, so a {@code *} after another step sees
