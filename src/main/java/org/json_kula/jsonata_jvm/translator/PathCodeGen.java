@@ -36,6 +36,9 @@ final class PathCodeGen {
         // final result in forceArray() to prevent singleton collapsing.
         AstNode firstStep = steps.get(0);
         boolean forceArr = firstStep instanceof ForceArray;
+        // `[]` written on the head step itself, as opposed to around the whole path. Only a
+        // consarray head can tell the two apart; see the staged-head branch below.
+        boolean forceArrayOnHead = forceArr;
         if (forceArr) firstStep = ((ForceArray) firstStep).source();
         // Also check if the first step is a predicate whose source is a ForceArray:
         // e.g. Phone[][type="mobile"].number — the predicate source is ForceArray(Phone)
@@ -197,7 +200,20 @@ final class PathCodeGen {
         // only needed when it genuinely depends on the data.
         ArrayConstructor bareHead = firstStep instanceof ArrayConstructor ac ? ac : null;
         String result;
-        if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
+        if (consarrayHead && bareHead == null && isStagedConstructorHead(firstStep)) {
+            // A head constructor carrying a `[...]` stage. The short-circuit hands the *value* the
+            // stage produced to the remaining steps, which is no longer an array — see
+            // JsonataRuntime.consarrayStagedHead for what the next step then makes of it.
+            //
+            // A `[]` written on the head step, rather than on the path, keeps that value a
+            // sequence: `[1,2][0][].$` is [1] where `[1,2][0].$[]` is undefined. That is the only
+            // place per-step keepArray is observable, and the two parse to different shapes —
+            // a ForceArray inside the step list, versus one around the whole path.
+            String headExpr = forceArrayOnHead ? "forceArray(" + expr + ")" : expr;
+            String headVar = "__ch" + ctx.state.nextId();
+            String rest = compilePathSteps(t, steps, startFrom, headVar, ctx);
+            result = "consarrayStagedHead(" + headExpr + ", " + headVar + " -> " + rest + ")";
+        } else if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
             // Always empty. The path is the empty array and the remaining steps are
             // unreachable, so they are not emitted at all. It is a constructor value, so it does
             // not collapse — `[].[1]` is [] even though the path ends in a constructor step.
@@ -1083,7 +1099,18 @@ final class PathCodeGen {
         if (step instanceof SortExpr se && se.source() instanceof ArrayConstructor inner) {
             return inner.pathHead();
         }
-        return false;
+        // A `[...]` stage does not change what the step is, so a staged constructor is still the
+        // flagged head — which is what makes `[1,2][0].$` undefined rather than 1.
+        return isStagedConstructorHead(step);
+    }
+
+    /** A head array constructor carrying one or more {@code [...]} stages. */
+    private static boolean isStagedConstructorHead(AstNode step) {
+        AstNode inner = step instanceof PredicateExpr pe ? pe.source()
+                : step instanceof ArraySubscript as ? as.source()
+                : null;
+        if (inner == null) return false;
+        return inner instanceof ArrayConstructor ac ? ac.pathHead() : isStagedConstructorHead(inner);
     }
 
     /**

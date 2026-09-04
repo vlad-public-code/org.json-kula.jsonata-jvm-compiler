@@ -301,10 +301,20 @@ public final class Optimizer {
             return steps.equals(n.steps()) ? n : new ChainExpr(steps);
         }
 
-        /** Whether {@code node} is a path whose first step is an array constructor. */
+        /**
+         * Whether {@code node} is, or is a path headed by, an array constructor — including one
+         * carrying {@code [...]} stages, since a stage does not change what the step is.
+         * {@code ([1,2][0]).$} is 1 where {@code [1,2][0].$} is undefined, so the parentheses
+         * around a staged head are as load-bearing as those around a bare one.
+         */
         private static boolean headedByArrayConstructor(AstNode node) {
-            return node instanceof PathExpr pe && !pe.steps().isEmpty()
-                    && pe.steps().get(0) instanceof ArrayConstructor;
+            if (node instanceof PathExpr pe && !pe.steps().isEmpty()) {
+                return headedByArrayConstructor(pe.steps().get(0));
+            }
+            if (node instanceof ArrayConstructor) return true;
+            if (node instanceof PredicateExpr pe) return headedByArrayConstructor(pe.source());
+            if (node instanceof ArraySubscript as) return headedByArrayConstructor(as.source());
+            return false;
         }
 
         @Override

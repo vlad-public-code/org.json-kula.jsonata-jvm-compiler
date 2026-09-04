@@ -438,6 +438,12 @@ public final class Parser {
             if (head instanceof ArrayConstructor ac && !ac.pathHead()) {
                 steps = new ArrayList<>(steps);
                 steps.set(0, new ArrayConstructor(ac.elements(), true));
+            } else if (flagStagedHead(head) instanceof AstNode staged) {
+                // A `[...]` stage does not change what the step is, so a constructor carrying one
+                // is still the flagged head: `[1,2][0].$` short-circuits just as `[1,2].$` does,
+                // and hands the stage's value — not an array — to the steps after it.
+                steps = new ArrayList<>(steps);
+                steps.set(0, staged);
             } else if (head instanceof SortExpr se
                     && se.source() instanceof ArrayConstructor inner && !inner.pathHead()) {
                 steps = new ArrayList<>(steps);
@@ -566,6 +572,26 @@ public final class Parser {
      * S0209 is therefore not "a predicate after a group-by". It fires only when the group-by's
      * source was NOT a path, because then there is no step for the operator to land on.
      */
+
+    /**
+     * Rebuilds {@code step} with its innermost array constructor flagged as a path head, when the
+     * step is a constructor carrying one or more {@code [...]} stages. Returns {@code null} when
+     * it is not, or when the flag is already set.
+     */
+    private static AstNode flagStagedHead(AstNode step) {
+        if (step instanceof ArrayConstructor ac) {
+            return ac.pathHead() ? null : new ArrayConstructor(ac.elements(), true);
+        }
+        if (step instanceof PredicateExpr pe) {
+            AstNode inner = flagStagedHead(pe.source());
+            return inner == null ? null : new PredicateExpr(inner, pe.predicate(), pe.stage());
+        }
+        if (step instanceof ArraySubscript as) {
+            AstNode inner = flagStagedHead(as.source());
+            return inner == null ? null : new ArraySubscript(inner, as.index());
+        }
+        return null;
+    }
 
     private AstNode parseDotStep(AstNode left) throws ParseException {
         if (left instanceof GroupByExpr gbe && isPathLike(gbe.source())) {

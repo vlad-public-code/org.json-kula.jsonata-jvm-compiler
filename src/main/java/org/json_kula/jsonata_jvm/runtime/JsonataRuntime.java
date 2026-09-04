@@ -2314,6 +2314,42 @@ public final class JsonataRuntime {
         return rest.apply(head);
     }
 
+    /**
+     * The head short-circuit when the head constructor carries a {@code [...]} stage.
+     *
+     * <p>The short-circuit assigns the head's value straight to the input sequence:
+     * {@code if (ii === 0 && step.consarray) resultSequence = await evaluate(step, …)}. With no
+     * stage that value is always an array and this is invisible. With one it is a plain
+     * <em>value</em>, and the next step then walks it with {@code input[ii]} for
+     * {@code ii < input.length} — so:
+     *
+     * <ul>
+     *   <li>a number, boolean or object has no {@code length}: the next step iterates zero times
+     *       and the path is undefined — {@code [1,2][0].$} is not 1;</li>
+     *   <li>a <b>string</b> has one, and yields its characters: {@code ["ab"][0].$} is ["a","b"];</li>
+     *   <li>{@code length === 0} ends the path and returns the value: {@code [""][0].x} is "".</li>
+     * </ul>
+     *
+     * <p>One deliberate departure: the reference reads {@code null.length} for
+     * {@code [null][0].$} and throws a raw TypeError. That is a crash, not a language rule, so an
+     * absent result is returned instead.
+     */
+    public static JsonNode consarrayStagedHead(JsonNode head, JsonataLambda rest)
+            throws RuntimeEvaluationException {
+        if (head == null || head.isMissingNode()) return MISSING;
+        if (head.isArray()) {
+            return head.isEmpty() ? head : rest.apply(head);
+        }
+        if (head.isTextual()) {
+            String text = head.textValue();
+            if (text.isEmpty()) return head;
+            ArrayNode chars = NF.arrayNode(text.length());
+            for (int i = 0; i < text.length(); i++) chars.add(NF.textNode(String.valueOf(text.charAt(i))));
+            return rest.apply(chars);
+        }
+        return MISSING;
+    }
+
     public static JsonNode fn_clone(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
         if (!arg.isArray() && !arg.isObject()) {
