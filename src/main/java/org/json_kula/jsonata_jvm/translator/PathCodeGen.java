@@ -102,10 +102,17 @@ final class PathCodeGen {
             return visitPathExpr(t, new PathExpr(newSteps), ctx);
         }
 
-        // If the path has @$var.FieldRef cross-join AND uses %, inject the initial
-        // context into parentVars as root so that %.% can navigate back to root.
-        if (hasCrossJoinFieldRef(steps) && needsParentTracking(steps, 0)
-                && ctx.parentVars.isEmpty()) {
+        // A `%` consumes one parent level per preceding *name* step. Parent tracking is set up
+        // by the steps compiled in compilePathSteps, which starts at index 1 — so a `%` that
+        // reaches back past the head has no level to land on. The level above the head is the
+        // path's own input: the reference's seekParent walks off the front of the step list into
+        // the enclosing context for exactly this, which is what makes `a.%` the document root.
+        //
+        // Only a name-like head consumes a level, so `$.%` and `$$.%` stay S0217 — a variable
+        // step is not a name. (The cross-join arm is the older, narrower case: @$v.Field needs
+        // the same seed so that %.% can reach the root.)
+        if (needsParentTracking(steps, 0) && ctx.parentVars.isEmpty()
+                && (hasCrossJoinFieldRef(steps) || isNameLikeStep(firstStep))) {
             ctx = ctx.withParents(new ArrayList<>(List.of(ctx.ctxVar)));
         }
 
@@ -384,6 +391,26 @@ final class PathCodeGen {
                     && steps.get(i + 2) instanceof AstNode.FieldRef) return true;
         }
         return false;
+    }
+
+    /**
+     * Whether {@code step} is a step the reference's {@code seekParent} treats as consuming one
+     * ancestry level — a name or a wildcard. Everything else (a variable, a constructor, a block)
+     * leaves the level unconsumed, which is what makes {@code $.%} an S0217 while {@code a.%} is
+     * the enclosing context.
+     *
+     * <p>A folded {@code [...]} stage does not change the step's kind, so it is looked through.
+     */
+    private static boolean isNameLikeStep(AstNode step) {
+        return switch (step) {
+            case FieldRef ignored       -> true;
+            case StringLiteral ignored  -> true;   // a quoted field name at the head of a path
+            case WildcardStep ignored   -> true;
+            case DescendantStep ignored -> true;
+            case ArraySubscript as      -> isNameLikeStep(as.source());
+            case PredicateExpr pe       -> isNameLikeStep(pe.source());
+            default                     -> false;
+        };
     }
 
     /** Returns true if {@code node} is a PathExpr whose last step is an ArrayConstructor. */
