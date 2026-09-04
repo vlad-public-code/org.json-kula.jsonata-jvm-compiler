@@ -2990,9 +2990,11 @@ public final class JsonataRuntime {
      * returns the array as-is. Empty arrays return {@link #MISSING}.
      */
     static JsonNode unwrap(ArrayNode arr) {
-        // A marked array is a value, not a sequence: `[]` asked for its singleton to be kept, or a
-        // constructor built it. Either way there is nothing here to collapse.
-        if (MarkedArrayNode.noCollapse(arr)) return arr;
+        // A constructor's array is a value; there is nothing here to collapse, empty or not.
+        if (MarkedArrayNode.isCons(arr)) return arr;
+        // `[]` keeps a *singleton*. The length-0 collapse is not guarded by it, so an empty
+        // sequence is still absent: `empty[]^($)` is undefined.
+        if (MarkedArrayNode.noCollapse(arr)) return arr.isEmpty() ? MISSING : arr;
         return switch (arr.size()) {
             case 0 -> MISSING;
             case 1 -> arr.get(0);

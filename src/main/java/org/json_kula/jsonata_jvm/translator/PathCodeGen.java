@@ -214,9 +214,14 @@ final class PathCodeGen {
             String rest = compilePathSteps(t, steps, startFrom, headVar, ctx);
             result = "consarrayStagedHead(" + headExpr + ", " + headVar + " -> " + rest + ")";
         } else if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
-            // Always empty. The path is the empty array and the remaining steps are
-            // unreachable, so they are not emitted at all. It is a constructor value, so it does
-            // not collapse — `[].[1]` is [] even though the path ends in a constructor step.
+            // Always empty. The path is the empty array; it is a constructor value, so it does not
+            // collapse — `[].[1]` is [] even though the path ends in a constructor step.
+            //
+            // The unreachable steps are still compiled, and the result thrown away. Skipping them
+            // would turn `[].%` from an error into [], because the "% with no parent" check would
+            // never run: the reference resolves ancestry in processAST and rejects it whether or
+            // not the path is ever evaluated.
+            compilePathSteps(t, steps, startFrom, expr, ctx);
             result = "consArrayOf()";
         } else if (consarrayHead && bareHead != null && isProvablyNonEmpty(bareHead)) {
             // Never empty, so the guard could never fire. Emitting the ordinary chain

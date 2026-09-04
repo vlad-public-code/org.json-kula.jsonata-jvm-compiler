@@ -369,8 +369,12 @@ public final class Parser {
                 node = parseSubscriptOrPredicate(node);
                 if (pendingKeepArray) { pendingKeepArray = false; if (producesSequence(node)) node = new ForceArray(node); }
             } else if (peek().type() == CARET) {
+                // `^(…)` wraps a non-path source in a path of its own, and only the `.` production
+                // promotes a step's keepArray to the path. So a pending mark does not survive a
+                // sort — it stays on the node the sort buried: `1[]^($)` is 1, not [1], where
+                // `a.b[]^($)` is [1] because there the `[]` was on a path to begin with.
                 node = parseSortExpr(node);
-                if (pendingKeepArray) { pendingKeepArray = false; if (producesSequence(node)) node = new ForceArray(node); }
+                pendingKeepArray = false;
             } else if (peek().type() == LBRACE) {
                 node = parseGroupBy(node);
             } else if (peek().type() == PIPE && transformPatternDepth == 0) {
@@ -484,6 +488,9 @@ public final class Parser {
             case ForceArray fa          -> isLiteralStep(fa.source());
             case ArraySubscript as      -> isLiteralStep(as.source());
             case PredicateExpr pe       -> isLiteralStep(pe.source());
+            // `^(…)` wraps its source in a path of its own, so the literal becomes steps[0] there
+            // and the same rejection applies: `1^($).$` is S0213.
+            case SortExpr se            -> isLiteralStep(se.source());
             default                     -> false;
         };
     }
