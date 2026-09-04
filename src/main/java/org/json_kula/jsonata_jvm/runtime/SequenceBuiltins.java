@@ -100,9 +100,12 @@ final class SequenceBuiltins {
         List<Integer> indices = new ArrayList<>();
         for (int i = 0; i < list.size(); i++) indices.add(i);
         indices.sort(cmp);
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(list.size());
         for (int idx : indices) result.add(list.get(idx));
-        return result;
+        // Sorting reorders a value; it does not turn one into a sequence. A constructor's array is
+        // still cons afterwards and a `[]`-marked one still keeps its singleton, which is why
+        // `a.[1]^(x)` and `a.b[]^($)` are both [1].
+        return MarkedArrayNode.sameMark(NF, arg, result);
     }
 
     /**

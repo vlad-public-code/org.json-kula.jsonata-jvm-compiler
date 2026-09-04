@@ -211,10 +211,17 @@ public final class JsonataRuntime {
      */
     public static JsonNode forceArray(JsonNode node) {
         if (node == null || node == MISSING) return MISSING;
-        if (node.isArray()) return node;
+        // `[]` promotes a constructor's array rather than passing it through: the array is one
+        // value that happens to be an array, not a sequence of one, so keeping its singleton means
+        // wrapping it. `a.[1][]` is [[1]], where `a.b[]` — already a sequence — is [1].
+        if (MarkedArrayNode.isCons(node)) return NF.arrayNode().add(node);
+        // Otherwise the array is kept as it is, but marked so the singleton collapse at the end of
+        // a path — and after a sort — leaves it alone. That mark is the whole of `[]` on a value
+        // that is already a sequence: `a.b[]` is [1] and `a.b[]^($)` still is.
+        if (node.isArray()) return MarkedArrayNode.keepSingleton(NF, node);
         ArrayNode result = NF.arrayNode();
         result.add(node);
-        return result;
+        return MarkedArrayNode.keepSingleton(NF, result);
     }
 
     /**
@@ -362,7 +369,7 @@ public final class JsonataRuntime {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (val != MISSING) appendToSequence(result, val);
+                if (val != MISSING) appendStepResult(result, val);
             }
             return unwrap(result);
         }
@@ -392,9 +399,14 @@ public final class JsonataRuntime {
             }
             return result.isEmpty() ? MISSING : result;
         }
+        // A non-sequence context is still stepped: the reference pushes the one result into a
+        // fresh sequence, and whether that sequence collapses is decided at the end of the path,
+        // not here. Returning the constructor's array bare instead loses the difference between
+        // "a sequence holding one array" and "an array" — which is the whole of `a.[1]` being [1]
+        // and `a.[1].$` being [1] rather than 1.
         JsonNode val = fn.apply(node);
         if (val == MISSING) return MISSING;
-        return unwrapPreserve(val);
+        return NF.arrayNode(1).add(unwrapPreserve(val));
     }
 
     /**
@@ -924,6 +936,18 @@ public final class JsonataRuntime {
             }
         }
         return result;
+    }
+
+    /**
+     * {@link #arrayOf} for a {@code [...]} written as a path step: the array it builds is a value,
+     * not a sequence, and is marked so it neither flattens into the sequence around it nor
+     * collapses when it is the only thing in one. See {@link ConsArrayNode}.
+     */
+    public static JsonNode consArrayOf(Object... elements) {
+        JsonNode built = arrayOf(elements);
+        MarkedArrayNode cons = MarkedArrayNode.consArray(NF, built.size());
+        for (JsonNode e : built) cons.add(e);
+        return cons;
     }
 
     /** Creates a RangeHolder to signal that the range should be flattened. */
@@ -1667,9 +1691,11 @@ public final class JsonataRuntime {
             wrapped.add(arg);
             return wrapped;
         }
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(arg.size());
         for (int i = arg.size() - 1; i >= 0; i--) result.add(arg.get(i));
-        return result;
+        // A descending order-by is fn_reverse over fn_sort, so it has to carry the mark on for the
+        // same reason the sort does.
+        return MarkedArrayNode.sameMark(NF, arg, result);
     }
 
     public static JsonNode fn_distinct(JsonNode arg) {
@@ -2274,12 +2300,17 @@ public final class JsonataRuntime {
      */
     public static JsonNode consarrayHead(JsonNode head, JsonataLambda rest)
             throws RuntimeEvaluationException {
-        if (head != null && head.isArray() && head.isEmpty()) return head;
+        // The empty array the short-circuit yields is a constructor value like any other, so it
+        // does not flatten into the sequence around it and does not collapse: `nums.([].x)` is
+        // [[],[],[]], and `a.([].x)[]` is [[]].
+        if (head != null && head.isArray() && head.isEmpty()) {
+            return MarkedArrayNode.consArray(NF, 1);
+        }
         // An absent head means the same thing here. The translator only emits this call
         // when the first step is statically an array constructor, which always produces an
         // array — so the only way it can arrive absent is a wrapper having already
         // collapsed the empty one, as the sort in `[]^(x).y` does.
-        if (head == null || head.isMissingNode()) return NF.arrayNode();
+        if (head == null || head.isMissingNode()) return MarkedArrayNode.consArray(NF, 1);
         return rest.apply(head);
     }
 
@@ -2887,10 +2918,26 @@ public final class JsonataRuntime {
     }
 
     /**
+     * {@link #appendToSequence} for a <em>step's</em> result, which is the one place the reference
+     * checks cons: {@code if (!Array.isArray(res) || res.cons) push(res) else flatten}. A
+     * constructor's own array is one element of the sequence, not a run of them.
+     *
+     * <p>Only the step loop. {@code $append} concatenates, and concat spreads a cons array like any
+     * other, so {@code $append([].x, 1)} is [1].
+     */
+    static void appendStepResult(ArrayNode acc, JsonNode val) {
+        if (MarkedArrayNode.isCons(val)) acc.add(val);
+        else appendToSequence(acc, val);
+    }
+
+    /**
      * Returns the single element if the array has exactly one item, otherwise
      * returns the array as-is. Empty arrays return {@link #MISSING}.
      */
     static JsonNode unwrap(ArrayNode arr) {
+        // A marked array is a value, not a sequence: `[]` asked for its singleton to be kept, or a
+        // constructor built it. Either way there is nothing here to collapse.
+        if (MarkedArrayNode.noCollapse(arr)) return arr;
         return switch (arr.size()) {
             case 0 -> MISSING;
             case 1 -> arr.get(0);

@@ -199,8 +199,9 @@ final class PathCodeGen {
         String result;
         if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
             // Always empty. The path is the empty array and the remaining steps are
-            // unreachable, so they are not emitted at all.
-            result = expr;
+            // unreachable, so they are not emitted at all. It is a constructor value, so it does
+            // not collapse — `[].[1]` is [] even though the path ends in a constructor step.
+            result = "consArrayOf()";
         } else if (consarrayHead && bareHead != null && isProvablyNonEmpty(bareHead)) {
             // Never empty, so the guard could never fire. Emitting the ordinary chain
             // keeps the generated code byte-identical to what it was before the
@@ -220,6 +221,19 @@ final class PathCodeGen {
         // a separate GroupBy object.  Merge all per-iteration objects into one.
         if (pathEndsWithGroupByAfterBinding(steps)) {
             result = "mergeGroupByObjects(" + result + ")";
+        }
+        // A constructor step leaves its sequence uncollapsed so that later steps see it whole, and
+        // a `$` step rebinds the context to itself and so compiles to nothing. The end of the path
+        // is where a sequence of one becomes its element — and where a marked array, being a value
+        // rather than a sequence, is handed back as it is.
+        //
+        // `$` is a step for all that it compiles to nothing: the reference evaluates it, gets a
+        // one-element sequence and collapses it, which is why `[1].$` is 1. A constructor before it
+        // has already produced the sequence, so `a.[1].$` collapses that same sequence once and is
+        // [1] — the cons array — not 1.
+        AstNode finalStep = steps.get(steps.size() - 1);
+        if (finalStep instanceof ArrayConstructor || finalStep instanceof ContextRef) {
+            result = "unwrap(" + result + ")";
         }
         return forceArr ? "forceArray(" + result + ")" : result;
     }
@@ -279,6 +293,19 @@ final class PathCodeGen {
      * Used to decide whether an outer PredicateExpr or SortExpr that wraps a path
      * with binding steps needs to be unfolded so the bound variables remain in scope.
      */
+    /**
+     * Whether the path becomes a tuple stream — {@code @$v}, {@code #$i}, or a {@code %} anywhere,
+     * since resolveAncestry marks the ancestor step {@code tuple: true} and every step from there
+     * on is evaluated by evaluateTupleStep.
+     */
+    private static boolean isTupleStream(List<AstNode> steps) {
+        for (AstNode step : steps) {
+            if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
+            if (ScopeAnalyzer.containsParentStep(step)) return true;
+        }
+        return false;
+    }
+
     private static boolean hasAnyBinding(List<AstNode> steps) {
         for (AstNode step : steps) {
             if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
@@ -420,6 +447,14 @@ final class PathCodeGen {
             return "mapStep(" + prevExpr + ", " + dummyVar + " -> " + restExpr + ")";
         }
 
+        // A tuple stream spreads a step's array result into one tuple per element, with no cons
+        // check — evaluateTupleStep's `for (bb in res)`. So in a path that has become a tuple
+        // stream (`%`, `@$v`, `#$v`) a constructor step flattens, exactly as a parenthesised one
+        // does: `Account.Order.Product.[name, %.OrderID]` is a flat list of names and order ids.
+        if (step instanceof ArrayConstructor && isTupleStream(steps)) {
+            step = new Parenthesized(step);
+        }
+
         String newExpr = applyStep(t, prevExpr, step, ctx);
         return compilePathSteps(t, steps, from + 1, newExpr, ctx);
     }
@@ -545,8 +580,10 @@ final class PathCodeGen {
                 // In default mode ($.[arr]): unwrap collapses a single-element outer array.
                 String tmpCtx  = "__c" + ctx.state.nextId();
                 String stepExpr = ac.accept(t, ctx.withCtx(tmpCtx).withInArrayConstructorStep());
-                String call = "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
-                yield ctx.arrayConstructorPreserve ? call : "unwrap(" + call + ")";
+                // No collapse here: the step's result is a sequence of constructor values, and
+                // whether a sequence of one collapses is decided at the end of the path
+                // (visitPathExpr) — after any later step, `[]` or sort has had its say.
+                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
             case ObjectConstructor oc -> {
                 // e.g. Phone.{type: number} — map per element, collect without flattening.

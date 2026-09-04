@@ -301,6 +301,12 @@ public final class Optimizer {
             return steps.equals(n.steps()) ? n : new ChainExpr(steps);
         }
 
+        /** Whether {@code node} is a path whose first step is an array constructor. */
+        private static boolean headedByArrayConstructor(AstNode node) {
+            return node instanceof PathExpr pe && !pe.steps().isEmpty()
+                    && pe.steps().get(0) instanceof ArrayConstructor;
+        }
+
         @Override
         public AstNode visitParenthesized(Parenthesized n, Void c) {
             // The Parenthesized wrapper only exists to suppress path-step subscript
@@ -314,6 +320,15 @@ public final class Optimizer {
             // inadvertently reassign outer-scope variables of the same name.
             AstNode inner = rewrite(n.inner());
             if (inner instanceof VariableBinding) return new Parenthesized(inner);
+            // Around an array constructor the parentheses are load-bearing, and stripping them
+            // erases the distinction this whole area rests on. Only a *bare* `[...]` path step is
+            // a constructor value that neither flattens nor collapses: `nums.[1,2]` is
+            // [[1,2],[1,2],[1,2]] where `nums.([1,2])` is [1,2,1,2,1,2]. The same goes for a
+            // sub-path led by one — `nums.([1,2].$)` is six numbers, `nums.[1,2].$` is three
+            // arrays — and for the head short-circuit `([]).x` does not get.
+            if (inner instanceof ArrayConstructor || headedByArrayConstructor(inner)) {
+                return new Parenthesized(inner);
+            }
             return inner;
         }
 

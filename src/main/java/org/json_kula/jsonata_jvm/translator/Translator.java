@@ -250,12 +250,6 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitForceArray(ForceArray n, GenCtx ctx) {
-        // If the source path ends with an ArrayConstructor step, mapConstructorStep
-        // (preserve mode) will already return the right [[...]] structure — no
-        // forceArray wrapper needed.
-        if (PathCodeGen.pathEndsWithArrayConstructor(n.source())) {
-            return n.source().accept(this, ctx.withArrayConstructorPreserve());
-        }
         // $lookup is the one built-in whose answer to `[]` depends on its argument: it builds a
         // sequence for an array input and none for an object. Wrapping unconditionally would make
         // `$lookup(a,"b")[]` [1] instead of 1.
@@ -860,24 +854,26 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitArrayConstructor(ArrayConstructor n, GenCtx ctx) {
-        if (n.elements().isEmpty()) return "array()";
+        // A `[...]` written as a path step builds a value, not a sequence: it must not flatten
+        // into the sequence around it and must not collapse when it is alone in one.
+        String build = ctx.inArrayConstructorStep ? "consArrayOf" : "arrayOf";
+        if (n.elements().isEmpty()) return build + "()";
         if (n.elements().size() == 1) {
             AstNode elem = n.elements().get(0);
-            if (ctx.inArrayConstructorStep && !(elem instanceof ArrayConstructor)) {
-                return "forceArray(" + elem.accept(this, ctx) + ")";
-            }
             String elemCode = elem.accept(this, ctx);
             if (elem instanceof ArrayConstructor) {
                 // Nested array constructor — wrap the inner result with preserveArray
                 // so the outer arrayOf keeps it as a single element
-                return "arrayOf(preserveArray(" + elemCode + "))";
+                return build + "(preserveArray(" + elemCode + "))";
             }
-            return "arrayOf(" + elemCode + ")";
+            // A constructor *drops* an element that evaluates to nothing, making it shorter —
+            // it does not become absent. `[nope]` is [], so `nums.[nope]` is [[],[],[]].
+            return build + "(" + elemCode + ")";
         }
         List<String> elems = n.elements().stream()
             .map(e -> wrapArrayElement(e, ctx))
             .toList();
-        return "arrayOf(" + String.join(", ", elems) + ")";
+        return build + "(" + String.join(", ", elems) + ")";
     }
 
     private String wrapArrayElement(AstNode e, GenCtx ctx) {
