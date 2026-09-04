@@ -5,13 +5,13 @@ title: jsonata-jvm-compiler
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler/blob/main/LICENSE)
 
 A Java 21 library that compiles [JSONata](https://jsonata.org) expressions into native Java classes at runtime. Each expression is parsed, optimised, and translated to Java source, which is then compiled in-memory and returned as a ready-to-call `JsonataExpression` instance.
-Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 50× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
+Repeated evaluation of a `JsonataExpression` instance is significantly faster than interpreter-based alternatives — **around 54× faster** than [JSONata4Java](https://github.com/IBM/JSONata4Java) on a realistic analytical benchmark.
 
 All test cases from the [official JSONata test suite](https://github.com/jsonata-js/jsonata/blob/master/test/test-suite/TESTSUITE.md) pass.
 
 This is the compiler behind [valem.run](https://valem.run)'s reactive engine — every derived field in its 100+ live tax and cost models is a JSONata expression compiled through this library.
 
-A Python port is available as [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) ([PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py)) — the same parse → optimise → translate → compile pipeline targeting CPython 3.11+, generating Python source instead of Java. It passes the same official JSONata test suite, and evaluates about 26× faster than the pure-Python reference interpreter. The ~50× headline above does not carry over: it comes from JIT-compiled bytecode replacing an AST interpreter, and CPython has no JIT.
+The same pipeline exists for JavaScript and Python — see [Sibling implementations](#sibling-implementations).
 
 ---
 
@@ -482,14 +482,14 @@ jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated ev
 
 The benchmark compiles one expression once, then runs 100,000 evaluations against the same JSON document (with a 1,000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
-Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM. They are the median of six runs: throughput varied between 120,000 and 128,000 eval/s across them, so treat the round numbers as the useful precision. The speedup is the steadier figure (48–52×), because both libraries meet the same machine conditions in the same JVM:
+Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM. They are the median of six runs, so treat the round numbers as the useful precision: five of the six landed between 129,000 and 145,000 eval/s (52–58×), and one dropped to 71,000 (28×) on a briefly loaded machine. JSONata4Java's own throughput is far steadier (2,465–2,590 eval/s), which is what makes a bad run show up as a lower ratio rather than a lower baseline:
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | ~1,150 ms | ~200 ms |
-| 100,000 evaluations | ~810 ms | ~40,000 ms |
-| Throughput | **~124,000 eval/s** | ~2,500 eval/s |
-| **Speedup** | **~50× faster** | baseline |
+| Compilation | ~1,000 ms | ~170 ms |
+| 100,000 evaluations | ~720 ms | ~39,800 ms |
+| Throughput | **~138,000 eval/s** | ~2,500 eval/s |
+| **Speedup** | **~54× faster** | baseline |
 
 > Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times, the throughput advantage dominates. Compiling several expressions? Use `compileAll` — one `javac` invocation for the batch instead of one per expression, worth around 10× for 20 expressions.
 
@@ -558,13 +558,28 @@ expression string
 
 ---
 
+## Sibling implementations
+
+The same parse → optimise → translate → compile pipeline exists for three host runtimes:
+
+| Runtime | Project | Host code it generates | Speedup vs. that runtime's reference interpreter |
+|---|---|---|---|
+| JVM | [jsonata-jvm-compiler](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler) (this project, Java 21) | Java source, compiled in-memory by `javac` | ~54× vs [JSONata4Java](https://github.com/IBM/JSONata4Java) |
+| JavaScript | [jsonata2js](https://github.com/vlad-public-code/org.json-kula.jsonata2js) | a JS function, loaded with `new Function` | ~51–60× vs [`jsonata`](https://www.npmjs.com/package/jsonata) |
+| Python | [jsonata2py](https://pypi.org/project/jsonata2py/) ([source](https://github.com/vlad-public-code/org.json-kula.jsonata2py), [docs](https://vlad-public-code.github.io/org.json-kula.jsonata2py/)) | Python source, compiled by the host `compile()` | ~58× vs [`jsonata-python`](https://pypi.org/project/jsonata-python/) |
+
+Each figure is the one that project measures against its own runtime's reference interpreter, on its own benchmark; they are not comparable across rows. All three pass the official JSONata test suite.
+
+The JVM implementation is the original, and is the compiler behind [valem.run](https://valem.run/)'s reactive computation engine.
+
+Conformance is also worked on across all three together: when one port disagrees with the reference (`jsonata` 2.2.2, the arbiter), the other two are run before concluding anything, because "every reimplementation gets this wrong" is a different finding with a different fix from "this port gets this wrong". That has repeatedly changed the diagnosis — and each port's write-up has corrected an earlier one's.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler/blob/main/LICENSE).
 
 ## See also
 
-- [jsonata2py](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) — the Python port of this library: same pipeline, same official-suite acceptance gate, CPython instead of the JVM.
 - [tracked-json](https://vlad-public-code.github.io/org.json-kula.tracked-json/) — Jackson JsonNode wrapper that tracks each node's location (JsonPointer) and document root through every navigation — get, path, at, parent(), and JSONPath (RFC 9535). Includes JSON Patch (RFC 6902).
 - [Valem](https://vlad-public-code.github.io/org.json-kula.valem/) — deterministic reactive computation runtime for AI-generated structured data models.
 - [Valem Sandbox](https://valem.run/)
