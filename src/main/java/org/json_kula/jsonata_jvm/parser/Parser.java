@@ -311,8 +311,11 @@ public final class Parser {
                 // A bare number, boolean or null literal cannot head a path step. A
                 // *parenthesised* one can — `(5).g()` is T1006, not S0213 — and a quoted
                 // string is a field name, so neither is rejected here.
-                if (node instanceof NumberLiteral || node instanceof BooleanLiteral
-                        || node instanceof NullLiteral) {
+                //
+                // A `[]` or `[n]` written after the literal does not change what the step is:
+                // the reference flags `[` as keepArray / a stage on the step and leaves the
+                // step itself a number, so `1[].$` and `1[0].$` are S0213 too.
+                if (isLiteralStep(node)) {
                     Token t = peek();
                     throw new ParseException("S0213",
                             "The literal value cannot be used as a step within a path expression",
@@ -438,6 +441,30 @@ public final class Parser {
      * <p>A {@code ^(…)} sort always yields a path — the reference wraps a non-path source in
      * one — while a predicate or subscript is a path only when <em>its</em> source is.
      */
+    /**
+     * Whether {@code node} is a literal that cannot be a path step — a number, or one of
+     * {@code true}/{@code false}/{@code null}. The reference rejects these in <em>any</em>
+     * position of a multi-step path, not just after a dot:
+     * {@code result.steps.filter(step => step.type === 'number' || step.type === 'value')}.
+     *
+     * <p>A {@code []} or {@code [n]} written after one does not change what the step is, so it
+     * is looked through. A quoted string is excluded: it names a field ({@code "nums".$} is the
+     * field {@code nums}). So is a parenthesised literal — {@code (5).g()} is T1006, not S0213 —
+     * because the parentheses make it a block, and constant folding legitimately turns
+     * {@code a.(1+1)} into one.
+     */
+    private static boolean isLiteralStep(AstNode node) {
+        return switch (node) {
+            case NumberLiteral ignored  -> true;
+            case BooleanLiteral ignored -> true;
+            case NullLiteral ignored    -> true;
+            case ForceArray fa          -> isLiteralStep(fa.source());
+            case ArraySubscript as      -> isLiteralStep(as.source());
+            case PredicateExpr pe       -> isLiteralStep(pe.source());
+            default                     -> false;
+        };
+    }
+
     static boolean isPathLike(AstNode node) {
         return switch (node) {
             case PathExpr ignored       -> true;
@@ -498,6 +525,15 @@ public final class Parser {
                 nextPrimaryIsDotStep = false;
             }
         }
+        // `a.true` and `a.null` are S0213 for the same reason `a.1` is: the reference rejects a
+        // `value`-typed step as well as a `number`-typed one. (`a.(1)` stays legal — that is a
+        // block, not a literal step.)
+        if (isLiteralStep(right)) {
+            throw new ParseException("S0213",
+                    "The literal value cannot be used as a step within a path expression",
+                    peek().position());
+        }
+
         // Flatten consecutive dot-steps into a single PathExpr
         List<AstNode> steps = new ArrayList<>();
         if (left instanceof PathExpr pe) {
