@@ -465,6 +465,14 @@ public final class Parser {
         };
     }
 
+    /** Whether any step binds a context ({@code @$v}) or a position ({@code #$v}). */
+    private static boolean hasBindingStep(List<AstNode> steps) {
+        for (AstNode step : steps) {
+            if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
+        }
+        return false;
+    }
+
     static boolean isPathLike(AstNode node) {
         return switch (node) {
             case PathExpr ignored       -> true;
@@ -568,41 +576,64 @@ public final class Parser {
             return new PredicateExpr(source, new RangeExpr(inner, to));
         }
         consume(RBRACKET);
-        if (inner instanceof NumberLiteral) {
-            // a.b[n] — fold the subscript into the last path step so it is
-            // applied per-element when the path maps over a sequence.
-            // (a.b)[n] has source=Parenthesized and is NOT folded; the subscript
-            // is applied to the whole collected result instead.
-            if (source instanceof PathExpr pe) {
-                List<AstNode> steps = new ArrayList<>(pe.steps());
-                AstNode lastStep = steps.remove(steps.size() - 1);
-                steps.add(new ArraySubscript(lastStep, inner));
-                return newPath(steps);
-            }
-            // a.b.c[pred][n] — fold when source is a PredicateExpr on a PathExpr,
-            // so [n] is applied per-element (per-b), not on the globally collected result.
-            if (source instanceof PredicateExpr pe2 && pe2.source() instanceof PathExpr pp) {
-                List<AstNode> steps = new ArrayList<>(pp.steps());
-                AstNode lastStep = steps.remove(steps.size() - 1);
-                steps.add(new ArraySubscript(new PredicateExpr(lastStep, pe2.predicate()), inner));
-                return newPath(steps);
-            }
-            return new ArraySubscript(source, inner);
+        // A `[]` between the step and its stage does not separate them: the reference flags
+        // keepArray on the step and still folds the following `[...]` onto that same step, so
+        // `o.p[][0]` indexes each o's p array rather than the collected sequence. Fold through
+        // the marker and put it back outside.
+        if (source instanceof ForceArray fa) {
+            AstNode folded = foldStage(fa.source(), inner);
+            if (folded != null) return new ForceArray(folded);
         }
-        // Non-numeric predicate: for positional-binding or context-binding paths
-        // (ending in #$var or @$var), fold the predicate as a path step so that
-        // $i / $var is in scope during filtering.
-        if (source instanceof PathExpr pe) {
-            List<AstNode> pathSteps = pe.steps();
-            AstNode lastStep = pathSteps.get(pathSteps.size() - 1);
-            if (lastStep instanceof PositionBinding || lastStep instanceof ContextBinding) {
-                // Fold as a PredicateExpr path step so the binding is traversed first
-                List<AstNode> steps = new ArrayList<>(pathSteps);
-                steps.add(new PredicateExpr(new ContextRef(), inner));
-                return newPath(steps);
-            }
+        AstNode folded = foldStage(source, inner);
+        if (folded != null) return folded;
+        // a.b.c[pred][n] — fold when source is a PredicateExpr on a PathExpr, so [n] is applied
+        // per-element (per-b) rather than on the globally collected result. Reachable only for a
+        // path shape foldStage declined.
+        if (inner instanceof NumberLiteral
+                && source instanceof PredicateExpr pe2 && pe2.source() instanceof PathExpr pp) {
+            List<AstNode> steps = new ArrayList<>(pp.steps());
+            AstNode last = steps.remove(steps.size() - 1);
+            steps.add(new ArraySubscript(new PredicateExpr(last, pe2.predicate()), inner));
+            return newPath(steps);
         }
-        return new PredicateExpr(source, inner);
+        return inner instanceof NumberLiteral ? new ArraySubscript(source, inner)
+                                              : new PredicateExpr(source, inner);
+    }
+
+    /**
+     * Folds a {@code [inner]} onto the last step of {@code source}, when {@code source} is a path.
+     *
+     * <p>The reference's {@code [} production makes every {@code [...]} over a path a {@code stages}
+     * entry on {@code steps[last]}, and only a whole-value {@code predicate} when the left side is
+     * not a path ({@code $employees[cond]}, {@code (expr)[cond]}). A stage runs inside the
+     * per-input-item loop, on that item's own step result, which is why {@code (a.b)[n]} — a
+     * parenthesised source, so not folded — indexes the collected sequence instead.
+     *
+     * <p>Two paths decline the fold. One ending in a binding takes the predicate as a following
+     * step so that {@code $i} / {@code $var} is in scope while it runs. And a path containing any
+     * binding is a tuple stream, where evaluateTupleStep expands everything before running its
+     * stages — so the predicate really does apply to the whole stream, which is what an unfolded
+     * PredicateExpr already compiles to. A literal subscript over a tuple stream is the
+     * exception: it keeps folding, because the cross-join subscript hoisting in
+     * {@code PathCodeGen.visitPathExpr} recognises it by that shape.
+     *
+     * @return the rewritten path, or {@code null} if {@code source} is not a foldable path
+     */
+    private static AstNode foldStage(AstNode source, AstNode inner) {
+        if (!(source instanceof PathExpr pe)) return null;
+        List<AstNode> pathSteps = pe.steps();
+        AstNode lastStep = pathSteps.get(pathSteps.size() - 1);
+        if (lastStep instanceof PositionBinding || lastStep instanceof ContextBinding) {
+            List<AstNode> steps = new ArrayList<>(pathSteps);
+            steps.add(new PredicateExpr(new ContextRef(), inner));
+            return newPath(steps);
+        }
+        if (hasBindingStep(pathSteps) && !(inner instanceof NumberLiteral)) return null;
+        List<AstNode> steps = new ArrayList<>(pathSteps);
+        steps.set(steps.size() - 1, inner instanceof NumberLiteral
+                ? new ArraySubscript(lastStep, inner)
+                : new PredicateExpr(lastStep, inner, true));
+        return newPath(steps);
     }
 
     private AstNode parseSortExpr(AstNode source) throws ParseException {

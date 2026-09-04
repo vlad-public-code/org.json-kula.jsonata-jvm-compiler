@@ -207,10 +207,23 @@ public sealed interface AstNode permits
     /**
      * A predicate filter applied to a sequence: {@code expr[predicate]}.
      *
+     * <p>{@code stage} distinguishes the two things this node has to be. A {@code [...]} written
+     * over a path is folded onto the path's last <em>step</em> by the parser, and the reference
+     * then runs it inside the per-input-item loop — once per element, on that element's own step
+     * result. A {@code [...]} over anything else ({@code $employees[0]}, {@code (expr)[cond]}) is
+     * a predicate over the whole value. The node shape is the same either way, so the flag says
+     * which one built it; several translator rewrites synthesise the whole-value form and must
+     * keep meaning that.
+     *
      * @param source    the input expression
      * @param predicate the filter condition (or an integer index)
+     * @param stage     whether this was folded onto a path step, and so runs per element
      */
-    record PredicateExpr(AstNode source, AstNode predicate) implements AstNode {}
+    record PredicateExpr(AstNode source, AstNode predicate, boolean stage) implements AstNode {
+        public PredicateExpr(AstNode source, AstNode predicate) {
+            this(source, predicate, false);
+        }
+    }
 
     /**
      * An array subscript using the {@code [index]} notation where {@code index}

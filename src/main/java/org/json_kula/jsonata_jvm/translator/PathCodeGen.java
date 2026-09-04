@@ -155,6 +155,35 @@ final class PathCodeGen {
             }
         }
 
+        // A stage on a trailing `%` step applies to every parent at once. `%` puts the path into
+        // tuple mode, and evaluateTupleStep expands the whole stream before running its stages, so
+        // `o.p.v.%[0]` is the first of all the parents rather than the first of each. Steps here
+        // compile to nested per-element lambdas, so "all at once" means outside the whole path —
+        // which is only expressible when the stage is the last step. A stage with steps after it
+        // stays per element, as it was before: for the boolean predicates that reach it
+        // (`Account.Order.Product.Price.%[%.OrderID=…].SKU`) the two agree.
+        AstNode lastStep = steps.get(steps.size() - 1);
+        AstNode lastStageSource = lastStep instanceof PredicateExpr lpe && lpe.stage() ? lpe.source()
+                : lastStep instanceof ArraySubscript las ? las.source()
+                : null;
+        if (steps.size() > 1 && lastStageSource instanceof ParentStep) {
+            List<AstNode> hoisted = new ArrayList<>(steps);
+            hoisted.set(hoisted.size() - 1, new ParentStep());
+            String base = visitPathExpr(t, new PathExpr(hoisted), ctx);
+            if (lastStep instanceof ArraySubscript as) {
+                return "subscript(" + base + ", " + as.index().accept(t, ctx) + ")";
+            }
+            PredicateExpr pe = (PredicateExpr) lastStep;
+            if (pe.predicate() instanceof RangeExpr re) {
+                return "rangeSubscript(" + base + ", " + re.from().accept(t, ctx)
+                        + ", " + re.to().accept(t, ctx) + ")";
+            }
+            String elemVar = "__el" + ctx.state.nextId();
+            String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
+            String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+            return filterFn + "(" + base + ", " + elemVar + " -> " + predExpr + ")";
+        }
+
         // A path headed by an explicit array constructor short-circuits when that
         // constructor is empty: the remaining steps are not evaluated and the empty array
         // is the result, uncollapsed. See JsonataRuntime.consarrayHead. The test is on the
@@ -273,6 +302,41 @@ final class PathCodeGen {
 
         String positionBound = compilePositionBindingStep(t, steps, from, prevExpr, ctx);
         if (positionBound != null) return positionBound;
+
+        // A stage written on a `%` step. `%` puts the path into tuple mode — resolveAncestry marks
+        // the ancestor step `tuple: true` — and evaluateTupleStep expands the whole stream before
+        // running its stages, so the stage applies to every parent at once rather than to each
+        // one separately: `o.p.v.%[0]` is the first of all the parents, not the first of each.
+        AstNode stageSource = step instanceof PredicateExpr spe && spe.stage() ? spe.source()
+                : step instanceof ArraySubscript sas ? sas.source()
+                : null;
+        if (stageSource instanceof ParentStep) {
+            if (ctx.parentVars.isEmpty()) {
+                throw new RuntimeTranslatorException("S0217", "Parent operator % used with no parent context in path");
+            }
+            String parentExpr = ctx.parentVars.get(ctx.parentVars.size() - 1);
+            GenCtx popped = ctx.withParents(ctx.parentVars.size() > 1
+                    ? new ArrayList<>(ctx.parentVars.subList(0, ctx.parentVars.size() - 1))
+                    : new ArrayList<>());
+            String guardVar = "__gu" + ctx.state.nextId();
+            String upExpr = "mapStep(" + prevExpr + ", " + guardVar + " -> " + parentExpr + ")";
+            String staged;
+            if (step instanceof ArraySubscript as) {
+                staged = "subscript(" + upExpr + ", " + as.index().accept(t, popped) + ")";
+            } else {
+                PredicateExpr pe = (PredicateExpr) step;
+                if (pe.predicate() instanceof RangeExpr re) {
+                    staged = "rangeSubscript(" + upExpr + ", " + re.from().accept(t, popped)
+                            + ", " + re.to().accept(t, popped) + ")";
+                } else {
+                    String elemVar = "__el" + ctx.state.nextId();
+                    String predExpr = pe.predicate().accept(t, popped.withCtx(elemVar));
+                    String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+                    staged = filterFn + "(" + upExpr + ", " + elemVar + " -> " + predExpr + ")";
+                }
+            }
+            return compilePathSteps(t, steps, from + 1, staged, popped);
+        }
 
         if (step instanceof ParentStep) {
             // Navigate up one level in the parent vars stack.
@@ -452,6 +516,14 @@ final class PathCodeGen {
             case DescendantStep ds -> "descendant(" + prevExpr + ")";
             case ContextRef cr     -> prevExpr;
             case RootRef rr        -> ctx.rootVar;
+            // A `[...]` the parser folded onto this step is a per-element stage: the reference
+            // runs it inside the per-input-item loop, on that item's own step result. For a
+            // navigation step that is indistinguishable from filtering the collected sequence —
+            // each source element's results already form one group — but for a step whose
+            // per-element result is one value or one un-flattened array it is not:
+            // `objs.[1,2][$>1]` filters [1,2] twice, giving [2,2], where filtering the collected
+            // [[1,2],[1,2]] compares arrays and raises T2010.
+            case PredicateExpr pe when pe.stage() -> stagedStep(t, prevExpr, step, ctx);
             case PredicateExpr pe  -> {
                 // Range subscript: arr[[from..to]] — select elements by index range
                 if (pe.predicate() instanceof RangeExpr re) {
@@ -464,14 +536,9 @@ final class PathCodeGen {
                 String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
                 yield "dynamicFilter(" + prevExpr + ", " + elemVar + " -> " + predExpr + ")";
             }
-            case ArraySubscript as -> {
-                // Path-step subscript — apply per-element via mapStep so that
-                // a.b[n] maps [n] over each element rather than the whole sequence.
-                String tmpCtx  = "__c" + ctx.state.nextId();
-                String srcExpr = as.source().accept(t, ctx.withCtx(tmpCtx));
-                String idxExpr = as.index().accept(t, ctx.withCtx(tmpCtx));
-                yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
-            }
+            // Path-step subscript — apply per-element via mapStep so that a.b[n] maps [n] over
+            // each element rather than the whole sequence.
+            case ArraySubscript as -> stagedStep(t, prevExpr, step, ctx);
             case ArrayConstructor ac -> {
                 // e.g. Email.[address] — map per element.
                 // In preserve mode ($.[arr][] pattern): keep each result array as a single item.
@@ -524,6 +591,68 @@ final class PathCodeGen {
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
         };
+    }
+
+    /**
+     * Compiles a step carrying one or more folded {@code [...]} stages.
+     *
+     * <p>The reference runs a step's stages inside its per-input-item loop, on that item's own
+     * step result, and it runs them in the order they were written. Both matter: a step whose
+     * per-element result is a single value or one un-flattened array gives a different answer
+     * from filtering the collected sequence, and a chain like {@code Product[p1][p2]} has to
+     * apply p1 before p2 on the same per-element value.
+     *
+     * <p>A {@code %} inside a stage reaches the step's own input item — {@code Product[%.OrderID]}
+     * is the Order — so the input item is pushed as a parent level for the stage expressions only,
+     * never for the step's own source.
+     */
+    private static String stagedStep(Translator t, String prevExpr, AstNode step, GenCtx ctx) {
+        List<AstNode> stages = new ArrayList<>();
+        AstNode base = peelStages(step, stages);
+
+        String tmpCtx  = "__c" + ctx.state.nextId();
+        GenCtx stepCtx = ctx.withCtx(tmpCtx);
+        String expr    = stepExpr(t, base, stepCtx);
+
+        GenCtx stageCtx = stepCtx;
+        if (stages.stream().anyMatch(s -> ScopeAnalyzer.containsParentStep(stagePredicate(s)))) {
+            List<String> parents = new ArrayList<>(ctx.parentVars);
+            parents.add(tmpCtx);
+            stageCtx = stepCtx.withParents(parents);
+        }
+        for (AstNode stage : stages) expr = applyStage(t, expr, stage, stageCtx);
+        return "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + expr + ")";
+    }
+
+    /** Peels a step's folded stages, outermost last, and returns the step they sit on. */
+    private static AstNode peelStages(AstNode step, List<AstNode> stagesOut) {
+        AstNode inner = step instanceof PredicateExpr pe && pe.stage() ? pe.source()
+                : step instanceof ArraySubscript as ? as.source()
+                : null;
+        if (inner == null) return step;
+        AstNode base = peelStages(inner, stagesOut);
+        stagesOut.add(step);
+        return base;
+    }
+
+    /** The expression a stage filters or indexes by. */
+    private static AstNode stagePredicate(AstNode stage) {
+        return stage instanceof ArraySubscript as ? as.index() : ((PredicateExpr) stage).predicate();
+    }
+
+    private static String applyStage(Translator t, String srcExpr, AstNode stage, GenCtx ctx) {
+        if (stage instanceof ArraySubscript as) {
+            return "subscript(" + srcExpr + ", " + as.index().accept(t, ctx) + ")";
+        }
+        PredicateExpr pe = (PredicateExpr) stage;
+        if (pe.predicate() instanceof RangeExpr re) {
+            return "rangeSubscript(" + srcExpr + ", " + re.from().accept(t, ctx)
+                    + ", " + re.to().accept(t, ctx) + ")";
+        }
+        String elemVar  = "__el" + ctx.state.nextId();
+        String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
+        String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+        return filterFn + "(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
     }
 
     static String visitPredicateExpr(Translator t, PredicateExpr n, GenCtx ctx) {
