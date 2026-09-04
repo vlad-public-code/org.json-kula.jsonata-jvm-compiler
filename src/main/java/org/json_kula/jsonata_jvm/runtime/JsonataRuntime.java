@@ -135,27 +135,52 @@ public final class JsonataRuntime {
         return MISSING;
     }
 
-    /** Returns all field values of an object, or maps over an array. */
+    /**
+     * Evaluates {@code *} against one value: the values it holds, or nothing if it holds none.
+     *
+     * <p>The reference enumerates {@code Object.keys(input)}, which is the field values of an
+     * object and the elements of an array alike — so a {@code *} whose context is the document
+     * and the document is an array yields that array's elements, not their contents.
+     *
+     * <p>Mapping over a sequence is a separate question, and belongs to the step: see
+     * {@link #wildcardStep}.
+     */
     public static JsonNode wildcard(JsonNode node) {
-        if (node == null || node == MISSING || node.isNull()) return MISSING;
-        if (node.isArray()) {
-            ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : node) {
-                if (elem.isObject()) {
-                    appendToSequence(result, wildcard(elem));
-                } else if (elem != MISSING) {
-                    // Primitive array elements are returned as-is
-                    result.add(elem);
-                }
+        if (node == null || node == MISSING || !node.isContainerNode()) return MISSING;
+        ArrayNode result = NF.arrayNode();
+        // An array-valued key is deep-flattened and *appended* rather than pushed, and the
+        // reference's append ends in `concat`, which returns a plain array — so one such key
+        // anywhere in the container costs the result its sequence flag. A plain array does not
+        // collapse at the end of a path, which is why `w1.*` over {"e":[],"f":{"g":9}} is
+        // [{"g":9}] where `w2.*` over {"f":{"g":9}} is the object itself. The key need not
+        // contribute anything: {"a":[],"b":[]} yields [], not nothing.
+        boolean sawArrayValued = false;
+        for (JsonNode value : node) {   // an ObjectNode iterates its values, an ArrayNode its elements
+            if (value.isArray()) {
+                sawArrayValued = true;
+                flattenInto(value, result);
+            } else {
+                result.add(value);
             }
-            return unwrap(result);
         }
-        if (node.isObject()) {
-            ArrayNode result = NF.arrayNode();
-            node.fields().forEachRemaining(e -> appendToSequence(result, e.getValue()));
-            return unwrap(result);
-        }
-        return MISSING;
+        return sawArrayValued ? result : unwrap(result);
+    }
+
+    /**
+     * Evaluates {@code *} as a path step: it maps over the sequence reaching it.
+     *
+     * <p>The reference runs each step once per input item, so a {@code *} after another step sees
+     * one element at a time and a scalar element contributes nothing — {@code nums.*} and
+     * {@code a.c.*} are both undefined, where a {@code *} at the head of the path over the same
+     * array would have enumerated it. That difference is positional, not a property of the value,
+     * so it is the step that has to carry it.
+     */
+    public static JsonNode wildcardStep(JsonNode node) {
+        if (node == null || node == MISSING) return MISSING;
+        if (!node.isArray()) return wildcard(node);
+        ArrayNode result = NF.arrayNode();
+        for (JsonNode elem : node) appendToSequence(result, wildcard(elem));
+        return unwrap(result);
     }
 
     /** Recursively collects all descendant values (depth-first). */
@@ -167,10 +192,14 @@ public final class JsonataRuntime {
     }
 
     private static void collectDescendants(JsonNode node, ArrayNode acc) {
+        // The reference's recurseDescendants collects every non-array value it reaches, leaves
+        // included, and then keeps walking objects. Collecting only non-empty objects left the
+        // leaves out — invisible in `**.name`, which navigates on from the objects, but wrong for
+        // a bare `**`: {"e":[],"f":{"g":9}} descends to [itself, {"g":9}, 9].
+        if (!node.isArray()) acc.add(node);
         if (node.isArray()) {
             for (JsonNode elem : node) collectDescendants(elem, acc);
-        } else if (node.isObject() && !node.isEmpty()) {
-            acc.add(node);
+        } else if (node.isObject()) {
             node.fields().forEachRemaining(e -> collectDescendants(e.getValue(), acc));
         }
     }

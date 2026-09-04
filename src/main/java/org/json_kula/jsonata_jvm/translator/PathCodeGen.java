@@ -448,7 +448,7 @@ final class PathCodeGen {
             case FieldRef fr -> {
                 yield "field(" + prevExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
             }
-            case WildcardStep ws   -> "wildcard(" + prevExpr + ")";
+            case WildcardStep ws   -> "wildcardStep(" + prevExpr + ")";
             case DescendantStep ds -> "descendant(" + prevExpr + ")";
             case ContextRef cr     -> prevExpr;
             case RootRef rr        -> ctx.rootVar;
