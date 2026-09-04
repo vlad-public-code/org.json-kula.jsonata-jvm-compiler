@@ -427,7 +427,48 @@ public final class Parser {
         return new PathExpr(steps);
     }
 
+    /**
+     * Whether {@code node} is one of the shapes the reference's {@code processAST} gives
+     * {@code type: 'path'} — the distinction that decides where a postfix operator lands.
+     *
+     * <p>Written after `X`, a `[...]`, `^(…)` or `{…}` attaches to `X`'s last <em>step</em>
+     * when X is a path, and to the node itself when it is not. The same test decides whether
+     * a trailing {@code []} has anything to keep (a non-path result is never a sequence).
+     *
+     * <p>A {@code ^(…)} sort always yields a path — the reference wraps a non-path source in
+     * one — while a predicate or subscript is a path only when <em>its</em> source is.
+     */
+    static boolean isPathLike(AstNode node) {
+        return switch (node) {
+            case PathExpr ignored       -> true;
+            case FieldRef ignored       -> true;
+            case WildcardStep ignored   -> true;
+            case DescendantStep ignored -> true;
+            case ParentStep ignored     -> true;
+            case SortExpr ignored       -> true;
+            case PredicateExpr pe       -> isPathLike(pe.source());
+            case ArraySubscript as      -> isPathLike(as.source());
+            case ForceArray fa          -> isPathLike(fa.source());
+            default                     -> false;
+        };
+    }
+
+    /*
+     * Why the three postfix productions above push through a GroupByExpr:
+     *
+     * The reference records a group-by as a `group` property on the path node, not as a wrapper,
+     * so a `[...]`, `^(…)` or `.step` written after it lands on the path's last step and runs
+     * BEFORE the grouping — `objs{"k":x}[0]` groups `objs[0]`, not `objs{"k":x}` indexed. Here a
+     * group-by is a node wrapping its source, so the equivalent is to push the operator through.
+     *
+     * S0209 is therefore not "a predicate after a group-by". It fires only when the group-by's
+     * source was NOT a path, because then there is no step for the operator to land on.
+     */
+
     private AstNode parseDotStep(AstNode left) throws ParseException {
+        if (left instanceof GroupByExpr gbe && isPathLike(gbe.source())) {
+            return new GroupByExpr(parseDotStep(gbe.source()), gbe.pairs());
+        }
         consume(DOT);
         // % after a dot means "parent step"
         AstNode right;
@@ -469,9 +510,12 @@ public final class Parser {
     }
 
     private AstNode parseSubscriptOrPredicate(AstNode source) throws ParseException {
-        if (source instanceof GroupByExpr) {
-            Token t = peek();
-            throw new ParseException("S0209", "A predicate cannot be applied to a group-by expression", t.position());
+        if (source instanceof GroupByExpr gbe) {
+            if (!isPathLike(gbe.source())) {
+                Token t = peek();
+                throw new ParseException("S0209", "A predicate cannot be applied to a group-by expression", t.position());
+            }
+            return new GroupByExpr(parseSubscriptOrPredicate(gbe.source()), gbe.pairs());
         }
         consume(LBRACKET);
         if (peek().type() == RBRACKET) {
@@ -526,6 +570,9 @@ public final class Parser {
     }
 
     private AstNode parseSortExpr(AstNode source) throws ParseException {
+        if (source instanceof GroupByExpr gbe && isPathLike(gbe.source())) {
+            return new GroupByExpr(parseSortExpr(gbe.source()), gbe.pairs());
+        }
         consume(CARET);
         consume(LPAREN);
         List<SortKey> keys = new ArrayList<>();

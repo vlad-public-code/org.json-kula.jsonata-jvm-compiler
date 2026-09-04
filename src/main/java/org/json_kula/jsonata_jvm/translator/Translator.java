@@ -1112,6 +1112,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         sb.append("    java.util.List<JsonNode> __items = new java.util.ArrayList<>();\n");
         sb.append("    if (__src.isArray()) { for (JsonNode __it : __src) __items.add(__it); }\n");
         sb.append("    else if (!__src.isMissingNode()) __items.add(__src);\n");
+        // An empty or absent source still runs the pairs once, with an absent context — the
+        // reference's `if (input.length === 0) input.push(undefined)`. That is what makes a
+        // group-by with literal values produce an object rather than nothing: `nope{"k":"v"}`
+        // is {"k":"v"}, while `nope{"k":$}` is {} because the value itself is absent.
+        sb.append("    if (__items.isEmpty()) __items.add(MISSING);\n");
         // For each pair: group elements by key, then evaluate value once per group.
         for (int pi = 0; pi < pairExprs.size(); pi++) {
             String kExpr = pairExprs.get(pi)[0];
@@ -1149,9 +1154,6 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("        }\n");
             sb.append("    }\n");
         }
-        // Return MISSING only when the source itself was absent; an empty but valid
-        // source (e.g. an empty array) should yield an empty object {}.
-        sb.append("    if (__src.isMissingNode()) return MISSING;\n");
         sb.append("    return __result;\n");
         sb.append("}\n");
         ctx.state.helperMethods.append(sb);
