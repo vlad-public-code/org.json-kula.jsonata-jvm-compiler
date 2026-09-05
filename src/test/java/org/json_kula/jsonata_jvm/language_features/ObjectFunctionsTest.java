@@ -165,12 +165,15 @@ class ObjectFunctionsTest {
         assertTrue(foundName && foundAge);
     }
 
+    /**
+      * $spread builds a sequence, and a sequence collapses: a single-key object spreads
+      * to the bare one-key object, not to a one-element array.
+      */
     @Test
     void spread_single_key_object() throws Exception {
         JsonNode result = eval("$spread({\"x\": 42})");
-        assertTrue(result.isArray());
-        assertEquals(1, result.size());
-        assertEquals(42L, result.get(0).get("x").longValue());
+        assertFalse(result.isArray());
+        assertEquals(42L, result.get("x").longValue());
     }
 
     @Test

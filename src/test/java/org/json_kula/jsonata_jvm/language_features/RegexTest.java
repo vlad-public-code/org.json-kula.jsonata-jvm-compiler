@@ -53,10 +53,13 @@ class RegexTest {
 
     @Test
     void contains_regexMultiline() throws Exception {
-        // In joni ECMAScript mode, ^ anchors to line start by default.
-        // The 'm' flag (MULTILINE) makes '.' span newlines (Oniguruma semantics).
-        assertJsonEqual("true",  eval("$contains(\"line1\\nline2\", /^line2/)"));
-        assertJsonEqual("true",  eval("$contains(\"line1\\nline2\", /line1.line2/m)"));
+        // JavaScript flag semantics, which are not Oniguruma's option names: `m` makes
+        // ^ and $ line anchors and does NOT make '.' span newlines (that is JS `/s`), and
+        // without `m` the anchors bind the whole string. This test previously asserted
+        // Oniguruma's meanings, under which every pattern behaved as if it carried /m.
+        assertJsonEqual("false", eval("$contains(\"line1\\nline2\", /^line2/)"));
+        assertJsonEqual("true",  eval("$contains(\"line1\\nline2\", /^line2/m)"));
+        assertJsonEqual("false", eval("$contains(\"line1\\nline2\", /line1.line2/m)"));
         assertJsonEqual("false", eval("$contains(\"line1\\nline2\", /line1.line2/)"));
     }
 
@@ -140,8 +143,9 @@ class RegexTest {
 
     @Test
     void match_withLimit() throws Exception {
+        // One match collapses to the bare object, as any JSONata sequence does.
         assertJsonEqual("""
-                [{"match":"1","index":5,"groups":[]}]
+                {"match":"1","index":5,"groups":[]}
                 """,
                 eval("$match(\"test 1 test 2\", /[0-9]+/, 1)"));
     }

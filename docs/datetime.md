@@ -168,7 +168,15 @@ The `DateTimeFormatter` is then configured so that `[Yw]`, `[YI]`, and `[Yi]` al
 
 ## Adding a new picture component
 
-1. Add formatting logic to `PictureFormatter.formatComponent` (switch on the component letter).
+`PictureFormatter` no longer switches on the component letter to decide how to render it.
+XPath F&O §9.8.4.3 routes every integer-valued component through the same integer formatter
+`$formatInteger` uses, and `PictureFormatter` delegates to `numeric.IntegerPicture`
+accordingly — so a component's modifiers (`[Ya]`, `[Di]`, `[Mw]`, `[DW]`, widths, `;o`)
+come for free. See [design/CONFORMANCE-REVIEW.md](design/CONFORMANCE-REVIEW.md) §5.
+
+1. Add the component's **value** to `PictureFormatter.fragment` (switch on the letter) and
+   its default presentation modifier to `defaultPresentation`. That is all the formatting
+   side needs unless the component renders a name rather than a number.
 2. Add parsing logic to `PictureParser.appendComponent` (switch on the component letter).
 3. If the new component requires preprocessing (e.g., name → number), add a helper to `PictureParser.preprocess` and call it from there.
 4. Add tests in `src/test/java/…/runtime/datetime/DateTimeFormattingTest.java`.
@@ -177,9 +185,17 @@ The `DateTimeFormatter` is then configured so that `[Yw]`, `[YI]`, and `[Yi]` al
 
 ## Known limitations
 
-- `[YN]` (year name) is not supported (throws `D3133`).
-- `[x]` (lowercase, week-of-month context month) throws `D3136` in parsing.
-- `[w]` (week of month) throws `D3136` in parsing.
+Each of these was checked against the reference interpreter; the first three are the
+reference's own behaviour rather than gaps in this port.
+
+- `[YN]` (year name) throws `D3133` — as the reference does.
+- `[w]` and `[x]` throw `D3136` when *parsing* — as the reference does. Both format
+  correctly.
 - ISO week-year `[X]` parsing falls back to the calendar year.
-- `WordNumbers.toCardinal` and `wordsToDigits` handle numbers up to 9,999. Years outside that range fall back to their decimal string.
-- `RomanNumerals.toRoman` covers 1–3999 (standard notation); larger values return the decimal string.
+- The `datetime` package still carries its own `RomanNumerals` and `WordNumbers`, used only
+  by `PictureParser`. They are less complete than `numeric.IntegerPicture` and
+  `numeric.EnglishWords`, which the formatter now shares; consolidating the parse side is
+  outstanding work.
+- `$fromMillis` of a year below 100 with `[X]`/`[x]` reports a different ISO week-year from
+  the reference, whose `Date.UTC` maps years 0-99 to 1900-1999. This is a deliberate
+  divergence from a legacy JavaScript artefact.

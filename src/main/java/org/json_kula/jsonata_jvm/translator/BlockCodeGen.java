@@ -108,7 +108,14 @@ final class BlockCodeGen {
         ctx.state.pushScope();
         for (String name : holderNeeded) ctx.state.addLocalVar(name);
 
+        SequenceScanFusion.Plan scanPlan = SequenceScanFusion.Plan.NONE;
         try {
+            // Several operations over the same sequence collapse into one pass over it. Planned
+            // here, before any statement is compiled, because the visitor redirects the absorbed
+            // operations to the scan's result slots as it reaches them.
+            scanPlan = SequenceScanFusion.plan(exprs, t, innerCtx);
+            ctx.state.fusedScanResults.putAll(scanPlan.results());
+
             StringBuilder sb = new StringBuilder();
             sb.append("\nprivate JsonNode ").append(methodName)
               .append("(JsonNode __root, JsonNode __ctx")
@@ -124,6 +131,7 @@ final class BlockCodeGen {
 
             Set<String> declared = new java.util.HashSet<>();
             for (int i = 0; i < exprs.size() - 1; i++) {
+                scanPlan.emitCallsBefore(i, sb);
                 AstNode expr = exprs.get(i);
                 if (expr instanceof VariableBinding vb) {
                     emitVarBinding(t, vb, sb, innerCtx, declared);
@@ -138,6 +146,7 @@ final class BlockCodeGen {
             // The last expression of the block is in tail position when the block
             // itself is in tail position (i.e. when it is the body of a lambda).
             GenCtx lastCtx = ctx.isTailPosition ? innerCtx.withTailPosition(true) : innerCtx;
+            scanPlan.emitCallsBefore(exprs.size() - 1, sb);
             AstNode last = exprs.get(exprs.size() - 1);
             if (last instanceof VariableBinding vb) {
                 emitVarBinding(t, vb, sb, lastCtx, declared);
@@ -151,6 +160,7 @@ final class BlockCodeGen {
         } finally {
             ctx.state.popScope();
             ctx.state.holderVars.removeAll(holderNeeded);
+            scanPlan.results().keySet().forEach(ctx.state.fusedScanResults::remove);
         }
 
         return methodName + "(" + ctx.rootVar + ", " + ctx.ctxVar + extraCallArgs + parentCallArgs + ")";

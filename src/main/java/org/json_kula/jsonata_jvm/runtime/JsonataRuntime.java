@@ -135,27 +135,71 @@ public final class JsonataRuntime {
         return MISSING;
     }
 
-    /** Returns all field values of an object, or maps over an array. */
+    /**
+     * Evaluates {@code *} against one value: the values it holds, or nothing if it holds none.
+     *
+     * <p>The reference enumerates {@code Object.keys(input)}, which is the field values of an
+     * object and the elements of an array alike — so a {@code *} whose context is the document
+     * and the document is an array yields that array's elements, not their contents.
+     *
+     * <p>Mapping over a sequence is a separate question, and belongs to the step: see
+     * {@link #wildcardStep}.
+     */
     public static JsonNode wildcard(JsonNode node) {
-        if (node == null || node == MISSING || node.isNull()) return MISSING;
-        if (node.isArray()) {
-            ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : node) {
-                if (elem.isObject()) {
-                    appendToSequence(result, wildcard(elem));
-                } else if (elem != MISSING) {
-                    // Primitive array elements are returned as-is
-                    result.add(elem);
-                }
+        if (node == null || node == MISSING || !node.isContainerNode()) return MISSING;
+        ArrayNode result = NF.arrayNode();
+        // An array-valued key is deep-flattened and *appended* rather than pushed, and the
+        // reference's append ends in `concat`, which returns a plain array — so one such key
+        // anywhere in the container costs the result its sequence flag. A plain array does not
+        // collapse at the end of a path, which is why `w1.*` over {"e":[],"f":{"g":9}} is
+        // [{"g":9}] where `w2.*` over {"f":{"g":9}} is the object itself. The key need not
+        // contribute anything: {"a":[],"b":[]} yields [], not nothing.
+        boolean sawArrayValued = false;
+        for (JsonNode value : node) {   // an ObjectNode iterates its values, an ArrayNode its elements
+            if (value.isArray()) {
+                sawArrayValued = true;
+                flattenInto(value, result);
+            } else {
+                result.add(value);
             }
-            return unwrap(result);
         }
-        if (node.isObject()) {
-            ArrayNode result = NF.arrayNode();
-            node.fields().forEachRemaining(e -> appendToSequence(result, e.getValue()));
-            return unwrap(result);
-        }
-        return MISSING;
+        return sawArrayValued ? result : unwrap(result);
+    }
+
+    /**
+     * Evaluates {@code $} as a path step: it rebinds the context to itself, but it is still a step.
+     *
+     * <p>The reference runs it once per input item and pushes each result into a fresh sequence,
+     * so an array-valued item that is not a constructor's own array is flattened into it:
+     * {@code $each(a, fn).$} over {@code {"b":1,"c":[7,8]}} is [1,7,8], not [1,[7,8]]. A cons array
+     * is pushed whole, which is why {@code a.[1].$} keeps its [1].
+     */
+    public static JsonNode contextStep(JsonNode node) {
+        if (node == null || node == MISSING) return MISSING;
+        // A constructor's array is one value, not a sequence to walk: `$` over it yields a sequence
+        // of one holding it, which collapses straight back to it. `a.([].x).$` is [].
+        if (MarkedArrayNode.isCons(node)) return node;
+        if (!node.isArray()) return node;
+        ArrayNode result = NF.arrayNode(node.size());
+        for (JsonNode elem : node) appendStepResult(result, elem);
+        return unwrap(result);
+    }
+
+    /**
+     * Evaluates {@code *} as a path step: it maps over the sequence reaching it.
+     *
+     * <p>The reference runs each step once per input item, so a {@code *} after another step sees
+     * one element at a time and a scalar element contributes nothing — {@code nums.*} and
+     * {@code a.c.*} are both undefined, where a {@code *} at the head of the path over the same
+     * array would have enumerated it. That difference is positional, not a property of the value,
+     * so it is the step that has to carry it.
+     */
+    public static JsonNode wildcardStep(JsonNode node) {
+        if (node == null || node == MISSING) return MISSING;
+        if (!node.isArray()) return wildcard(node);
+        ArrayNode result = NF.arrayNode();
+        for (JsonNode elem : node) appendToSequence(result, wildcard(elem));
+        return unwrap(result);
     }
 
     /** Recursively collects all descendant values (depth-first). */
@@ -167,10 +211,14 @@ public final class JsonataRuntime {
     }
 
     private static void collectDescendants(JsonNode node, ArrayNode acc) {
+        // The reference's recurseDescendants collects every non-array value it reaches, leaves
+        // included, and then keeps walking objects. Collecting only non-empty objects left the
+        // leaves out — invisible in `**.name`, which navigates on from the objects, but wrong for
+        // a bare `**`: {"e":[],"f":{"g":9}} descends to [itself, {"g":9}, 9].
+        if (!node.isArray()) acc.add(node);
         if (node.isArray()) {
             for (JsonNode elem : node) collectDescendants(elem, acc);
-        } else if (node.isObject() && !node.isEmpty()) {
-            acc.add(node);
+        } else if (node.isObject()) {
             node.fields().forEachRemaining(e -> collectDescendants(e.getValue(), acc));
         }
     }
@@ -182,10 +230,17 @@ public final class JsonataRuntime {
      */
     public static JsonNode forceArray(JsonNode node) {
         if (node == null || node == MISSING) return MISSING;
-        if (node.isArray()) return node;
+        // `[]` promotes a constructor's array rather than passing it through: the array is one
+        // value that happens to be an array, not a sequence of one, so keeping its singleton means
+        // wrapping it. `a.[1][]` is [[1]], where `a.b[]` — already a sequence — is [1].
+        if (MarkedArrayNode.isCons(node)) return NF.arrayNode().add(node);
+        // Otherwise the array is kept as it is, but marked so the singleton collapse at the end of
+        // a path — and after a sort — leaves it alone. That mark is the whole of `[]` on a value
+        // that is already a sequence: `a.b[]` is [1] and `a.b[]^($)` still is.
+        if (node.isArray()) return MarkedArrayNode.keepSingleton(NF, node);
         ArrayNode result = NF.arrayNode();
         result.add(node);
-        return result;
+        return MarkedArrayNode.keepSingleton(NF, result);
     }
 
     /**
@@ -333,7 +388,7 @@ public final class JsonataRuntime {
             ArrayNode result = NF.arrayNode();
             for (JsonNode elem : node) {
                 JsonNode val = fn.apply(elem);
-                if (val != MISSING) appendToSequence(result, val);
+                if (val != MISSING) appendStepResult(result, val);
             }
             return unwrap(result);
         }
@@ -363,9 +418,14 @@ public final class JsonataRuntime {
             }
             return result.isEmpty() ? MISSING : result;
         }
+        // A non-sequence context is still stepped: the reference pushes the one result into a
+        // fresh sequence, and whether that sequence collapses is decided at the end of the path,
+        // not here. Returning the constructor's array bare instead loses the difference between
+        // "a sequence holding one array" and "an array" — which is the whole of `a.[1]` being [1]
+        // and `a.[1].$` being [1] rather than 1.
         JsonNode val = fn.apply(node);
         if (val == MISSING) return MISSING;
-        return unwrapPreserve(val);
+        return NF.arrayNode(1).add(unwrapPreserve(val));
     }
 
     /**
@@ -897,6 +957,18 @@ public final class JsonataRuntime {
         return result;
     }
 
+    /**
+     * {@link #arrayOf} for a {@code [...]} written as a path step: the array it builds is a value,
+     * not a sequence, and is marked so it neither flattens into the sequence around it nor
+     * collapses when it is the only thing in one. See {@link ConsArrayNode}.
+     */
+    public static JsonNode consArrayOf(Object... elements) {
+        JsonNode built = arrayOf(elements);
+        MarkedArrayNode cons = MarkedArrayNode.consArray(NF, built.size());
+        for (JsonNode e : built) cons.add(e);
+        return cons;
+    }
+
     /** Creates a RangeHolder to signal that the range should be flattened. */
     public static RangeHolder rangeFlatten(int from, int to) {
         return new RangeHolder(from, to);
@@ -924,6 +996,18 @@ public final class JsonataRuntime {
      * @param keys   the field names, in source order
      * @param values one value per key; a missing value omits its field, per JSONata
      */
+    /**
+     * The same, for a key array the translator has established holds no duplicates — which is every
+     * object constructor whose keys are literals, so nearly all of them.
+     *
+     * <p>Knowing that turns construction from a run of hash insertions into a run of pointer
+     * stores: there is no key to hash and no previous value to look for. See {@link
+     * ConstructedObjectMap} for what that buys and what it costs on the read side.
+     */
+    public static JsonNode objectOfDistinct(String[] keys, JsonNode[] values) {
+        return new ObjectNode(NF, new ConstructedObjectMap(keys, values));
+    }
+
     public static JsonNode objectOf(String[] keys, JsonNode[] values) throws RuntimeEvaluationException {
         ObjectNode result = new ObjectNode(NF, new java.util.LinkedHashMap<>(
                 Math.max(4, (keys.length * 4 / 3) + 1)));
@@ -1064,12 +1148,14 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_floor(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode((long) Math.floor(toNumber(arg)));
+        // numNode, not a raw (long) cast: a magnitude beyond Long.MAX_VALUE saturates
+        // there, so $floor(1e21) became 9223372036854775807 instead of staying 1e21.
+        return numNode(Math.floor(toNumber(arg)));
     }
 
     public static JsonNode fn_ceil(JsonNode arg) throws RuntimeEvaluationException {
         if (missing(arg)) return MISSING;
-        return NF.numberNode((long) Math.ceil(toNumber(arg)));
+        return numNode(Math.ceil(toNumber(arg)));
     }
 
     public static JsonNode fn_round(JsonNode arg) throws RuntimeEvaluationException {
@@ -1279,16 +1365,14 @@ public final class JsonataRuntime {
     public static JsonNode fn_count_field(JsonNode seq, String fieldName) {
         if (missing(seq)) return NF.numberNode(0);
         if (!seq.isArray()) {
-            if (!seq.isObject()) return NF.numberNode(0);
-            JsonNode v = seq.get(fieldName);
-            if (v == null || v == MISSING) return NF.numberNode(0);
+            JsonNode v = field(seq, fieldName);
+            if (v == MISSING) return NF.numberNode(0);
             return v.isArray() ? NF.numberNode(v.size()) : NF.numberNode(1);
         }
         int count = 0;
         for (JsonNode elem : seq) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             count += v.isArray() ? v.size() : 1;
         }
         return NF.numberNode(count);
@@ -1330,11 +1414,16 @@ public final class JsonataRuntime {
         return NF.numberNode(count);
     }
 
+    /**
+     * The per-element test {@code seq[field = literal]} performs. It navigates with {@link #field}
+     * rather than with {@code get}, because a predicate applies full field-navigation semantics to
+     * whatever the element is: an element that is itself an array maps the step over its members
+     * and can therefore match, exactly as {@link #filter} lets it.
+     */
     private static boolean fieldMatches(JsonNode node, String fieldName,
                                         java.util.function.Predicate<JsonNode> matches) {
-        if (!node.isObject()) return false;
-        JsonNode value = node.get(fieldName);
-        return value != null && value != MISSING && matches.test(value);
+        JsonNode value = field(node, fieldName);
+        return value != MISSING && matches.test(value);
     }
 
     public static JsonNode fn_count_filter(JsonNode seq, JsonataLambda predicate) throws RuntimeEvaluationException {
@@ -1347,15 +1436,23 @@ public final class JsonataRuntime {
         return NF.numberNode(count);
     }
 
-    /** Fused $sum(arr.field): navigates field and sums without an intermediate array. */
+    /**
+     * Fused {@code $sum(arr.field)}: navigates field and sums without an intermediate array.
+     *
+     * <p>The navigation goes through {@link #field}, not through {@code get} behind an {@code
+     * isObject} test, because the argument being collapsed is a <em>path</em>: an element that is
+     * itself an array maps the step over its members and contributes them, so {@code $sum($e.f)}
+     * over {@code [{"f":10}, [{"f":3}]]} is 13. Skipping non-objects agrees with that for scalars
+     * — {@code field} yields nothing for them — but silently drops the array case. Every fused
+     * aggregate below navigates the same way for the same reason.
+     */
     public static JsonNode fn_sum_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
         if (missing(seq)) return MISSING;
         double sum = 0; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$sum"); sum += sub.doubleValue(); any = true; }
             } else { requireT0412(v, "$sum"); sum += v.doubleValue(); any = true; }
@@ -1369,14 +1466,132 @@ public final class JsonataRuntime {
         double sum = 0; int count = 0;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireAverageArg(sub); sum += sub.doubleValue(); count++; }
             } else { requireAverageArg(v); sum += v.doubleValue(); count++; }
         }
         return count == 0 ? MISSING : numNode(sum / count);
+    }
+
+    // =========================================================================
+    // Fused sequence scans
+    //
+    // When a block runs several of the operations above over the same sequence, the translator
+    // (see SequenceScanFusion) collapses them into one loop that reads each field once per
+    // element instead of once per operation. These helpers are what that generated loop calls;
+    // they exist so the emitted code stays small enough for the JIT to compile well, which
+    // measurement showed matters more than the lookups saved.
+    // =========================================================================
+
+    /**
+     * True when {@code value} is present and deep-equals {@code expected} — the test
+     * {@code $count(seq[field = literal])} performs, lifted out so a fused scan can apply it to a
+     * field it has already read.
+     */
+    public static boolean fieldEq(JsonNode value, JsonNode expected) {
+        return value != null && value != MISSING && deepEquals(value, expected);
+    }
+
+    /**
+     * Starts the array a fused filter switches to on its second match, mirroring {@link
+     * #filter}: nothing is allocated for zero or one match, so a scan that selects a single
+     * element costs no more than the loop it replaced.
+     */
+    public static JsonNode seqStart(JsonNode first, JsonNode second) {
+        ArrayNode arr = NF.arrayNode(4);
+        arr.add(first);
+        arr.add(second);
+        return arr;
+    }
+
+    /** Appends to the array {@link #seqStart} created. */
+    public static void seqAdd(JsonNode array, JsonNode element) {
+        ((ArrayNode) array).add(element);
+    }
+
+    /** Collapses a fused filter's accumulator pair into its result, exactly as {@link #filter} does. */
+    public static JsonNode seqResult(JsonNode single, JsonNode array) {
+        if (array != null) return array;
+        return single != null ? single : MISSING;
+    }
+
+    /**
+     * Reads one aggregate out of a fused scan, raising the error that aggregate would have raised.
+     *
+     * <p>A fused scan cannot throw where the offending element is found. The operations sharing the
+     * loop were separate statements in the source, and the error the expression reports is the one
+     * belonging to the statement that ran first — which may not even be one of the absorbed ones:
+     *
+     * <pre>
+     *   ( $e := bad;  $a := $count($e[s = 10]);  $z := $error("boom");  $b := $sum($e.s);  $b )
+     * </pre>
+     *
+     * <p>must report {@code boom}. So the scan records each aggregate's first offending value and
+     * carries it out in a slot of its own, and the throw happens here, at the point in the block
+     * where the original statement read the result. That makes the ordering exact against the
+     * statements the scan did not absorb, and not merely among the aggregates themselves.
+     *
+     * @param value the aggregate's result, used when it met no bad data
+     * @param bad   the first value that was neither a number nor an array of numbers, or null
+     */
+    public static JsonNode aggRead(JsonNode value, JsonNode bad, String fnName)
+            throws RuntimeEvaluationException {
+        if (bad != null) requireT0412(bad, fnName);
+        return value;
+    }
+
+    /** The {@link #aggRead} counterpart for {@code $average}, whose message names itself. */
+    public static JsonNode avgRead(JsonNode value, JsonNode bad) throws RuntimeEvaluationException {
+        if (bad != null) requireAverageArg(bad);
+        return value;
+    }
+
+    /**
+     * Reads a fused filter or count whose predicate compares with an ordering operator, raising the
+     * error that comparison would have raised. The operands are carried out rather than the error
+     * itself, so that the scan allocates nothing on the path that does not fail and the message
+     * still distinguishes T2009 from T2010.
+     */
+    public static JsonNode cmpRead(JsonNode value, JsonNode badLeft, JsonNode badRight)
+            throws RuntimeEvaluationException {
+        if (badLeft != null) throw orderingError(badLeft, badRight);
+        return value;
+    }
+
+    /** Operator selectors for {@link #cmpSafe}, in the order {@code < <= > >=}. */
+    public static final int CMP_LT = 0, CMP_LE = 1, CMP_GT = 2, CMP_GE = 3;
+
+    /**
+     * {@code <}, {@code <=}, {@code >} or {@code >=} without the throw: returns exactly what {@link
+     * #lt} and friends return, or {@code null} where they would have raised. A fused scan uses this
+     * to record the first offending operand pair and keep going, deferring the error to {@link
+     * #cmpRead} at the statement that reads the result — the same deferral {@link #aggRead}
+     * performs for the aggregates, and for the same reason.
+     */
+    public static JsonNode cmpSafe(JsonNode a, JsonNode b, int op) {
+        if (!orderingOk(a) || !orderingOk(b)) return null;
+        if (missing(a) || missing(b)) return MISSING;
+        if (a.isNumber() && b.isNumber()) {
+            double x = a.doubleValue(), y = b.doubleValue();
+            return bool(switch (op) {
+                case CMP_LT -> x < y;
+                case CMP_LE -> x <= y;
+                case CMP_GT -> x > y;
+                default     -> x >= y;
+            });
+        }
+        if (a.isTextual() && b.isTextual()) {
+            int c = a.textValue().compareTo(b.textValue());
+            return bool(switch (op) {
+                case CMP_LT -> c < 0;
+                case CMP_LE -> c <= 0;
+                case CMP_GT -> c > 0;
+                default     -> c >= 0;
+            });
+        }
+        return null;
     }
 
     /** Fused $max(arr.field): navigates field and finds max without an intermediate array. */
@@ -1385,9 +1600,8 @@ public final class JsonataRuntime {
         double max = Double.NEGATIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$max"); double d = sub.doubleValue(); if (d > max) max = d; any = true; }
             } else { requireT0412(v, "$max"); double d = v.doubleValue(); if (d > max) max = d; any = true; }
@@ -1401,14 +1615,12 @@ public final class JsonataRuntime {
         double sum = 0; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$sum"); sum += n.doubleValue(); any = true; } }
                 else { requireT0412(v2, "$sum"); sum += v2.doubleValue(); any = true; }
             }
@@ -1422,14 +1634,12 @@ public final class JsonataRuntime {
         double sum = 0; int count = 0;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireAverageArg(n); sum += n.doubleValue(); count++; } }
                 else { requireAverageArg(v2); sum += v2.doubleValue(); count++; }
             }
@@ -1443,14 +1653,12 @@ public final class JsonataRuntime {
         double max = Double.NEGATIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$max"); double d = n.doubleValue(); if (d > max) max = d; any = true; } }
                 else { requireT0412(v2, "$max"); double d = v2.doubleValue(); if (d > max) max = d; any = true; }
             }
@@ -1464,14 +1672,12 @@ public final class JsonataRuntime {
         double min = Double.POSITIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$min"); double d = n.doubleValue(); if (d < min) min = d; any = true; } }
                 else { requireT0412(v2, "$min"); double d = v2.doubleValue(); if (d < min) min = d; any = true; }
             }
@@ -1485,9 +1691,8 @@ public final class JsonataRuntime {
         double min = Double.POSITIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$min"); double d = sub.doubleValue(); if (d < min) min = d; any = true; }
             } else { requireT0412(v, "$min"); double d = v.doubleValue(); if (d < min) min = d; any = true; }
@@ -1557,10 +1762,18 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_reverse(JsonNode arg) {
         if (missing(arg)) return MISSING;
-        if (!arg.isArray()) return arg;
-        ArrayNode result = NF.arrayNode();
+        // $reverse's signature is <a:a>, so a non-array argument is array-wrapped by the
+        // signature machinery rather than passed through: $reverse(1) is [1].
+        if (!arg.isArray()) {
+            ArrayNode wrapped = NF.arrayNode();
+            wrapped.add(arg);
+            return wrapped;
+        }
+        ArrayNode result = NF.arrayNode(arg.size());
         for (int i = arg.size() - 1; i >= 0; i--) result.add(arg.get(i));
-        return result;
+        // A descending order-by is fn_reverse over fn_sort, so it has to carry the mark on for the
+        // same reason the sort does.
+        return MarkedArrayNode.sameMark(NF, arg, result);
     }
 
     public static JsonNode fn_distinct(JsonNode arg) {
@@ -1732,8 +1945,29 @@ public final class JsonataRuntime {
                 : tuple -> fn_apply(fn, tuple.get(0));
     }
 
+    /**
+     * Rejects a function value in the sequence slot of a higher-order built-in.
+     *
+     * <p>{@code $filter(function($x){$x}, [1,2])} has its arguments the wrong way round. Every
+     * one of these declares its first parameter as {@code a}, so the reference rejects it against
+     * the signature with T0410 before the body runs. Without this the mistake surfaced further
+     * in and worse: T1006 ("not a function") from the *callback* slot for some, and for {@code
+     * $reduce} and {@code $sort} no error at all — they returned the function back, or a
+     * one-element array holding it.
+     *
+     * <p>Only a function is rejected. A scalar there is legal — the sequence slot promotes a
+     * single value to a one-element sequence, so {@code $map(1, $string)} is {@code "1"}.
+     */
+    private static void requireSequenceArgument(JsonNode arr, String fnName)
+            throws RuntimeEvaluationException {
+        if (isLambdaToken(arr))
+            throw new RuntimeEvaluationException("T0410",
+                    "Argument 1 of function " + fnName + " does not match function signature");
+    }
+
     /** {@code $map} with the callback supplied as a value. */
     public static JsonNode fn_map(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "map");
         return lambdaArity(fn) >= 2
                 ? SequenceBuiltins.fn_map_indexed(arr, tupleCallback(fn))
                 : SequenceBuiltins.fn_map(arr, elementCallback(fn));
@@ -1741,6 +1975,7 @@ public final class JsonataRuntime {
 
     /** {@code $filter} with the predicate supplied as a value. */
     public static JsonNode fn_filter(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "filter");
         return lambdaArity(predicate) >= 2
                 ? SequenceBuiltins.fn_filter_indexed(arr, tupleCallback(predicate))
                 : SequenceBuiltins.fn_filter(arr, elementCallback(predicate));
@@ -1748,6 +1983,7 @@ public final class JsonataRuntime {
 
     /** {@code $single} with the predicate supplied as a value. */
     public static JsonNode fn_single(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "single");
         return lambdaArity(predicate) >= 2
                 ? SequenceBuiltins.fn_single_indexed(arr, tupleCallback(predicate))
                 : SequenceBuiltins.fn_single(arr, elementCallback(predicate));
@@ -1769,6 +2005,7 @@ public final class JsonataRuntime {
      * literal lambda.
      */
     public static JsonNode fn_sort(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "sort");
         return lambdaArity(fn) >= 2
                 ? SequenceBuiltins.fn_sort_comparator(arr, tupleCallback(fn))
                 : SequenceBuiltins.fn_sort(arr, elementCallback(fn));
@@ -1776,6 +2013,7 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "reduce");
         return SequenceBuiltins.fn_reduce(arr, fn, init);
     }
 
@@ -1895,10 +2133,10 @@ public final class JsonataRuntime {
         if (missing(obj)) return MISSING;
         // When applied to an array of objects, collect all unique keys (union)
         if (obj.isArray()) {
+            // Recurses into nested arrays: an array of arrays of objects still yields the
+            // union of the objects' keys.
             java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
-            for (JsonNode elem : obj) {
-                if (elem.isObject()) elem.fieldNames().forEachRemaining(seen::add);
-            }
+            collectKeys(obj, seen);
             if (seen.isEmpty()) return MISSING;
             ArrayNode result = NF.arrayNode();
             seen.forEach(result::add);
@@ -1908,6 +2146,15 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         obj.fieldNames().forEachRemaining(result::add);
         return result.isEmpty() ? MISSING : unwrap(result);
+    }
+
+    /** Collects the union of every object key reachable through nested arrays. */
+    private static void collectKeys(JsonNode node, java.util.LinkedHashSet<String> seen) {
+        if (node.isArray()) {
+            for (JsonNode elem : node) collectKeys(elem, seen);
+        } else if (node.isObject()) {
+            node.fieldNames().forEachRemaining(seen::add);
+        }
     }
 
     public static JsonNode fn_values(JsonNode obj) {
@@ -1998,22 +2245,223 @@ public final class JsonataRuntime {
             return (v == null || v == MISSING) ? MISSING : v;
         }
         if (obj.isArray()) {
+            // Recurses into nested arrays, for the same reason $keys does.
             ArrayNode result = NF.arrayNode();
-            for (JsonNode elem : obj) {
-                if (elem.isObject()) {
-                    JsonNode v = elem.get(k);
-                    if (v != null && v != MISSING) appendToSequence(result, v);
-                }
-            }
+            collectLookups(obj, k, result);
             return unwrap(result);
         }
         return MISSING;
     }
 
     /**
+     * {@code $lookup(…)[]}: the same lookup, keeping the sequence an array input produces.
+     *
+     * <p>Over an array the reference builds the result with {@code createSequence}, so a single
+     * match is a one-element sequence — invisible until a {@code []} stops it collapsing:
+     * {@code $lookup(one,"x")[]} is [1] where the bare call is 1. Over an object it builds no
+     * sequence at all, so {@code $lookup(a,"b")[]} stays 1. That is the one built-in whose answer
+     * to {@code []} depends on its argument rather than on its name.
+     */
+    public static JsonNode fn_lookup_keepArray(JsonNode obj, JsonNode key) {
+        JsonNode result = fn_lookup(obj, key);
+        if (obj == null || !obj.isArray() || missing(result) || result.isArray()) return result;
+        return NF.arrayNode().add(result);
+    }
+
+    /** Appends every value of {@code key} reachable through nested arrays. */
+    private static void collectLookups(JsonNode node, String key, ArrayNode out) {
+        if (node.isArray()) {
+            for (JsonNode elem : node) collectLookups(elem, key, out);
+        } else if (node.isObject()) {
+            JsonNode v = node.get(key);
+            if (v != null && v != MISSING) appendToSequence(out, v);
+        }
+    }
+
+    /**
      * Splits each key/value pair of {@code obj} into a separate single-key object,
      * returning an array of those objects.
      */
+    /**
+     * {@code $clone(arg)} — a deep copy of an object or array.
+     *
+     * <p>The reference implements this as {@code JSON.parse($string(arg))}, so it is a
+     * round trip through the serialised form rather than a structural walk; a function
+     * value inside the argument therefore does not survive it.
+     */
+    /**
+     * Checks that a reducer supplied as a <em>value</em> accepts at least two arguments,
+     * and returns it.
+     *
+     * <p>The translator can check a literal {@code function($a, $b){...}} at compile time,
+     * but a variable holding one — or a built-in like {@code $sum} — reaches the runtime
+     * unchecked and was invoked with the packed 4-element tuple, quietly returning
+     * nonsense instead of D3050.
+     */
+    public static JsonNode reducerArityGuard(JsonNode fn) throws RuntimeEvaluationException {
+        if (fn instanceof LambdaNode lambda
+                && lambda.arity() != LambdaNode.UNKNOWN_ARITY && lambda.arity() < 2) {
+            throw new RuntimeEvaluationException("D3050",
+                    "The second argument of $reduce must accept at least 2 parameters, got "
+                            + lambda.arity());
+        }
+        return fn;
+    }
+
+    /**
+     * Resolves the callee of a field function call — the {@code g} in {@code a.g()}.
+     *
+     * <p>A bare name in a path step names a <em>field</em> of the step context, never a
+     * built-in: {@code $o.count()} is {@code $o}'s own {@code count}, and {@code $count}
+     * is only reachable by writing the {@code $}. A name that resolves to nothing is
+     * therefore T1006 — except when it is also a built-in name, where T1005 says what the
+     * author probably meant. Whether the name is a built-in is known at compile time, so
+     * the translator bakes it into the call.
+     *
+     * @param context    the step context; may be any JSON value
+     * @param name       the field name
+     * @param isBuiltin  whether {@code name} is also the name of a built-in
+     */
+    public static JsonNode fieldFunction(JsonNode context, String name, boolean isBuiltin)
+            throws RuntimeEvaluationException {
+        JsonNode callee = context != null && context.isObject() ? context.get(name) : null;
+        if (callee != null && isLambdaToken(callee)) return callee;
+        if (callee == null && isBuiltin) {
+            throw new RuntimeEvaluationException("T1005",
+                    "Attempted to invoke a non-function. Did you mean $" + name + "?");
+        }
+        throw new RuntimeEvaluationException("T1006", "Attempted to invoke a non-function");
+    }
+
+    /**
+     * Reports a built-in invoked with fewer arguments than its signature requires.
+     *
+     * <p>Reached when a built-in without a context ({@code -}) parameter is written as a
+     * path step: {@code [1,2].$count()} calls {@code $count} with no arguments at all,
+     * because {@code <a:n>} never takes the context.
+     */
+    public static JsonNode fn_signature_error(String name) throws RuntimeEvaluationException {
+        throw new RuntimeEvaluationException("T0410",
+                "Argument 1 of function " + name + " does not match function signature");
+    }
+
+    /**
+     * Checks the step context against the type a built-in's context parameter declares,
+     * and returns it.
+     *
+     * <p>A context of the wrong type is T0411 — "context value is not a compatible type"
+     * — where a wrong-typed <em>written</em> argument is T0410. The distinction is only
+     * visible here, because only this path substitutes the context.
+     */
+    public static JsonNode contextArg(JsonNode context, String type, String name)
+            throws RuntimeEvaluationException {
+        if (missing(context) || matchesTypeSymbol(context, type)) return context;
+        throw new RuntimeEvaluationException("T0411",
+                "Context value is not a compatible type with argument 1 of function " + name);
+    }
+
+    /** Whether {@code value} satisfies a JSONata signature type symbol. */
+    private static boolean matchesTypeSymbol(JsonNode value, String type) {
+        if (type == null || type.isEmpty()) return true;
+        if (type.startsWith("(")) {
+            // A union: satisfied by any of its members.
+            for (int i = 1; i < type.length() && type.charAt(i) != ')'; i++) {
+                if (matchesTypeSymbol(value, String.valueOf(type.charAt(i)))) return true;
+            }
+            return false;
+        }
+        return switch (type.charAt(0)) {
+            case 'b' -> value.isBoolean();
+            case 'n' -> value.isNumber();
+            case 's' -> value.isTextual() && !isRegexToken(value);
+            case 'l' -> value.isNull();
+            case 'a' -> value.isArray();
+            case 'o' -> value.isObject();
+            case 'f' -> isLambdaToken(value);
+            case 'u' -> value.isBoolean() || value.isNumber() || value.isTextual() || value.isNull();
+            case 'j' -> !isLambdaToken(value);
+            default -> true;              // 'x' and anything unrecognised accept everything
+        };
+    }
+
+    /**
+     * Applies the rest of a path to a head that is an <em>explicit array constructor</em>,
+     * short-circuiting when the constructor came out empty.
+     *
+     * <p>The reference evaluates a leading {@code [...]} as a value rather than iterating
+     * over it, and breaks out of the step loop the moment a step yields nothing — so for
+     * {@code [].x} the {@code .x} is never evaluated and the constructor's own empty array
+     * is the result. That array is a plain value, not a sequence, so it does not collapse
+     * to undefined the way an empty sequence does. Hence {@code [].x} is {@code []} while
+     * {@code empty.x} — the same value, the same step — is undefined.
+     *
+     * <p>The short-circuit is observable beyond the value: {@code [].($error("boom"))}
+     * succeeds, because the step body genuinely does not run.
+     *
+     * @param head the evaluated array constructor
+     * @param rest the remaining steps, applied only when {@code head} is non-empty
+     */
+    public static JsonNode consarrayHead(JsonNode head, JsonataLambda rest)
+            throws RuntimeEvaluationException {
+        // The empty array the short-circuit yields is a constructor value like any other, so it
+        // does not flatten into the sequence around it and does not collapse: `nums.([].x)` is
+        // [[],[],[]], and `a.([].x)[]` is [[]].
+        if (head != null && head.isArray() && head.isEmpty()) {
+            return MarkedArrayNode.consArray(NF, 1);
+        }
+        // An absent head means the same thing here. The translator only emits this call
+        // when the first step is statically an array constructor, which always produces an
+        // array — so the only way it can arrive absent is a wrapper having already
+        // collapsed the empty one, as the sort in `[]^(x).y` does.
+        if (head == null || head.isMissingNode()) return MarkedArrayNode.consArray(NF, 1);
+        return rest.apply(head);
+    }
+
+    /**
+     * The head short-circuit when the head constructor carries a {@code [...]} stage.
+     *
+     * <p>The short-circuit assigns the head's value straight to the input sequence:
+     * {@code if (ii === 0 && step.consarray) resultSequence = await evaluate(step, …)}. With no
+     * stage that value is always an array and this is invisible. With one it is a plain
+     * <em>value</em>, and the next step then walks it with {@code input[ii]} for
+     * {@code ii < input.length} — so:
+     *
+     * <ul>
+     *   <li>a number, boolean or object has no {@code length}: the next step iterates zero times
+     *       and the path is undefined — {@code [1,2][0].$} is not 1;</li>
+     *   <li>a <b>string</b> has one, and yields its characters: {@code ["ab"][0].$} is ["a","b"];</li>
+     *   <li>{@code length === 0} ends the path and returns the value: {@code [""][0].x} is "".</li>
+     * </ul>
+     *
+     * <p>One deliberate departure: the reference reads {@code null.length} for
+     * {@code [null][0].$} and throws a raw TypeError. That is a crash, not a language rule, so an
+     * absent result is returned instead.
+     */
+    public static JsonNode consarrayStagedHead(JsonNode head, JsonataLambda rest)
+            throws RuntimeEvaluationException {
+        if (head == null || head.isMissingNode()) return MISSING;
+        if (head.isArray()) {
+            return head.isEmpty() ? head : rest.apply(head);
+        }
+        if (head.isTextual()) {
+            String text = head.textValue();
+            if (text.isEmpty()) return head;
+            ArrayNode chars = NF.arrayNode(text.length());
+            for (int i = 0; i < text.length(); i++) chars.add(NF.textNode(String.valueOf(text.charAt(i))));
+            return rest.apply(chars);
+        }
+        return MISSING;
+    }
+
+    public static JsonNode fn_clone(JsonNode arg) throws RuntimeEvaluationException {
+        if (missing(arg)) return MISSING;
+        if (!arg.isArray() && !arg.isObject()) {
+            throw new RuntimeEvaluationException("T0410",
+                    "$clone: argument must be an object or an array");
+        }
+        return arg.deepCopy();
+    }
+
     public static JsonNode fn_spread(JsonNode obj) {
         if (missing(obj)) return MISSING;
         if (obj.isArray()) {
@@ -2031,7 +2479,9 @@ public final class JsonataRuntime {
             single.set(e.getKey(), e.getValue());
             result.add(single);
         });
-        return result;
+        // A sequence result collapses, so a single-key object spreads to the bare
+        // one-key object rather than a one-element array.
+        return unwrap(result);
     }
 
     /**
@@ -2462,63 +2912,126 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Returns {@code true} if {@code s} — the output of {@link Double#toString} for a fractional
-     * value — is already what the 15-significant-digit rounding would produce: no exponent, no
-     * leading run of zeros that would switch the result to scientific notation, and few enough
-     * significant digits that rounding cannot change it.
+    /**
+     * Renders a double the way JavaScript does — ECMA-262 {@code Number::toString} — because
+     * a JSONata number <em>is</em> an IEEE double and the language's string form is defined by
+     * the reference implementation's own rendering.
+     *
+     * <p>The reference is `String(Number.isInteger(v) ? v : Number(v.toPrecision(15)))`: a
+     * non-integral value is first rounded to 15 significant digits to shed floating-point
+     * noise (so {@code 1/3} is {@code "0.333333333333333"}), and an integral one is
+     * <em>not</em> — rounding it would turn {@code 2^70} into {@code "1.18059162071741e+21"}
+     * instead of {@code "1.1805916207174113e+21"}.
+     *
+     * <p>The previous implementation hand-rolled the notation rules and diverged on
+     * subnormals, on the 1e21 exponential switch, on integers beyond 2^53, and on the
+     * {@code 1e-7} lower switch (its {@code "0.0000"}-prefix test put {@code 0.00001} into
+     * scientific notation, where JavaScript prints it plainly).
      */
-    private static boolean isPlainWithin15SignificantDigits(String s) {
-        int significant = 0;
+    public static String renderNumber(double v) {
+        return numberToString(v);
+    }
+
+    static String numberToString(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return String.valueOf(v);
+        if (v == 0) return "0";                       // ECMA-262 renders -0 as "0"
+
+        boolean negative = v < 0;
+        double magnitude = Math.abs(v);
+
+        // Fast path: an integral magnitude below 2^53 is exactly a long, and its plain
+        // digits are already the ECMA rendering (n <= 16, well inside the 21-digit
+        // boundary). The bound is 2^53 rather than the 1e21 notation boundary on purpose:
+        // above 2^53 a double's exact integer value has more digits than its shortest
+        // round-tripping form, so widening this silently breaks $string(12345678901234567890).
+        if (magnitude < 9007199254740992.0 && magnitude == Math.floor(magnitude)) {
+            return String.valueOf((long) v);
+        }
+
+        boolean integral = magnitude == Math.floor(magnitude);
+        if (!integral) {
+            // Fast path: Double.toString already yields the shortest round-tripping form,
+            // and where it prints plainly (1e-3 <= |v| < 1e7) JavaScript does too. If it
+            // also fits in 15 significant digits, the toPrecision(15) rounding is a no-op
+            // and the string is already the answer.
+            String shortest = Double.toString(magnitude);
+            if (shortest.indexOf('E') < 0 && significantDigits(shortest) <= 15) {
+                return negative ? "-" + shortest : shortest;
+            }
+            magnitude = new java.math.BigDecimal(magnitude)
+                    .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP))
+                    .doubleValue();
+        }
+
+        String rendered = ecmaNumberToString(magnitude);
+        return negative ? "-" + rendered : rendered;
+    }
+
+    /** Significant digits in a plain (exponent-free) decimal string. */
+    private static int significantDigits(String s) {
+        int count = 0;
         boolean seenNonZero = false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
-            if (c == 'E' || c == 'e') return false;
             if (c == '-' || c == '.') continue;
             if (c != '0') seenNonZero = true;
-            if (seenNonZero && ++significant > 15) return false;
+            if (seenNonZero) count++;
         }
-        // "0.0000…" and below are rendered in scientific notation by the reference path.
-        return !s.startsWith("0.0000") && !s.startsWith("-0.0000");
+        return count;
     }
 
     /**
-     * Converts a double to string using JSONata's number-to-string rules:
-     * integers render without decimal point, floating-point values use at most
-     * 13 significant digits (to eliminate floating-point noise beyond double
-     * precision), trailing zeros are stripped, and exponential notation uses
-     * a lowercase {@code e}.
+     * ECMA-262 {@code Number::toString} for a positive finite double.
+     *
+     * <p>The spec is stated over the shortest decimal {@code s x 10^(n-k)} that round-trips
+     * to the value, where {@code k} is the digit count. Java's {@link Double#toString} is
+     * <em>almost</em> that, but its format guarantees a digit after the decimal point, so
+     * {@code Double.MIN_VALUE} prints as {@code "4.9E-324"} where the shortest round-tripping
+     * form — and JavaScript's answer — is {@code "5e-324"}. The digits are therefore found by
+     * searching upward for the fewest that survive a round trip.
      */
-    static String numberToString(double v) {
-        if (Double.isInfinite(v) || Double.isNaN(v)) return String.valueOf(v);
-        // Whole numbers
-        if (v == Math.floor(v) && !Double.isInfinite(v)) {
-            if (Math.abs(v) < 1e15) return String.valueOf((long) v);
-            // JavaScript: values < 1e21 use plain decimal, >= 1e21 use scientific notation
-            if (Math.abs(v) < 1e21) return new java.math.BigDecimal(v).toBigInteger().toString();
-            // >= 1e21: use scientific notation (match JavaScript Number.toString())
-            java.math.BigDecimal bd = new java.math.BigDecimal(v)
-                    .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP));
-            String s = bd.toString().replace('E', 'e');
-            s = s.replaceAll("\\.0+e", "e").replaceAll("e(\\d)", "e+$1");
-            return s;
+    /**
+     * ECMA-262 {@code Number::toString} of {@code v}, with no 15-significant-digit
+     * rounding — JavaScript's {@code String(v)}, as distinct from {@code $string(v)}.
+     * {@code $round} shifts a decimal exponent through this form.
+     */
+    public static String renderNumberRaw(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return String.valueOf(v);
+        if (v == 0) return "0";
+        String rendered = ecmaNumberToString(Math.abs(v));
+        return v < 0 ? "-" + rendered : rendered;
+    }
+
+    private static String ecmaNumberToString(double magnitude) {
+        java.math.BigDecimal exact = new java.math.BigDecimal(magnitude);
+        java.math.BigDecimal shortest = exact;
+        for (int digits = 1; digits <= 17; digits++) {
+            java.math.BigDecimal candidate = exact.round(
+                    new java.math.MathContext(digits, java.math.RoundingMode.HALF_EVEN));
+            if (candidate.doubleValue() == magnitude) {
+                shortest = candidate;
+                break;
+            }
         }
-        // Fractional. The reference behaviour is "round to 15 significant figures, then print
-        // plainly", which needs BigDecimal — but only when the shortest round-trip form is longer
-        // than 15 significant digits. It usually is not (4.32, 26.3, 0.05 …), and Double.toString
-        // already produces exactly that form, so the common case skips BigDecimal entirely.
-        String shortest = Double.toString(v);
-        if (isPlainWithin15SignificantDigits(shortest)) return shortest;
-        java.math.BigDecimal bd = new java.math.BigDecimal(v)
-                .round(new java.math.MathContext(15, java.math.RoundingMode.HALF_UP))
-                .stripTrailingZeros();
-        String s = bd.toPlainString();
-        // Very small numbers (< 0.001) → use scientific notation
-        if (s.startsWith("0.0000") || s.startsWith("-0.0000")) {
-            s = bd.toString(); // scientific notation from BigDecimal (uses E)
-            s = s.replace('E', 'e');
-            s = s.replaceAll("\\.0+e", "e").replaceAll("e(\\d)", "e+$1");
+        shortest = shortest.stripTrailingZeros();
+
+        String s = shortest.unscaledValue().toString();
+        int k = s.length();
+        int n = k - shortest.scale();            // value == 0.s x 10^n
+
+        if (k <= n && n <= 21) {                 // integer, no exponent needed
+            return s + "0".repeat(n - k);
         }
-        return s;
+        if (0 < n && n <= 21) {                  // decimal point inside the digits
+            return s.substring(0, n) + "." + s.substring(n);
+        }
+        if (-6 < n && n <= 0) {                  // leading "0.000..."
+            return "0." + "0".repeat(-n) + s;
+        }
+        // Exponential notation.
+        String mantissa = k == 1 ? s : s.charAt(0) + "." + s.substring(1);
+        int exponent = n - 1;
+        return mantissa + "e" + (exponent >= 0 ? "+" : "-") + Math.abs(exponent);
     }
 
     /** Converts an Object (JsonNode or RangeHolder) to a String representation. */
@@ -2544,10 +3057,28 @@ public final class JsonataRuntime {
     }
 
     /**
+     * {@link #appendToSequence} for a <em>step's</em> result, which is the one place the reference
+     * checks cons: {@code if (!Array.isArray(res) || res.cons) push(res) else flatten}. A
+     * constructor's own array is one element of the sequence, not a run of them.
+     *
+     * <p>Only the step loop. {@code $append} concatenates, and concat spreads a cons array like any
+     * other, so {@code $append([].x, 1)} is [1].
+     */
+    static void appendStepResult(ArrayNode acc, JsonNode val) {
+        if (MarkedArrayNode.isCons(val)) acc.add(val);
+        else appendToSequence(acc, val);
+    }
+
+    /**
      * Returns the single element if the array has exactly one item, otherwise
      * returns the array as-is. Empty arrays return {@link #MISSING}.
      */
     static JsonNode unwrap(ArrayNode arr) {
+        // A constructor's array is a value; there is nothing here to collapse, empty or not.
+        if (MarkedArrayNode.isCons(arr)) return arr;
+        // `[]` keeps a *singleton*. The length-0 collapse is not guarded by it, so an empty
+        // sequence is still absent: `empty[]^($)` is undefined.
+        if (MarkedArrayNode.noCollapse(arr)) return arr.isEmpty() ? MISSING : arr;
         return switch (arr.size()) {
             case 0 -> MISSING;
             case 1 -> arr.get(0);

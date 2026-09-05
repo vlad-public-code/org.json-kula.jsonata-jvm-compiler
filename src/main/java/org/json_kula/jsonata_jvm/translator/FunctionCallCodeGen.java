@@ -17,6 +17,24 @@ final class FunctionCallCodeGen {
     private FunctionCallCodeGen() {}
 
     /** Generates a call to a user-defined variable function: {@code $myFn(args)}. */
+    /**
+     * Generates a <em>field</em> function call — the {@code g} in {@code a.g(...)}.
+     *
+     * <p>The callee is a field of the step context, so it is resolved at runtime by
+     * {@code fieldFunction}; whether the name is also a built-in is known now, and is
+     * baked in so the runtime can report T1005 instead of T1006 for a missing one.
+     * Arguments follow the ordinary calling convention: none becomes {@code MISSING}, one is
+     * passed through, several are packed.
+     */
+    static String genFieldFunctionCall(FunctionCall n, List<String> args, GenCtx ctx) {
+        String callee = "fieldFunction(" + ctx.ctxVar + ", \"" + n.name() + "\", "
+                + org.json_kula.jsonata_jvm.parser.Parser.isBuiltin(n.name()) + ")";
+        String argument = args.isEmpty() ? "MISSING"
+                : args.size() == 1 ? args.get(0)
+                : "packArgs(" + String.join(", ", args) + ")";
+        return "fn_apply(" + callee + ", " + argument + ")";
+    }
+
     static String genUserFunctionCall(Translator t, FunctionCall n, List<String> args, GenCtx ctx) {
         String arrayLiteral = args.isEmpty()
                 ? "new JsonNode[0]"
@@ -37,7 +55,10 @@ final class FunctionCallCodeGen {
             // can unpack each parameter via the multi-param inline-lambda pattern.
             // packArgs is used (not array) to avoid flattening array arguments.
             if (args.size() <= 1) {
-                return applyFn + "(" + fnRef + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
+                // No argument means the parameter is *undefined*, not JSON null: the reference
+                // has `(function($x){$exists($x)})()` false, and `$type($x)` undefined. Passing
+                // NULL here made both report a real null, which is an observable value.
+                return applyFn + "(" + fnRef + ", " + (args.isEmpty() ? "MISSING" : args.get(0)) + ")";
             } else {
                 return applyFn + "(" + fnRef + ", packArgs(" + String.join(", ", args) + "))";
             }
@@ -155,7 +176,8 @@ final class FunctionCallCodeGen {
         } else {
             // fn is an expression that evaluates to a lambdaNode (e.g. a variable holding
             // a user-defined function).  Wrap it so fn_reduce receives a JsonataLambda.
-            lambdaExpr = "(__elem -> fn_apply(" + fnArg.accept(t, ctx) + ", __elem))";
+            lambdaExpr = "(__elem -> fn_apply(reducerArityGuard(" + fnArg.accept(t, ctx)
+                    + "), __elem))";
         }
         return "fn_reduce(" + arrExpr + ", " + lambdaExpr + ", " + initExpr + ")";
     }
@@ -268,8 +290,12 @@ final class FunctionCallCodeGen {
      */
     static String inlineLambda(Translator t, Lambda lam, GenCtx ctx) {
         if (lam.params().isEmpty()) {
+            // The parameter is unused but must still be uniquely named: two zero-parameter
+            // lambdas nested in one generated method would otherwise both declare
+            // `__ignored`, which does not compile.
+            String unused = "__ignored" + ctx.state.nextId();
             String bodyExpr = lam.body().accept(t, ctx);
-            return "(__ignored -> " + bodyExpr + ")";
+            return "(" + unused + " -> " + bodyExpr + ")";
         }
         // First parameter = the element; bind remaining to MISSING in the body ctx.
         // We generate a thunk-style method for multi-param lambdas to keep
@@ -377,8 +403,9 @@ final class FunctionCallCodeGen {
         // Lambda bodies are always in tail position — their last expression is the return value.
         GenCtx tailCtx = ctx.withTailPosition(true);
         if (lam.params().isEmpty()) {
+            String unused = "__ignored" + ctx.state.nextId();
             String body = wrapIfSelfRef(lam.body()).accept(t, tailCtx);
-            return "(__ignored -> " + body + ")";
+            return "(" + unused + " -> " + body + ")";
         }
         if (lam.params().size() == 1) {
             String p = "$" + lam.params().get(0);

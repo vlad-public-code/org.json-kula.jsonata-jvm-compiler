@@ -222,6 +222,11 @@ public final class ScopeAnalyzer {
                     .anyMatch(p -> containsParentStep(p.key()) || containsParentStep(p.value()));
             case AstNode.ArrayConstructor ac     -> ac.elements().stream().anyMatch(ScopeAnalyzer::containsParentStep);
             case AstNode.PredicateExpr pe        -> containsParentStep(pe.source()) || containsParentStep(pe.predicate());
+            // A subscript folded onto a step (`a.%[0]`) leaves the `%` as that step's source.
+            // The reference's seekParent walks the path's steps and sees through the fold, so
+            // missing this case rejects a valid expression with S0217 rather than tracking a
+            // parent for it.
+            case AstNode.ArraySubscript as       -> containsParentStep(as.source()) || containsParentStep(as.index());
             case AstNode.BinaryOp bo             -> containsParentStep(bo.left()) || containsParentStep(bo.right());
             case AstNode.ConditionalExpr ce      -> containsParentStep(ce.condition()) || containsParentStep(ce.then())
                     || (ce.otherwise() != null && containsParentStep(ce.otherwise()));

@@ -35,6 +35,9 @@ public final class IsoConverter {
     // ISO string → millis
     // -------------------------------------------------------------------------
 
+    private static final java.util.regex.Pattern CALENDAR_DATE =
+            java.util.regex.Pattern.compile("(\\d{4})-(\\d{2})-(\\d{2})");
+
     public static long isoToMillis(String timestamp) throws RuntimeEvaluationException {
         // Fast path: standard ISO 8601 instant
         try {
@@ -59,6 +62,22 @@ public final class IsoConverter {
                 String[] parts = timestamp.split("-");
                 return LocalDate.of(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), 1)
                         .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+            }
+            // A calendar-date-only string. The reference does not validate the day
+            // against the month's length; it constructs a Date and lets the surplus roll
+            // over, so "2023-02-29" is 1 March 2023. A month or day outside 1-12 / 1-31
+            // still fails: there the reference leaks an invalid-Date artefact, which is
+            // recorded as a deliberate divergence rather than reproduced.
+            java.util.regex.Matcher ymd =
+                    CALENDAR_DATE.matcher(timestamp);
+            if (ymd.matches()) {
+                int year = Integer.parseInt(ymd.group(1));
+                int month = Integer.parseInt(ymd.group(2));
+                int day = Integer.parseInt(ymd.group(3));
+                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                    return LocalDate.of(year, month, 1).plusDays(day - 1L)
+                            .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+                }
             }
             return LocalDate.parse(timestamp)
                     .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();

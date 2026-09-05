@@ -70,6 +70,7 @@ public final class Optimizer {
         @Override public AstNode visitNumberLiteral(NumberLiteral n, Void c)   { return n; }
         @Override public AstNode visitBooleanLiteral(BooleanLiteral n, Void c) { return n; }
         @Override public AstNode visitNullLiteral(NullLiteral n, Void c)       { return n; }
+        @Override public AstNode visitDeferredError(DeferredError n, Void c)   { return n; }
         @Override public AstNode visitRegexLiteral(RegexLiteral n, Void c)     { return n; }
         @Override public AstNode visitContextRef(ContextRef n, Void c)         { return n; }
         @Override public AstNode visitRootRef(RootRef n, Void c)               { return n; }
@@ -300,6 +301,22 @@ public final class Optimizer {
             return steps.equals(n.steps()) ? n : new ChainExpr(steps);
         }
 
+        /**
+         * Whether {@code node} is, or is a path headed by, an array constructor — including one
+         * carrying {@code [...]} stages, since a stage does not change what the step is.
+         * {@code ([1,2][0]).$} is 1 where {@code [1,2][0].$} is undefined, so the parentheses
+         * around a staged head are as load-bearing as those around a bare one.
+         */
+        private static boolean headedByArrayConstructor(AstNode node) {
+            if (node instanceof PathExpr pe && !pe.steps().isEmpty()) {
+                return headedByArrayConstructor(pe.steps().get(0));
+            }
+            if (node instanceof ArrayConstructor) return true;
+            if (node instanceof PredicateExpr pe) return headedByArrayConstructor(pe.source());
+            if (node instanceof ArraySubscript as) return headedByArrayConstructor(as.source());
+            return false;
+        }
+
         @Override
         public AstNode visitParenthesized(Parenthesized n, Void c) {
             // The Parenthesized wrapper only exists to suppress path-step subscript
@@ -313,6 +330,15 @@ public final class Optimizer {
             // inadvertently reassign outer-scope variables of the same name.
             AstNode inner = rewrite(n.inner());
             if (inner instanceof VariableBinding) return new Parenthesized(inner);
+            // Around an array constructor the parentheses are load-bearing, and stripping them
+            // erases the distinction this whole area rests on. Only a *bare* `[...]` path step is
+            // a constructor value that neither flattens nor collapses: `nums.[1,2]` is
+            // [[1,2],[1,2],[1,2]] where `nums.([1,2])` is [1,2,1,2,1,2]. The same goes for a
+            // sub-path led by one — `nums.([1,2].$)` is six numbers, `nums.[1,2].$` is three
+            // arrays — and for the head short-circuit `([]).x` does not get.
+            if (inner instanceof ArrayConstructor || headedByArrayConstructor(inner)) {
+                return new Parenthesized(inner);
+            }
             return inner;
         }
 
@@ -403,9 +429,15 @@ public final class Optimizer {
             if (numFold != null) return numFold;
 
             // --- String identity ---
+            // `x & ""` is only the identity when x is *already* a string: `&` stringifies,
+            // so `5 & ""` is "5" and `true & ""` is "true". Dropping the concat turned
+            // every such expression into its unconverted operand — the acceptance suite
+            // never concatenates a non-string with "", so this went unnoticed.
             if ("&".equals(op)) {
-                if (left  instanceof StringLiteral sl && sl.value().isEmpty()) return right;
-                if (right instanceof StringLiteral sl && sl.value().isEmpty()) return left;
+                if (left  instanceof StringLiteral sl && sl.value().isEmpty()
+                        && right instanceof StringLiteral) return right;
+                if (right instanceof StringLiteral sr && sr.value().isEmpty()
+                        && left instanceof StringLiteral) return left;
             }
             return null;
         }

@@ -96,16 +96,31 @@ final class UrlCodec {
         }
     }
 
-    /** RFC 3986 unreserved characters: {@code A-Za-z0-9 - _ . ~} */
+    /**
+     * The characters {@code encodeURIComponent} leaves alone:
+     * {@code A-Za-z0-9} and {@code - _ . ~ ! * ' ( )}.
+     *
+     * <p>This is JavaScript's set, not RFC 3986's unreserved set. The four RFC-reserved
+     * sub-delimiters {@code ! * ' ( )} are <em>not</em> escaped by
+     * {@code encodeURIComponent}, so treating them as reserved made
+     * {@code $encodeUrlComponent("Hello, World!")} end in {@code %21}.
+     */
     static boolean isUnreserved(int c) {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                || c == '-' || c == '_' || c == '.' || c == '~';
+                || c == '-' || c == '_' || c == '.' || c == '~'
+                || c == '!' || c == '*' || c == '\'' || c == '(' || c == ')';
     }
 
-    /** RFC 3986 reserved characters (kept by {@code $encodeUrl}, encoded by {@code $encodeUrlComponent}). */
+    /**
+     * The characters {@code encodeURI} additionally leaves alone, on top of
+     * {@link #isUnreserved}: {@code # $ & + , / : ; = ? @}.
+     *
+     * <p>{@code [} and {@code ]} are deliberately absent — {@code encodeURI} escapes them,
+     * even though RFC 3986 lists them as reserved.
+     */
     static boolean isReserved(int c) {
-        return c == ':' || c == '/' || c == '?' || c == '#' || c == '[' || c == ']'
-                || c == '@' || c == '!' || c == '$' || c == '&' || c == '\''
-                || c == '(' || c == ')' || c == '*' || c == '+' || c == ',' || c == ';' || c == '=';
+        return c == ':' || c == '/' || c == '?' || c == '#'
+                || c == '@' || c == '$' || c == '&'
+                || c == '+' || c == ',' || c == ';' || c == '=';
     }
 }

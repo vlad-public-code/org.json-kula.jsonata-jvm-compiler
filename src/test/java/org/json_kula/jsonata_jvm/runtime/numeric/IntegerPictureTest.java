@@ -18,33 +18,6 @@ import static org.junit.jupiter.api.Assertions.*;
 class IntegerPictureTest {
 
     // =========================================================================
-    // ordinalSuffix
-    // =========================================================================
-
-    @Test void ordinalSuffix_1()  { assertEquals("st", IntegerPicture.ordinalSuffix(1)); }
-    @Test void ordinalSuffix_2()  { assertEquals("nd", IntegerPicture.ordinalSuffix(2)); }
-    @Test void ordinalSuffix_3()  { assertEquals("rd", IntegerPicture.ordinalSuffix(3)); }
-    @Test void ordinalSuffix_4()  { assertEquals("th", IntegerPicture.ordinalSuffix(4)); }
-    @Test void ordinalSuffix_11() { assertEquals("th", IntegerPicture.ordinalSuffix(11)); }
-    @Test void ordinalSuffix_12() { assertEquals("th", IntegerPicture.ordinalSuffix(12)); }
-    @Test void ordinalSuffix_13() { assertEquals("th", IntegerPicture.ordinalSuffix(13)); }
-    @Test void ordinalSuffix_21() { assertEquals("st", IntegerPicture.ordinalSuffix(21)); }
-
-    /** Regression: negative -1 was returning "th" instead of "st" before Math.abs fix. */
-    @Test void ordinalSuffix_negative_1st() {
-        assertEquals("st", IntegerPicture.ordinalSuffix(-1));
-    }
-
-    @Test void ordinalSuffix_negative_2nd() {
-        assertEquals("nd", IntegerPicture.ordinalSuffix(-2));
-    }
-
-    /** -11 must remain "th" (the 11–13 exception applies to absolute value). */
-    @Test void ordinalSuffix_negative_11th() {
-        assertEquals("th", IntegerPicture.ordinalSuffix(-11));
-    }
-
-    // =========================================================================
     // toRoman
     // =========================================================================
 
@@ -59,12 +32,17 @@ class IntegerPictureTest {
         assertEquals("", IntegerPicture.toRoman(0));
     }
 
-    @Test void toRoman_negative_throws() {
-        assertThrows(RuntimeEvaluationException.class, () -> IntegerPicture.toRoman(-1));
+    /**
+      * The sign never reaches toRoman: {@code format} strips it and prepends it to the
+      * result, so {@code $formatInteger(-1, "I")} is "-I" in the reference.
+      */
+    @Test void toRoman_negative_is_empty() {
+        assertEquals("", IntegerPicture.toRoman(-1));
     }
 
-    @Test void toRoman_too_large_throws() {
-        assertThrows(RuntimeEvaluationException.class, () -> IntegerPicture.toRoman(4_000_000));
+    /** Above 3,999 the reference simply repeats M; there is no upper bound. */
+    @Test void toRoman_beyond_3999_repeats_m() {
+        assertEquals("M".repeat(4000), IntegerPicture.toRoman(4_000_000));
     }
 
     // =========================================================================
@@ -90,8 +68,9 @@ class IntegerPictureTest {
     @Test void toAlpha_27() { assertEquals("AA", IntegerPicture.toAlpha(27, true)); }
     @Test void toAlpha_lower() { assertEquals("a", IntegerPicture.toAlpha(1, false)); }
 
-    @Test void toAlpha_zero_throws() {
-        assertThrows(RuntimeEvaluationException.class, () -> IntegerPicture.toAlpha(0, true));
+    /** The reference's loop simply does not run for zero: $formatInteger(0, "a") is "". */
+    @Test void toAlpha_zero_is_empty() {
+        assertEquals("", IntegerPicture.toAlpha(0, true));
     }
 
     @Test void parseAlpha_A()  { assertEquals(1L,  IntegerPicture.parseAlpha("A")); }
@@ -99,8 +78,12 @@ class IntegerPictureTest {
     @Test void parseAlpha_AA() { assertEquals(27L, IntegerPicture.parseAlpha("AA")); }
     @Test void parseAlpha_lower() { assertEquals(1L, IntegerPicture.parseAlpha("a")); }
 
-    @Test void parseAlpha_invalid_char_throws() {
-        assertThrows(RuntimeEvaluationException.class, () -> IntegerPicture.parseAlpha("1"));
+    /**
+      * $parseInteger does not validate: the reference runs the picture's parse function
+      * over whatever it is given, so "1" against an "A" picture is the offset -15.
+      */
+    @Test void parseAlpha_invalid_char_is_unvalidated() throws Exception {
+        assertEquals(-15.0, IntegerPicture.parse("1", "A"));
     }
 
     // =========================================================================
@@ -113,37 +96,50 @@ class IntegerPictureTest {
         assertEquals("-1,234", IntegerPicture.format(-1234, "#,##0"));
     }
 
+    /** The sign is a literal "-" prefix for every primary format, words included. */
     @Test void format_negative_word() {
-        assertEquals("minus one", IntegerPicture.format(-1, "w"));
+        assertEquals("-one", IntegerPicture.format(-1, "w"));
     }
 
     // =========================================================================
     // format — ordinal
     // =========================================================================
 
+    /**
+      * A picture with only optional digits has no mandatory digit, so it is a "numbering
+      * sequence" — implementation-defined, and unsupported by the reference. "#;o" is
+      * therefore D3130, not "1st"; the ordinal pictures that work are "1;o", "01;o" and
+      * the like.
+      */
+    @Test void format_ordinal_optional_digits_only_is_D3130() {
+        RuntimeEvaluationException e = assertThrows(RuntimeEvaluationException.class,
+                () -> IntegerPicture.format(1, "#;o"));
+        assertEquals("D3130", e.getErrorCode());
+    }
+
     @Test void format_ordinal_1st() {
-        assertEquals("1st", IntegerPicture.format(1, "#;o"));
+        assertEquals("1st", IntegerPicture.format(1, "1;o"));
     }
 
     @Test void format_ordinal_2nd() {
-        assertEquals("2nd", IntegerPicture.format(2, "#;o"));
+        assertEquals("2nd", IntegerPicture.format(2, "1;o"));
     }
 
     @Test void format_ordinal_3rd() {
-        assertEquals("3rd", IntegerPicture.format(3, "#;o"));
+        assertEquals("3rd", IntegerPicture.format(3, "1;o"));
     }
 
     @Test void format_ordinal_11th() {
-        assertEquals("11th", IntegerPicture.format(11, "#;o"));
+        assertEquals("11th", IntegerPicture.format(11, "1;o"));
     }
 
-    /** Regression: was "-1th" because ordinalSuffix(-1 % 10) == -1 matched "default". */
+    /** The suffix is chosen from the magnitude's digits; the sign is prepended after. */
     @Test void format_ordinal_neg1st() {
-        assertEquals("-1st", IntegerPicture.format(-1, "#;o"));
+        assertEquals("-1st", IntegerPicture.format(-1, "1;o"));
     }
 
     @Test void format_ordinal_neg11th() {
-        assertEquals("-11th", IntegerPicture.format(-11, "#;o"));
+        assertEquals("-11th", IntegerPicture.format(-11, "1;o"));
     }
 
     // =========================================================================

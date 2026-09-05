@@ -36,6 +36,9 @@ final class PathCodeGen {
         // final result in forceArray() to prevent singleton collapsing.
         AstNode firstStep = steps.get(0);
         boolean forceArr = firstStep instanceof ForceArray;
+        // `[]` written on the head step itself, as opposed to around the whole path. Only a
+        // consarray head can tell the two apart; see the staged-head branch below.
+        boolean forceArrayOnHead = forceArr;
         if (forceArr) firstStep = ((ForceArray) firstStep).source();
         // Also check if the first step is a predicate whose source is a ForceArray:
         // e.g. Phone[][type="mobile"].number — the predicate source is ForceArray(Phone)
@@ -102,10 +105,17 @@ final class PathCodeGen {
             return visitPathExpr(t, new PathExpr(newSteps), ctx);
         }
 
-        // If the path has @$var.FieldRef cross-join AND uses %, inject the initial
-        // context into parentVars as root so that %.% can navigate back to root.
-        if (hasCrossJoinFieldRef(steps) && needsParentTracking(steps, 0)
-                && ctx.parentVars.isEmpty()) {
+        // A `%` consumes one parent level per preceding *name* step. Parent tracking is set up
+        // by the steps compiled in compilePathSteps, which starts at index 1 — so a `%` that
+        // reaches back past the head has no level to land on. The level above the head is the
+        // path's own input: the reference's seekParent walks off the front of the step list into
+        // the enclosing context for exactly this, which is what makes `a.%` the document root.
+        //
+        // Only a name-like head consumes a level, so `$.%` and `$$.%` stay S0217 — a variable
+        // step is not a name. (The cross-join arm is the older, narrower case: @$v.Field needs
+        // the same seed so that %.% can reach the root.)
+        if (needsParentTracking(steps, 0) && ctx.parentVars.isEmpty()
+                && (hasCrossJoinFieldRef(steps) || isNameLikeStep(firstStep))) {
             ctx = ctx.withParents(new ArrayList<>(List.of(ctx.ctxVar)));
         }
 
@@ -148,13 +158,103 @@ final class PathCodeGen {
             }
         }
 
+        // A stage on a trailing `%` step applies to every parent at once. `%` puts the path into
+        // tuple mode, and evaluateTupleStep expands the whole stream before running its stages, so
+        // `o.p.v.%[0]` is the first of all the parents rather than the first of each. Steps here
+        // compile to nested per-element lambdas, so "all at once" means outside the whole path —
+        // which is only expressible when the stage is the last step. A stage with steps after it
+        // stays per element, as it was before: for the boolean predicates that reach it
+        // (`Account.Order.Product.Price.%[%.OrderID=…].SKU`) the two agree.
+        AstNode lastStep = steps.get(steps.size() - 1);
+        AstNode lastStageSource = lastStep instanceof PredicateExpr lpe && lpe.stage() ? lpe.source()
+                : lastStep instanceof ArraySubscript las ? las.source()
+                : null;
+        if (steps.size() > 1 && lastStageSource instanceof ParentStep) {
+            List<AstNode> hoisted = new ArrayList<>(steps);
+            hoisted.set(hoisted.size() - 1, new ParentStep());
+            String base = visitPathExpr(t, new PathExpr(hoisted), ctx);
+            if (lastStep instanceof ArraySubscript as) {
+                return "subscript(" + base + ", " + as.index().accept(t, ctx) + ")";
+            }
+            PredicateExpr pe = (PredicateExpr) lastStep;
+            if (pe.predicate() instanceof RangeExpr re) {
+                return "rangeSubscript(" + base + ", " + re.from().accept(t, ctx)
+                        + ", " + re.to().accept(t, ctx) + ")";
+            }
+            String elemVar = "__el" + ctx.state.nextId();
+            String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
+            String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+            return filterFn + "(" + base + ", " + elemVar + " -> " + predExpr + ")";
+        }
+
+        // A path headed by an explicit array constructor short-circuits when that
+        // constructor is empty: the remaining steps are not evaluated and the empty array
+        // is the result, uncollapsed. See JsonataRuntime.consarrayHead. The test is on the
+        // step's AST shape, matching the reference, which flags only a literal `[` as the
+        // first step — so `([]).x` (parenthesised), `nums.[].x` (not first) and `[][0].x`
+        // (a subscript, a different node) are all unaffected.
+        boolean consarrayHead = isFlaggedPathHead(firstStep) && steps.size() > 1;
+
         // Use recursive compile to handle ContextBinding, PositionBinding, ParentStep.
-        String result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        // Where the constructor's emptiness is decidable now, decide it now: the guard is
+        // only needed when it genuinely depends on the data.
+        ArrayConstructor bareHead = firstStep instanceof ArrayConstructor ac ? ac : null;
+        String result;
+        if (consarrayHead && bareHead == null && isStagedConstructorHead(firstStep)) {
+            // A head constructor carrying a `[...]` stage. The short-circuit hands the *value* the
+            // stage produced to the remaining steps, which is no longer an array — see
+            // JsonataRuntime.consarrayStagedHead for what the next step then makes of it.
+            //
+            // A `[]` written on the head step, rather than on the path, keeps that value a
+            // sequence: `[1,2][0][].$` is [1] where `[1,2][0].$[]` is undefined. That is the only
+            // place per-step keepArray is observable, and the two parse to different shapes —
+            // a ForceArray inside the step list, versus one around the whole path.
+            String headExpr = forceArrayOnHead ? "forceArray(" + expr + ")" : expr;
+            String headVar = "__ch" + ctx.state.nextId();
+            String rest = compilePathSteps(t, steps, startFrom, headVar, ctx);
+            result = "consarrayStagedHead(" + headExpr + ", " + headVar + " -> " + rest + ")";
+        } else if (consarrayHead && bareHead != null && bareHead.elements().isEmpty()) {
+            // Always empty. The path is the empty array; it is a constructor value, so it does not
+            // collapse — `[].[1]` is [] even though the path ends in a constructor step.
+            //
+            // The unreachable steps are still compiled, and the result thrown away. Skipping them
+            // would turn `[].%` from an error into [], because the "% with no parent" check would
+            // never run: the reference resolves ancestry in processAST and rejects it whether or
+            // not the path is ever evaluated.
+            compilePathSteps(t, steps, startFrom, expr, ctx);
+            result = "consArrayOf()";
+        } else if (consarrayHead && bareHead != null && isProvablyNonEmpty(bareHead)) {
+            // Never empty, so the guard could never fire. Emitting the ordinary chain
+            // keeps the generated code byte-identical to what it was before the
+            // short-circuit existed — which is what makes `[1,2,3].x` cost nothing.
+            result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        } else if (consarrayHead) {
+            // Emptiness depends on the data (`[nope].x`, `[nums[false]].x`), or the head
+            // is a sort wrapping the constructor. Decide at runtime.
+            String headVar = "__ch" + ctx.state.nextId();
+            String rest = compilePathSteps(t, steps, startFrom, headVar, ctx);
+            result = "consarrayHead(" + expr + ", " + headVar + " -> " + rest + ")";
+        } else {
+            result = compilePathSteps(t, steps, startFrom, expr, ctx);
+        }
         // When a GroupByExpr(ContextRef) appears as the last step and the path contains
         // binding operators (@$var / #$var), each iteration of the binding loop produces
         // a separate GroupBy object.  Merge all per-iteration objects into one.
         if (pathEndsWithGroupByAfterBinding(steps)) {
             result = "mergeGroupByObjects(" + result + ")";
+        }
+        // A constructor step leaves its sequence uncollapsed so that later steps see it whole, and
+        // a `$` step rebinds the context to itself and so compiles to nothing. The end of the path
+        // is where a sequence of one becomes its element — and where a marked array, being a value
+        // rather than a sequence, is handed back as it is.
+        //
+        // `$` is a step for all that it compiles to nothing: the reference evaluates it, gets a
+        // one-element sequence and collapses it, which is why `[1].$` is 1. A constructor before it
+        // has already produced the sequence, so `a.[1].$` collapses that same sequence once and is
+        // [1] — the cons array — not 1.
+        AstNode finalStep = steps.get(steps.size() - 1);
+        if (finalStep instanceof ArrayConstructor || finalStep instanceof ContextRef) {
+            result = "unwrap(" + result + ")";
         }
         return forceArr ? "forceArray(" + result + ")" : result;
     }
@@ -214,6 +314,19 @@ final class PathCodeGen {
      * Used to decide whether an outer PredicateExpr or SortExpr that wraps a path
      * with binding steps needs to be unfolded so the bound variables remain in scope.
      */
+    /**
+     * Whether the path becomes a tuple stream — {@code @$v}, {@code #$i}, or a {@code %} anywhere,
+     * since resolveAncestry marks the ancestor step {@code tuple: true} and every step from there
+     * on is evaluated by evaluateTupleStep.
+     */
+    private static boolean isTupleStream(List<AstNode> steps) {
+        for (AstNode step : steps) {
+            if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
+            if (ScopeAnalyzer.containsParentStep(step)) return true;
+        }
+        return false;
+    }
+
     private static boolean hasAnyBinding(List<AstNode> steps) {
         for (AstNode step : steps) {
             if (step instanceof ContextBinding || step instanceof PositionBinding) return true;
@@ -237,6 +350,41 @@ final class PathCodeGen {
 
         String positionBound = compilePositionBindingStep(t, steps, from, prevExpr, ctx);
         if (positionBound != null) return positionBound;
+
+        // A stage written on a `%` step. `%` puts the path into tuple mode — resolveAncestry marks
+        // the ancestor step `tuple: true` — and evaluateTupleStep expands the whole stream before
+        // running its stages, so the stage applies to every parent at once rather than to each
+        // one separately: `o.p.v.%[0]` is the first of all the parents, not the first of each.
+        AstNode stageSource = step instanceof PredicateExpr spe && spe.stage() ? spe.source()
+                : step instanceof ArraySubscript sas ? sas.source()
+                : null;
+        if (stageSource instanceof ParentStep) {
+            if (ctx.parentVars.isEmpty()) {
+                throw new RuntimeTranslatorException("S0217", "Parent operator % used with no parent context in path");
+            }
+            String parentExpr = ctx.parentVars.get(ctx.parentVars.size() - 1);
+            GenCtx popped = ctx.withParents(ctx.parentVars.size() > 1
+                    ? new ArrayList<>(ctx.parentVars.subList(0, ctx.parentVars.size() - 1))
+                    : new ArrayList<>());
+            String guardVar = "__gu" + ctx.state.nextId();
+            String upExpr = "mapStep(" + prevExpr + ", " + guardVar + " -> " + parentExpr + ")";
+            String staged;
+            if (step instanceof ArraySubscript as) {
+                staged = "subscript(" + upExpr + ", " + as.index().accept(t, popped) + ")";
+            } else {
+                PredicateExpr pe = (PredicateExpr) step;
+                if (pe.predicate() instanceof RangeExpr re) {
+                    staged = "rangeSubscript(" + upExpr + ", " + re.from().accept(t, popped)
+                            + ", " + re.to().accept(t, popped) + ")";
+                } else {
+                    String elemVar = "__el" + ctx.state.nextId();
+                    String predExpr = pe.predicate().accept(t, popped.withCtx(elemVar));
+                    String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+                    staged = filterFn + "(" + upExpr + ", " + elemVar + " -> " + predExpr + ")";
+                }
+            }
+            return compilePathSteps(t, steps, from + 1, staged, popped);
+        }
 
         if (step instanceof ParentStep) {
             // Navigate up one level in the parent vars stack.
@@ -320,6 +468,14 @@ final class PathCodeGen {
             return "mapStep(" + prevExpr + ", " + dummyVar + " -> " + restExpr + ")";
         }
 
+        // A tuple stream spreads a step's array result into one tuple per element, with no cons
+        // check — evaluateTupleStep's `for (bb in res)`. So in a path that has become a tuple
+        // stream (`%`, `@$v`, `#$v`) a constructor step flattens, exactly as a parenthesised one
+        // does: `Account.Order.Product.[name, %.OrderID]` is a flat list of names and order ids.
+        if (step instanceof ArrayConstructor && isTupleStream(steps)) {
+            step = new Parenthesized(step);
+        }
+
         String newExpr = applyStep(t, prevExpr, step, ctx);
         return compilePathSteps(t, steps, from + 1, newExpr, ctx);
     }
@@ -357,6 +513,26 @@ final class PathCodeGen {
         return false;
     }
 
+    /**
+     * Whether {@code step} is a step the reference's {@code seekParent} treats as consuming one
+     * ancestry level — a name or a wildcard. Everything else (a variable, a constructor, a block)
+     * leaves the level unconsumed, which is what makes {@code $.%} an S0217 while {@code a.%} is
+     * the enclosing context.
+     *
+     * <p>A folded {@code [...]} stage does not change the step's kind, so it is looked through.
+     */
+    private static boolean isNameLikeStep(AstNode step) {
+        return switch (step) {
+            case FieldRef ignored       -> true;
+            case StringLiteral ignored  -> true;   // a quoted field name at the head of a path
+            case WildcardStep ignored   -> true;
+            case DescendantStep ignored -> true;
+            case ArraySubscript as      -> isNameLikeStep(as.source());
+            case PredicateExpr pe       -> isNameLikeStep(pe.source());
+            default                     -> false;
+        };
+    }
+
     /** Returns true if {@code node} is a PathExpr whose last step is an ArrayConstructor. */
     static boolean pathEndsWithArrayConstructor(AstNode node) {
         if (node instanceof AstNode.PathExpr pe) {
@@ -392,10 +568,18 @@ final class PathCodeGen {
             case FieldRef fr -> {
                 yield "field(" + prevExpr + ", " + ClassAssembler.javaString(fr.name()) + ")";
             }
-            case WildcardStep ws   -> "wildcard(" + prevExpr + ")";
+            case WildcardStep ws   -> "wildcardStep(" + prevExpr + ")";
             case DescendantStep ds -> "descendant(" + prevExpr + ")";
-            case ContextRef cr     -> prevExpr;
+            case ContextRef cr     -> "contextStep(" + prevExpr + ")";
             case RootRef rr        -> ctx.rootVar;
+            // A `[...]` the parser folded onto this step is a per-element stage: the reference
+            // runs it inside the per-input-item loop, on that item's own step result. For a
+            // navigation step that is indistinguishable from filtering the collected sequence —
+            // each source element's results already form one group — but for a step whose
+            // per-element result is one value or one un-flattened array it is not:
+            // `objs.[1,2][$>1]` filters [1,2] twice, giving [2,2], where filtering the collected
+            // [[1,2],[1,2]] compares arrays and raises T2010.
+            case PredicateExpr pe when pe.stage() -> stagedStep(t, prevExpr, step, ctx);
             case PredicateExpr pe  -> {
                 // Range subscript: arr[[from..to]] — select elements by index range
                 if (pe.predicate() instanceof RangeExpr re) {
@@ -408,22 +592,19 @@ final class PathCodeGen {
                 String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
                 yield "dynamicFilter(" + prevExpr + ", " + elemVar + " -> " + predExpr + ")";
             }
-            case ArraySubscript as -> {
-                // Path-step subscript — apply per-element via mapStep so that
-                // a.b[n] maps [n] over each element rather than the whole sequence.
-                String tmpCtx  = "__c" + ctx.state.nextId();
-                String srcExpr = as.source().accept(t, ctx.withCtx(tmpCtx));
-                String idxExpr = as.index().accept(t, ctx.withCtx(tmpCtx));
-                yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> subscript(" + srcExpr + ", " + idxExpr + "))";
-            }
+            // Path-step subscript — apply per-element via mapStep so that a.b[n] maps [n] over
+            // each element rather than the whole sequence.
+            case ArraySubscript as -> stagedStep(t, prevExpr, step, ctx);
             case ArrayConstructor ac -> {
                 // e.g. Email.[address] — map per element.
                 // In preserve mode ($.[arr][] pattern): keep each result array as a single item.
                 // In default mode ($.[arr]): unwrap collapses a single-element outer array.
                 String tmpCtx  = "__c" + ctx.state.nextId();
                 String stepExpr = ac.accept(t, ctx.withCtx(tmpCtx).withInArrayConstructorStep());
-                String call = "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
-                yield ctx.arrayConstructorPreserve ? call : "unwrap(" + call + ")";
+                // No collapse here: the step's result is a sequence of constructor values, and
+                // whether a sequence of one collapses is decided at the end of the path
+                // (visitPathExpr) — after any later step, `[]` or sort has had its say.
+                yield "mapConstructorStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
             case ObjectConstructor oc -> {
                 // e.g. Phone.{type: number} — map per element, collect without flattening.
@@ -468,6 +649,68 @@ final class PathCodeGen {
                 yield "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + stepExpr + ")";
             }
         };
+    }
+
+    /**
+     * Compiles a step carrying one or more folded {@code [...]} stages.
+     *
+     * <p>The reference runs a step's stages inside its per-input-item loop, on that item's own
+     * step result, and it runs them in the order they were written. Both matter: a step whose
+     * per-element result is a single value or one un-flattened array gives a different answer
+     * from filtering the collected sequence, and a chain like {@code Product[p1][p2]} has to
+     * apply p1 before p2 on the same per-element value.
+     *
+     * <p>A {@code %} inside a stage reaches the step's own input item — {@code Product[%.OrderID]}
+     * is the Order — so the input item is pushed as a parent level for the stage expressions only,
+     * never for the step's own source.
+     */
+    private static String stagedStep(Translator t, String prevExpr, AstNode step, GenCtx ctx) {
+        List<AstNode> stages = new ArrayList<>();
+        AstNode base = peelStages(step, stages);
+
+        String tmpCtx  = "__c" + ctx.state.nextId();
+        GenCtx stepCtx = ctx.withCtx(tmpCtx);
+        String expr    = stepExpr(t, base, stepCtx);
+
+        GenCtx stageCtx = stepCtx;
+        if (stages.stream().anyMatch(s -> ScopeAnalyzer.containsParentStep(stagePredicate(s)))) {
+            List<String> parents = new ArrayList<>(ctx.parentVars);
+            parents.add(tmpCtx);
+            stageCtx = stepCtx.withParents(parents);
+        }
+        for (AstNode stage : stages) expr = applyStage(t, expr, stage, stageCtx);
+        return "mapStep(" + prevExpr + ", " + tmpCtx + " -> " + expr + ")";
+    }
+
+    /** Peels a step's folded stages, outermost last, and returns the step they sit on. */
+    private static AstNode peelStages(AstNode step, List<AstNode> stagesOut) {
+        AstNode inner = step instanceof PredicateExpr pe && pe.stage() ? pe.source()
+                : step instanceof ArraySubscript as ? as.source()
+                : null;
+        if (inner == null) return step;
+        AstNode base = peelStages(inner, stagesOut);
+        stagesOut.add(step);
+        return base;
+    }
+
+    /** The expression a stage filters or indexes by. */
+    private static AstNode stagePredicate(AstNode stage) {
+        return stage instanceof ArraySubscript as ? as.index() : ((PredicateExpr) stage).predicate();
+    }
+
+    private static String applyStage(Translator t, String srcExpr, AstNode stage, GenCtx ctx) {
+        if (stage instanceof ArraySubscript as) {
+            return "subscript(" + srcExpr + ", " + as.index().accept(t, ctx) + ")";
+        }
+        PredicateExpr pe = (PredicateExpr) stage;
+        if (pe.predicate() instanceof RangeExpr re) {
+            return "rangeSubscript(" + srcExpr + ", " + re.from().accept(t, ctx)
+                    + ", " + re.to().accept(t, ctx) + ")";
+        }
+        String elemVar  = "__el" + ctx.state.nextId();
+        String predExpr = pe.predicate().accept(t, ctx.withCtx(elemVar));
+        String filterFn = isStaticBooleanPredicate(pe.predicate()) ? "filter" : "dynamicFilter";
+        return filterFn + "(" + srcExpr + ", " + elemVar + " -> " + predExpr + ")";
     }
 
     static String visitPredicateExpr(Translator t, PredicateExpr n, GenCtx ctx) {
@@ -847,5 +1090,63 @@ final class PathCodeGen {
         } finally {
             ctx.state.popScope();
         }
+    }
+
+    /**
+     * Whether the path's first step is an array constructor the parser flagged as a path
+     * head — see {@link org.json_kula.jsonata_jvm.parser.ast.AstNode.ArrayConstructor}.
+     * The flag, not the node type, is the test: the optimizer unwraps the
+     * {@code Parenthesized} that distinguishes {@code ([]).x} from {@code [].x}, so by
+     * here both look alike.
+     */
+    private static boolean isFlaggedPathHead(AstNode step) {
+        if (step instanceof ArrayConstructor ac) return ac.pathHead();
+        if (step instanceof SortExpr se && se.source() instanceof ArrayConstructor inner) {
+            return inner.pathHead();
+        }
+        // A `[...]` stage does not change what the step is, so a staged constructor is still the
+        // flagged head — which is what makes `[1,2][0].$` undefined rather than 1.
+        return isStagedConstructorHead(step);
+    }
+
+    /** A head array constructor carrying one or more {@code [...]} stages. */
+    private static boolean isStagedConstructorHead(AstNode step) {
+        AstNode inner = step instanceof PredicateExpr pe ? pe.source()
+                : step instanceof ArraySubscript as ? as.source()
+                : null;
+        if (inner == null) return false;
+        return inner instanceof ArrayConstructor ac ? ac.pathHead() : isStagedConstructorHead(inner);
+    }
+
+    /**
+     * Whether an array constructor is guaranteed to produce at least one element.
+     *
+     * <p>A constructor drops elements that evaluate to nothing, so {@code [nope]} is empty
+     * — but an element that always yields a value cannot be dropped, and one such element
+     * is enough. Where that holds the emptiness short-circuit can never fire, so the guard
+     * is elided and the generated code is identical to what it was before the
+     * short-circuit existed.
+     *
+     * <p>Conservative by construction: an unrecognised node type is assumed droppable, so
+     * the guard is kept. A false positive here would silently change behaviour; a false
+     * negative only costs one array-emptiness test.
+     */
+    private static boolean isProvablyNonEmpty(ArrayConstructor constructor) {
+        for (AstNode element : constructor.elements()) {
+            if (alwaysProducesAValue(element)) return true;
+        }
+        return false;
+    }
+
+    /** Node types that always evaluate to a value, never to an absent one. */
+    private static boolean alwaysProducesAValue(AstNode node) {
+        return node instanceof StringLiteral
+                || node instanceof NumberLiteral
+                || node instanceof BooleanLiteral
+                || node instanceof NullLiteral
+                || node instanceof RegexLiteral
+                || node instanceof ArrayConstructor
+                || node instanceof ObjectConstructor
+                || node instanceof Lambda;
     }
 }

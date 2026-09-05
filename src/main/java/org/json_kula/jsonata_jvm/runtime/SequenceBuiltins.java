@@ -39,42 +39,52 @@ final class SequenceBuiltins {
         }
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
-        if (list.isEmpty()) return arg;
-        // When no key function, check that elements are sortable primitives
+        // Nothing to compare. The reference's fn.sort returns early on `arr.length <= 1`, so it
+        // never evaluates a key and never reports a bad one: `[{"k":true}]^(k)` and
+        // `$sort([{"a":1}])` both succeed, while the two-element forms of each still throw.
+        // Validating a lone element made working expressions fail.
+        if (list.size() <= 1) return arg;
+        // Without a comparator the default one compares elements directly, so anything it
+        // cannot order is D3070 — including a number/string mix, which belongs to $sort
+        // and not to the `^(key)` order-by operator's T2007/T2008.
         if (keyFn == null) {
+            boolean sawNumber = false, sawString = false;
             for (JsonNode elem : list) {
-                if (elem.isObject() || elem.isArray()) {
-                    throw new RuntimeEvaluationException("D3070", "$sort() cannot sort arrays of objects without a comparator function");
+                if (elem.isNumber()) sawNumber = true;
+                else if (elem.isTextual()) sawString = true;
+                else {
+                    throw new RuntimeEvaluationException("D3070",
+                            "$sort() cannot sort arrays of objects without a comparator function");
                 }
+            }
+            if (sawNumber && sawString) {
+                throw new RuntimeEvaluationException("D3070",
+                        "$sort() cannot sort a mix of numbers and strings without a comparator function");
             }
         }
 
-        // Pre-compute all key values and validate types
+        // Pre-compute all key values. Nothing is rejected here: which error a heterogeneous
+        // sort reports depends on which pair is compared first (see refOrderSort), so the scan
+        // only decides whether a throw is possible at all.
         JsonNode[] keys = new JsonNode[list.size()];
-        boolean hasNumber = false, hasString = false;
+        boolean hasNumber = false, hasString = false, hasBadKey = false;
         for (int i = 0; i < list.size(); i++) {
             JsonNode k = keyFn != null ? keyFn.apply(list.get(i)) : list.get(i);
             if (k == null || k == JsonataRuntime.MISSING) {
-                // No keyFn result / undefined: skip without error
+                // No keyFn result / undefined: sorts last, without error
                 keys[i] = JsonataRuntime.MISSING;
                 continue;
             }
-            if (k.isNull()) {
-                // null is not a valid sort key
-                throw new RuntimeEvaluationException("T2008", "The key expression in the order-by clause must evaluate to a string or a number");
-            }
-            if (k.isNumber()) {
-                hasNumber = true;
-            } else if (k.isTextual()) {
-                hasString = true;
-            } else {
-                // boolean, object, array, etc.
-                throw new RuntimeEvaluationException("T2008", "The key expression in the order-by clause must evaluate to a string or a number");
-            }
+            if (k.isNumber())       hasNumber = true;
+            else if (k.isTextual()) hasString = true;
+            else                    hasBadKey = true;   // null, boolean, object, array
             keys[i] = k;
         }
-        if (hasNumber && hasString) {
-            throw new RuntimeEvaluationException("T2007", "The items in the order-by clause must evaluate to a single type, either all string or all number");
+        // A throw is possible only when some key is unorderable, or the keys mix the two
+        // orderable types. Everywhere else — which is every real sort — the engine's own sort
+        // is used, so the faithful comparison order costs nothing.
+        if (hasBadKey || (hasNumber && hasString)) {
+            return refOrderSort(list, keys);
         }
 
         final boolean allNumbers = hasNumber;
@@ -90,9 +100,74 @@ final class SequenceBuiltins {
         List<Integer> indices = new ArrayList<>();
         for (int i = 0; i < list.size(); i++) indices.add(i);
         indices.sort(cmp);
-        ArrayNode result = NF.arrayNode();
+        ArrayNode result = NF.arrayNode(list.size());
         for (int idx : indices) result.add(list.get(idx));
+        // Sorting reorders a value; it does not turn one into a sequence. A constructor's array is
+        // still cons afterwards and a `[]`-marked one still keeps its singleton, which is why
+        // `a.[1]^(x)` and `a.b[]^($)` are both [1].
+        return MarkedArrayNode.sameMark(NF, arg, result);
+    }
+
+    /**
+     * Sorts in the comparison order the reference uses, so that a heterogeneous sort reports the
+     * error the reference reports.
+     *
+     * <p>The order-by comparator raises T2008 for a key that is neither string nor number and
+     * T2007 for two keys of different types, and the reference sorts with a top-down merge sort.
+     * Which error a bad sort reports therefore depends on <em>which pair is compared first</em>:
+     * {@code [{"q":1},1,"z"]^($)} is T2007, because the right half is sorted before the object is
+     * ever compared, while {@code [1,"z",{"q":1}]^($)} is T2008. Any other sort order — including
+     * a validating scan, which is what this used to be — gets one of them wrong, and both
+     * directions occur.
+     *
+     * <p>Only reached when the pre-scan found a throw possible, so the engine's own sort still
+     * serves every sort that can succeed.
+     */
+    private static JsonNode refOrderSort(List<JsonNode> list, JsonNode[] keys)
+            throws RuntimeEvaluationException {
+        List<Integer> indices = new ArrayList<>(list.size());
+        for (int i = 0; i < list.size(); i++) indices.add(i);
+        List<Integer> sorted = mergeSort(indices, keys);
+        ArrayNode result = NF.arrayNode(list.size());
+        for (int idx : sorted) result.add(list.get(idx));
         return result;
+    }
+
+    private static List<Integer> mergeSort(List<Integer> idx, JsonNode[] keys)
+            throws RuntimeEvaluationException {
+        if (idx.size() <= 1) return idx;
+        int middle = idx.size() / 2;
+        List<Integer> left  = mergeSort(new ArrayList<>(idx.subList(0, middle)), keys);
+        List<Integer> right = mergeSort(new ArrayList<>(idx.subList(middle, idx.size())), keys);
+        List<Integer> merged = new ArrayList<>(idx.size());
+        int li = 0, ri = 0;
+        while (li < left.size() && ri < right.size()) {
+            if (comesAfter(keys[left.get(li)], keys[right.get(ri)])) merged.add(right.get(ri++));
+            else merged.add(left.get(li++));
+        }
+        while (li < left.size())  merged.add(left.get(li++));
+        while (ri < right.size()) merged.add(right.get(ri++));
+        return merged;
+    }
+
+    /** The reference's order-by comparator: true when {@code a} sorts after {@code b}. */
+    private static boolean comesAfter(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
+        boolean aMissing = a == JsonataRuntime.MISSING;
+        boolean bMissing = b == JsonataRuntime.MISSING;
+        if (aMissing) return !bMissing;   // an absent key sorts last
+        if (bMissing) return false;
+        boolean aOk = a.isNumber() || a.isTextual();
+        boolean bOk = b.isNumber() || b.isTextual();
+        if (!aOk || !bOk) {
+            throw new RuntimeEvaluationException("T2008",
+                    "The key expression in the order-by clause must evaluate to a string or a number");
+        }
+        if (a.isNumber() != b.isNumber()) {
+            throw new RuntimeEvaluationException("T2007",
+                    "The items in the order-by clause must evaluate to a single type, either all string or all number");
+        }
+        return a.isNumber() ? a.doubleValue() > b.doubleValue()
+                            : a.textValue().compareTo(b.textValue()) > 0;
     }
 
     /**
@@ -214,7 +289,9 @@ final class SequenceBuiltins {
     static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
         fn = JsonataRuntime.deadlineGuard(fn);
-        if (JsonataRuntime.missing(arr)) return init;
+        // An absent sequence reduces to absent regardless of the initial value: there is
+        // nothing to fold the initial value into.
+        if (JsonataRuntime.missing(arr)) return JsonataRuntime.MISSING;
         // fn receives a pair array [acc, elem]; the translator unpacks this for
         // multi-param lambdas via genUnpackLambda.
         List<JsonNode> items = new ArrayList<>();

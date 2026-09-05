@@ -256,7 +256,7 @@ class NumericFunctionsTest {
     void formatNumber_unicode_digits() throws Exception {
         // {"zero-digit": "①"} → circled digit family: ①=0,②=1,…
         // 1234.5678 with "①①.①①①e①" → "①②.③④⑥e②" (coefficient 12.346, exponent 2)
-        assertEquals("\u2460\u2461.\u2462\u2463\u2465e\u2461",
+        assertEquals("\u2461\u2462.\u2463\u2464\u2466e\u2462",
                 eval("$formatNumber(1234.5678, \"\u2460\u2460.\u2460\u2460\u2460e\u2460\","
                         + "{\"zero-digit\": \"\u2460\"})").textValue());
     }
@@ -480,66 +480,68 @@ class NumericFunctionsTest {
         assertEquals("", eval("$formatInteger(0, 'I')").textValue());
     }
 
+    /** The sign is stripped, the magnitude formatted, and "-" prepended. */
     @Test
-    void formatInteger_negative_roman_throws() {
-        assertThrows(Exception.class, () -> eval("$formatInteger(-1, 'I')"));
+    void formatInteger_negative_roman() throws Exception {
+        assertEquals("-I", eval("$formatInteger(-1, 'I')").textValue());
     }
 
     @Test
     void formatInteger_negative_words() throws Exception {
-        assertEquals("minus one", eval("$formatInteger(-1, 'w')").textValue());
+        assertEquals("-one", eval("$formatInteger(-1, 'w')").textValue());
     }
 
     @Test
     void formatInteger_negative_words_titlecase() throws Exception {
         String result = eval("$formatInteger(-1, 'Ww')").textValue();
-        assertTrue(result.startsWith("Minus"), "Expected 'Minus one', got: " + result);
+        assertEquals("-One", result);
     }
 
     @Test
     void formatInteger_ordinal_1st() throws Exception {
-        assertEquals("1st", eval("$formatInteger(1, '#;o')").textValue());
+        assertEquals("1st", eval("$formatInteger(1, '1;o')").textValue());
     }
 
     @Test
     void formatInteger_ordinal_2nd() throws Exception {
-        assertEquals("2nd", eval("$formatInteger(2, '#;o')").textValue());
+        assertEquals("2nd", eval("$formatInteger(2, '1;o')").textValue());
     }
 
     @Test
     void formatInteger_ordinal_3rd() throws Exception {
-        assertEquals("3rd", eval("$formatInteger(3, '#;o')").textValue());
+        assertEquals("3rd", eval("$formatInteger(3, '1;o')").textValue());
     }
 
     @Test
     void formatInteger_ordinal_11th() throws Exception {
-        assertEquals("11th", eval("$formatInteger(11, '#;o')").textValue());
+        assertEquals("11th", eval("$formatInteger(11, '1;o')").textValue());
     }
 
     @Test
     void formatInteger_ordinal_21st() throws Exception {
-        assertEquals("21st", eval("$formatInteger(21, '#;o')").textValue());
+        assertEquals("21st", eval("$formatInteger(21, '1;o')").textValue());
     }
 
     /** Regression: was "-1th" because ordinalSuffix used n % 10 without Math.abs. */
     @Test
     void formatInteger_ordinal_negative_1st() throws Exception {
-        assertEquals("-1st", eval("$formatInteger(-1, '#;o')").textValue());
+        assertEquals("-1st", eval("$formatInteger(-1, '1;o')").textValue());
     }
 
     @Test
     void formatInteger_ordinal_negative_11th() throws Exception {
-        assertEquals("-11th", eval("$formatInteger(-11, '#;o')").textValue());
+        assertEquals("-11th", eval("$formatInteger(-11, '1;o')").textValue());
+    }
+
+    /** Zero produces no letters at all, and a negative is "-" plus the magnitude's. */
+    @Test
+    void formatInteger_alpha_zero_is_empty() throws Exception {
+        assertEquals("", eval("$formatInteger(0, 'a')").textValue());
     }
 
     @Test
-    void formatInteger_alpha_zero_throws() {
-        assertThrows(Exception.class, () -> eval("$formatInteger(0, 'a')"));
-    }
-
-    @Test
-    void formatInteger_alpha_negative_throws() {
-        assertThrows(Exception.class, () -> eval("$formatInteger(-1, 'a')"));
+    void formatInteger_alpha_negative() throws Exception {
+        assertEquals("-a", eval("$formatInteger(-1, 'a')").textValue());
     }
 
     // =========================================================================
@@ -553,9 +555,13 @@ class NumericFunctionsTest {
                 eval("$parseInteger('one million one thousand', 'w')").longValue());
     }
 
+    /**
+      * The reference's word tables have no "minus", and it does not validate its input —
+      * an unknown word makes the running total NaN, which is JSONata's undefined.
+      */
     @Test
-    void parseInteger_negative_words() throws Exception {
-        assertEquals(-5L, eval("$parseInteger('minus five', 'w')").longValue());
+    void parseInteger_negative_words_is_undefined() throws Exception {
+        assertTrue(eval("$parseInteger('minus five', 'w')").isMissingNode());
     }
 
     @Test
@@ -564,14 +570,16 @@ class NumericFunctionsTest {
         assertThrows(Exception.class, () -> eval("$parseInteger('', '#')"));
     }
 
+    /** Unparseable input is undefined, not an error: $parseInteger does not validate. */
     @Test
-    void parseInteger_invalid_roman_char_throws() {
-        assertThrows(Exception.class, () -> eval("$parseInteger('IZI', 'I')"));
+    void parseInteger_invalid_roman_char_is_undefined() throws Exception {
+        assertTrue(eval("$parseInteger('IZI', 'I')").isMissingNode());
     }
 
+    /** An alphabetic picture is unvalidated too: '1' contributes its offset from 'A'. */
     @Test
-    void parseInteger_invalid_alpha_char_throws() {
-        assertThrows(Exception.class, () -> eval("$parseInteger('1', 'A')"));
+    void parseInteger_invalid_alpha_char_is_unvalidated() throws Exception {
+        assertEquals(-15L, eval("$parseInteger('1', 'A')").longValue());
     }
 
     @Test

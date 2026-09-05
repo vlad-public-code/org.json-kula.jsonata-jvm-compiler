@@ -204,16 +204,27 @@ class OptimizerTest {
         assertEquals(new StringLiteral("hello world"), opt("\"hello\" & \" world\""));
     }
 
+    /**
+      * {@code $x & ""} is NOT the identity: {@code &} stringifies, so {@code 5 & ""} is
+      * "5" and {@code true & ""} is "true". Dropping the concat turned every such
+      * expression into its unconverted operand. The rewrite now applies only when both
+      * sides are string literals, where it is a plain constant fold.
+      */
     @Test
-    void optimize_concatEmptyStringRight_eliminated() throws ParseException {
-        // $x & ""  →  $x
-        assertEquals(new VariableRef("x"), opt("$x & \"\""));
+    void optimize_concatEmptyStringRight_kept() throws ParseException {
+        assertEquals(new BinaryOp("&", new VariableRef("x"), new StringLiteral("")),
+                opt("$x & \"\""));
     }
 
     @Test
-    void optimize_concatEmptyStringLeft_eliminated() throws ParseException {
-        // "" & $x  →  $x
-        assertEquals(new VariableRef("x"), opt("\"\" & $x"));
+    void optimize_concatEmptyStringLeft_kept() throws ParseException {
+        assertEquals(new BinaryOp("&", new StringLiteral(""), new VariableRef("x")),
+                opt("\"\" & $x"));
+    }
+
+    @Test
+    void optimize_concatEmptyStringLiterals_folded() throws ParseException {
+        assertEquals(new StringLiteral("hi"), opt("\"hi\" & \"\""));
     }
 
     @Test

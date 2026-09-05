@@ -71,6 +71,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             Map.entry("distinct",   "fn_distinct"),
             Map.entry("shuffle",    "fn_shuffle"),
             Map.entry("spread",     "fn_spread"),
+            Map.entry("clone",      "fn_clone"),
             Map.entry("merge",      "fn_merge")
     );
 
@@ -139,10 +140,14 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitNumberLiteral(NumberLiteral n, GenCtx ctx) {
         double v = n.value();
+        // Both forms are hoisted to a static field. A literal inside a predicate is evaluated once
+        // per element per evaluation, so leaving the fractional case inline meant
+        // employees[rating >= 4.5] built a fresh DoubleNode for every employee, every time. The
+        // lexer rejects out-of-range literals, so the printed value is always a valid Java double.
         if (v == Math.floor(v) && !Double.isInfinite(v) && Math.abs(v) < 1e15) {
             return ctx.state.constant("number(" + (long) v + "L)");
         }
-        return "number(" + v + ")";
+        return ctx.state.constant("number(" + v + ")");
     }
 
     @Override
@@ -153,6 +158,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     @Override
     public String visitNullLiteral(NullLiteral n, GenCtx ctx) {
         return "NULL";
+    }
+
+    @Override
+    public String visitDeferredError(DeferredError n, GenCtx ctx) {
+        return "fn_throw(\"" + n.code() + "\", \"" + n.message().replace("\"", "\\\"") + "\")";
     }
 
     @Override
@@ -240,11 +250,12 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitForceArray(ForceArray n, GenCtx ctx) {
-        // If the source path ends with an ArrayConstructor step, mapConstructorStep
-        // (preserve mode) will already return the right [[...]] structure — no
-        // forceArray wrapper needed.
-        if (PathCodeGen.pathEndsWithArrayConstructor(n.source())) {
-            return n.source().accept(this, ctx.withArrayConstructorPreserve());
+        // $lookup is the one built-in whose answer to `[]` depends on its argument: it builds a
+        // sequence for an array input and none for an object. Wrapping unconditionally would make
+        // `$lookup(a,"b")[]` [1] instead of 1.
+        if (n.source() instanceof FunctionCall fc && "lookup".equals(fc.name()) && fc.args().size() == 2) {
+            return "fn_lookup_keepArray(" + fc.args().get(0).accept(this, ctx)
+                    + ", " + fc.args().get(1).accept(this, ctx) + ")";
         }
         return "forceArray(" + n.source().accept(this, ctx) + ")";
     }
@@ -252,6 +263,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitPredicateExpr(PredicateExpr n, GenCtx ctx) {
+        String scanned = ctx.state.fusedScanResults.get(n);
+        if (scanned != null) return scanned;
         return PathCodeGen.visitPredicateExpr(this, n, ctx);
     }
 
@@ -564,10 +577,21 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      */
     private static final String UNTRANSLATED_CALLBACK = "__callback_translated_by_builtin__";
 
+    /**
+     * The argument index every {@link #CALLBACK_BUILTINS} member takes its callback in. They all
+     * read {@code n.args().get(1)}: the sequence is first, the callback second, and {@code
+     * $reduce}'s optional initial value third.
+     */
+    private static final int CALLBACK_ARG_INDEX = 1;
+
     @Override
     public String visitFunctionCall(FunctionCall n, GenCtx ctx) {
         // Arguments are never in tail position — only the call site itself may be.
         GenCtx argCtx = ctx.withTailPosition(false);
+        // Already absorbed into a fused scan over the sequence (see SequenceScanFusion): read the
+        // slot the scan wrote rather than compiling a second pass over the same elements.
+        String scanned = ctx.state.fusedScanResults.get(n);
+        if (scanned != null) return scanned;
         // Fusion: detect patterns that can skip intermediate array allocation.
         // Must check before args are compiled because fusion generates different code.
         if (!ctx.state.isLocal(n.name()) && n.args().size() == 1) {
@@ -580,10 +604,22 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         boolean callbackTranslatedByBuiltin =
                 !ctx.state.isLocal(n.name()) && CALLBACK_BUILTINS.contains(n.name());
         List<String> args = new ArrayList<>(n.args().size());
-        for (AstNode arg : n.args()) {
-            args.add(callbackTranslatedByBuiltin && arg instanceof Lambda
+        for (int i = 0; i < n.args().size(); i++) {
+            AstNode arg = n.args().get(i);
+            // Only the callback POSITION is left to the built-in's own generator. A lambda
+            // anywhere else is an ordinary argument — `$filter(function($x){$x}, [1,2])` has the
+            // arguments the wrong way round, which is a T0410 the runtime reports, not a lambda
+            // for the generator to consume. Poisoning it here made the generated class fail to
+            // compile, so a plainly wrong expression came back as a Java compilation error.
+            args.add(callbackTranslatedByBuiltin && i == CALLBACK_ARG_INDEX && arg instanceof Lambda
                     ? UNTRANSLATED_CALLBACK
                     : arg.accept(this, argCtx));
+        }
+        // `a.g(...)` written as a path step calls the FIELD g of the step context. It is
+        // resolved against the context rather than the scope, so it short-circuits both
+        // the local-variable lookup and the built-in dispatch below.
+        if (!n.isVariable()) {
+            return FunctionCallCodeGen.genFieldFunctionCall(n, args, ctx);
         }
         // Local variable bindings shadow built-in function names in JSONata.
         // If the name resolves to a local variable, call it as a user function
@@ -591,30 +627,60 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         if (ctx.state.isLocal(n.name())) {
             return FunctionCallCodeGen.genUserFunctionCall(this, n, args, ctx);
         }
+        // Context substitution, decided by the built-in's declared signature rather than
+        // per built-in: a `-` parameter is filled from the step context, and a built-in
+        // without one is called with exactly the arguments written. See BuiltinSignatures.
+        BuiltinSignatures.Normalised normalised =
+                BuiltinSignatures.normalise(n.name(), n.args(), args, ctx.ctxVar);
+        if (normalised.tooFewArguments()) {
+            return "fn_signature_error(\"" + n.name() + "\")";
+        }
+        // A wrong-typed context is T0411 only when it is the sole thing filling the
+        // signature. When arguments were also written, the reference reports T0410 about
+        // those instead — $split(12345) over a null input is T0410, not T0411 — so the
+        // context is passed through and the built-in's own validation speaks.
+        boolean contextIsTheOnlyArgument = args.isEmpty();
+        args = normalised.args();
+        if (normalised.injectedContextType() != null && contextIsTheOnlyArgument) {
+            args = new ArrayList<>(args);
+            args.set(0, "contextArg(" + args.get(0) + ", \""
+                    + normalised.injectedContextType() + "\", \"" + n.name() + "\")");
+        }
+        // The arms below that substitute the context themselves get the same check, for
+        // the same case: no argument was written, so the context is the only thing filling
+        // the slot and a wrong type is T0411 rather than T0410.
+        String signature = BuiltinSignatures.signatureOf(n.name());
+        String contextValue = ctx.ctxVar;
+        if (contextIsTheOnlyArgument && signature != null
+                && org.json_kula.jsonata_jvm.runtime.FunctionSignature.hasContextSlot(signature)) {
+            contextValue = "contextArg(" + ctx.ctxVar + ", \""
+                    + org.json_kula.jsonata_jvm.runtime.FunctionSignature.firstParamType(signature)
+                    + "\", \"" + n.name() + "\")";
+        }
         return switch (n.name()) {
             // Type coercion  (all have the '-' context-default modifier)
             case "string"          -> args.size() <= 1
-                    ? "fn_string(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")"
+                    ? "fn_string(" + ClassAssembler.ctxArg(args, contextValue) + ")"
                     : "fn_string(" + args.get(0) + ", " + args.get(1) + ")";
             case "number"          -> args.size() > 1
                     ? "fn_arity_error(\"number\", 1, " + args.size() + ")"
-                    : "fn_number(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+                    : "fn_number(" + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "boolean"         -> args.size() > 1
                     ? "fn_arity_error(\"boolean\", 1, " + args.size() + ")"
-                    : "fn_boolean(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "not"             -> "fn_not("     + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "type"            -> "fn_type("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+                    : "fn_boolean(" + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "not"             -> "fn_not("     + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "type"            -> "fn_type("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "exists"          -> args.size() != 1
                     ? "fn_arity_error(\"exists\", 1, " + args.size() + ")"
                     : "fn_exists("  + args.get(0) + ")";
             // Numeric  (floor/ceil/round/abs/sqrt all have the '-' modifier)
-            case "floor"         -> "fn_floor("  + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "ceil"          -> "fn_ceil("   + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "floor"         -> "fn_floor("  + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "ceil"          -> "fn_ceil("   + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "round"         -> args.size() <= 1
-                    ? "fn_round(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")"
+                    ? "fn_round(" + ClassAssembler.ctxArg(args, contextValue) + ")"
                     : "fn_round(" + args.get(0) + ", " + args.get(1) + ")";
-            case "abs"           -> "fn_abs("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "sqrt"          -> "fn_sqrt("   + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "abs"           -> "fn_abs("    + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "sqrt"          -> "fn_sqrt("   + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "power"         -> "fn_power("  + args.get(0) + ", " + args.get(1) + ")";
             case "random"        -> "fn_random()";
             case "formatBase"    -> args.size() == 1
@@ -628,44 +694,52 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             // String
             case "uppercase"       -> args.size() > 1
                     ? "fn_arity_error(\"uppercase\", 1, " + args.size() + ")"
-                    : "fn_uppercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+                    : "fn_uppercase("      + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "lowercase"       -> args.size() > 1
                     ? "fn_arity_error(\"lowercase\", 1, " + args.size() + ")"
-                    : "fn_lowercase("      + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "trim"            -> "fn_trim("           + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+                    : "fn_lowercase("      + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "trim"            -> "fn_trim("           + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "length"          -> args.size() > 1
                     ? "fn_arity_error(\"length\", 1, " + args.size() + ")"
                     : args.isEmpty()
-                    ? "fn_length_ctx(" + ctx.ctxVar + ")"
+                    ? "fn_length_ctx(" + contextValue + ")"
                     : "fn_length(" + args.get(0) + ")";
             case "substring"       -> args.size() > 3
                     ? "fn_arity_error(\"substring\", 3, " + args.size() + ")"
                     : args.size() == 2
                     ? "fn_substring(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_substring(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "substringBefore" -> args.size() == 1
-                    ? "fn_substringBefore_ctx(" + ctx.ctxVar + ", " + args.get(0) + ")"
+            case "substringBefore" -> args.isEmpty()
+                    ? "fn_arity_error(\"substringBefore\", 2, 0)"
+                    : args.size() == 1
+                    ? "fn_substringBefore_ctx(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_substringBefore(" + args.get(0) + ", " + args.get(1) + ")";
-            case "substringAfter"  -> args.size() == 1
-                    ? "fn_substringAfter_ctx(" + ctx.ctxVar + ", " + args.get(0) + ")"
+            case "substringAfter"  -> args.isEmpty()
+                    ? "fn_arity_error(\"substringAfter\", 2, 0)"
+                    : args.size() == 1
+                    ? "fn_substringAfter_ctx(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_substringAfter(" + args.get(0) + ", " + args.get(1) + ")";
-            case "contains"        -> args.size() == 1
-                    ? "fn_contains(" + ctx.ctxVar + ", " + args.get(0) + ")"
+            case "contains"        -> args.isEmpty()
+                    ? "fn_arity_error(\"contains\", 2, 0)"
+                    : args.size() == 1
+                    ? "fn_contains(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_contains(" + args.get(0) + ", " + args.get(1) + ")";
             case "split"   -> args.size() == 1
                     ? "fn_split(" + args.get(0) + ", MISSING)"
                     : args.size() == 2
                     ? "fn_split(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_split(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "match"   -> args.size() == 1
-                    ? "fn_match(" + ctx.ctxVar + ", " + args.get(0) + ")"
+            case "match"   -> args.isEmpty()
+                    ? "fn_arity_error(\"match\", 2, 0)"
+                    : args.size() == 1
+                    ? "fn_match(" + contextValue + ", " + args.get(0) + ")"
                     : args.size() == 2
                     ? "fn_match(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_match(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
             case "replace" -> args.size() < 2
                     ? "fn_arity_error(\"replace\", 3, " + args.size() + ")"
                     : args.size() == 2
-                    ? "fn_replace(" + ctx.ctxVar + ", " + args.get(0) + ", " + args.get(1) + ")"
+                    ? "fn_replace(" + contextValue + ", " + args.get(0) + ", " + args.get(1) + ")"
                     : args.size() == 3
                     ? "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")"
                     : "fn_replace(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ", " + args.get(3) + ")";
@@ -677,11 +751,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "pad"             -> args.size() == 2
                     ? "fn_pad(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_pad(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "eval"            -> args.size() == 1
+            case "eval"            -> args.isEmpty()
+                    ? "fn_arity_error(\"eval\", 1, 0)"
+                    : args.size() == 1
                     ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ")"
                     : "fn_eval(" + args.get(0) + ", " + args.get(1) + ")";
-            case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
-            case "base64decode"    -> "fn_base64decode("    + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+            case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
+            case "base64decode"    -> "fn_base64decode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "encodeUrlComponent" -> "fn_encodeUrlComponent(" + ClassAssembler.oneArg(args) + ")";
             case "decodeUrlComponent" -> "fn_decodeUrlComponent(" + ClassAssembler.oneArg(args) + ")";
             case "encodeUrl"       -> "fn_encodeUrl("       + ClassAssembler.oneArg(args) + ")";
@@ -703,6 +779,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "distinct" -> "fn_distinct(" + ClassAssembler.oneArg(args) + ")";
             case "flatten"  -> "fn_flatten(" + ClassAssembler.oneArg(args) + ")";
             case "shuffle"  -> "fn_shuffle(" + ClassAssembler.oneArg(args) + ")";
+            case "clone"    -> "fn_clone(" + ClassAssembler.oneArg(args) + ")";
             case "zip"      -> "fn_zip(" + String.join(", ", args) + ")";
             case "sort"     -> FunctionCallCodeGen.genSort(this, n, args, ctx);
             case "map"      -> n.args().size() < 2
@@ -728,7 +805,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             };
             case "millis"    -> "fn_millis()";
             case "fromMillis" -> switch (args.size()) {
-                case 0  -> "fn_fromMillis(" + ClassAssembler.ctxArg(args, ctx.ctxVar) + ")";
+                case 0  -> "fn_fromMillis(" + ClassAssembler.ctxArg(args, contextValue) + ")";
                 case 1  -> "fn_fromMillis(" + args.get(0) + ")";
                 case 2  -> "fn_fromMillis(" + args.get(0) + ", " + args.get(1) + ")";
                 default -> "fn_fromMillis(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
@@ -800,24 +877,26 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitArrayConstructor(ArrayConstructor n, GenCtx ctx) {
-        if (n.elements().isEmpty()) return "array()";
+        // A `[...]` written as a path step builds a value, not a sequence: it must not flatten
+        // into the sequence around it and must not collapse when it is alone in one.
+        String build = ctx.inArrayConstructorStep ? "consArrayOf" : "arrayOf";
+        if (n.elements().isEmpty()) return build + "()";
         if (n.elements().size() == 1) {
             AstNode elem = n.elements().get(0);
-            if (ctx.inArrayConstructorStep && !(elem instanceof ArrayConstructor)) {
-                return "forceArray(" + elem.accept(this, ctx) + ")";
-            }
             String elemCode = elem.accept(this, ctx);
             if (elem instanceof ArrayConstructor) {
                 // Nested array constructor — wrap the inner result with preserveArray
                 // so the outer arrayOf keeps it as a single element
-                return "arrayOf(preserveArray(" + elemCode + "))";
+                return build + "(preserveArray(" + elemCode + "))";
             }
-            return "arrayOf(" + elemCode + ")";
+            // A constructor *drops* an element that evaluates to nothing, making it shorter —
+            // it does not become absent. `[nope]` is [], so `nums.[nope]` is [[],[],[]].
+            return build + "(" + elemCode + ")";
         }
         List<String> elems = n.elements().stream()
             .map(e -> wrapArrayElement(e, ctx))
             .toList();
-        return "arrayOf(" + String.join(", ", elems) + ")";
+        return build + "(" + String.join(", ", elems) + ")";
     }
 
     private String wrapArrayElement(AstNode e, GenCtx ctx) {
@@ -844,12 +923,20 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         if (allKeysLiteral) {
             List<String> keys = new java.util.ArrayList<>();
             List<String> values = new java.util.ArrayList<>();
+            java.util.Set<String> distinct = new java.util.HashSet<>();
+            boolean noDuplicates = true;
             for (KeyValuePair p : n.pairs()) {
-                keys.add(ClassAssembler.javaString(((StringLiteral) p.key()).value()));
+                String name = ((StringLiteral) p.key()).value();
+                noDuplicates &= distinct.add(name);
+                keys.add(ClassAssembler.javaString(name));
                 values.add(p.value().accept(this, ctx));
             }
             String keyField = ctx.state.keyArray("{" + String.join(", ", keys) + "}");
-            return "objectOf(" + keyField + ", new JsonNode[]{" + String.join(", ", values) + "})";
+            // Distinct literal keys — the overwhelming majority — need no duplicate check at all,
+            // so the object is filled directly instead of through a hash map. Duplicated literal
+            // keys keep the checking form, which raises D1009 as the spec requires.
+            String constructor = noDuplicates ? "objectOfDistinct" : "objectOf";
+            return constructor + "(" + keyField + ", new JsonNode[]{" + String.join(", ", values) + "})";
         }
         List<String> parts = new java.util.ArrayList<>();
         for (KeyValuePair p : n.pairs()) {
@@ -1051,6 +1138,11 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         sb.append("    java.util.List<JsonNode> __items = new java.util.ArrayList<>();\n");
         sb.append("    if (__src.isArray()) { for (JsonNode __it : __src) __items.add(__it); }\n");
         sb.append("    else if (!__src.isMissingNode()) __items.add(__src);\n");
+        // An empty or absent source still runs the pairs once, with an absent context — the
+        // reference's `if (input.length === 0) input.push(undefined)`. That is what makes a
+        // group-by with literal values produce an object rather than nothing: `nope{"k":"v"}`
+        // is {"k":"v"}, while `nope{"k":$}` is {} because the value itself is absent.
+        sb.append("    if (__items.isEmpty()) __items.add(MISSING);\n");
         // For each pair: group elements by key, then evaluate value once per group.
         for (int pi = 0; pi < pairExprs.size(); pi++) {
             String kExpr = pairExprs.get(pi)[0];
@@ -1088,9 +1180,6 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("        }\n");
             sb.append("    }\n");
         }
-        // Return MISSING only when the source itself was absent; an empty but valid
-        // source (e.g. an empty array) should yield an empty object {}.
-        sb.append("    if (__src.isMissingNode()) return MISSING;\n");
         sb.append("    return __result;\n");
         sb.append("}\n");
         ctx.state.helperMethods.append(sb);

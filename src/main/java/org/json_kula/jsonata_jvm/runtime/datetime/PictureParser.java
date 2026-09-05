@@ -39,15 +39,36 @@ public final class PictureParser {
     /**
      * @return epoch millis, or {@link Long#MIN_VALUE} when the input does not match the picture.
      */
-    public static long parse(String timestamp, String picture) throws RuntimeEvaluationException {
-        PictureFormatter.checkBrackets(picture);
+    /**
+     * The per-picture work: whether day words are pre-converted, and the formatter built
+     * from the picture. Both depend only on the picture, and {@code DateTimeFormatter} is
+     * immutable and thread-safe, so the pair is memoized — building it was most of the
+     * cost of a {@code $toMillis} call with a picture.
+     */
+    private record ParsePlan(boolean dayWordsConverted, java.time.format.DateTimeFormatter formatter) {}
 
-        // Determine whether day words will be pre-converted to numbers so we can configure
-        // the DateTimeFormatter accordingly.
-        boolean dayWordsConverted = computeDayWordsConverted(picture);
+    private static final org.json_kula.jsonata_jvm.runtime.PictureCache<ParsePlan> PLANS =
+            new org.json_kula.jsonata_jvm.runtime.PictureCache<>(512, picture -> {
+                try {
+                    PictureFormatter.checkBrackets(picture);
+                    boolean dayWords = computeDayWordsConverted(picture);
+                    return new ParsePlan(dayWords, buildFormatter(picture, dayWords));
+                } catch (RuntimeEvaluationException e) {
+                    throw new org.json_kula.jsonata_jvm.runtime.PictureCache.AnalysisFailure(e);
+                }
+            });
+
+    public static long parse(String timestamp, String picture) throws RuntimeEvaluationException {
+        ParsePlan plan;
+        try {
+            plan = PLANS.get(picture);
+        } catch (org.json_kula.jsonata_jvm.runtime.PictureCache.AnalysisFailure e) {
+            throw e.unwrap();
+        }
+        boolean dayWordsConverted = plan.dayWordsConverted();
 
         String processed = preprocess(timestamp, picture);
-        java.time.format.DateTimeFormatter fmt = buildFormatter(picture, dayWordsConverted);
+        java.time.format.DateTimeFormatter fmt = plan.formatter();
 
         try {
             TemporalAccessor ta = fmt.parse(processed);

@@ -36,6 +36,23 @@ public final class NumericBuiltins {
     // $number — with 0x / 0o / 0b radix-literal support; NaN guard
     // =========================================================================
 
+    /**
+     * The reference's decimal grammar for {@code $number}, verbatim:
+     * an optional sign, mandatory integer digits, an optional fraction that must have
+     * digits, and an optional exponent.
+     */
+    private static final java.util.regex.Pattern DECIMAL_LITERAL =
+            java.util.regex.Pattern.compile("-?[0-9]+(\\.[0-9]+)?([Ee][-+]?[0-9]+)?");
+
+    /**
+     * Radix-prefixed integer literals. The reference's own regex is unanchored in the
+     * middle of its alternation, so it also matches embedded garbage like
+     * {@code "x0o17y"} and returns NaN; this anchors the whole string and raises D3030
+     * instead. Recorded as a deliberate divergence.
+     */
+    private static final java.util.regex.Pattern RADIX_LITERAL =
+            java.util.regex.Pattern.compile("-?(0[xX][0-9A-Fa-f]+|0[oO][0-7]+|0[bB][01]+)");
+
     public static JsonNode fn_number(JsonNode arg) throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isNumber()) {
@@ -52,28 +69,33 @@ public final class NumericBuiltins {
             throw new RuntimeEvaluationException("T0410",
                     "$number: argument is not a valid value for $number");
         if (arg.isTextual()) {
-            String s = arg.textValue().trim();
-            try {
-                double d;
-                // Support leading minus before radix prefix (e.g. "-0x1A" → -26)
-                boolean neg = s.startsWith("-");
-                String abs = neg ? s.substring(1) : s;
-                if (abs.startsWith("0x") || abs.startsWith("0X"))
-                    d = (neg ? -1d : 1d) * Long.parseLong(abs.substring(2), 16);
-                else if (abs.startsWith("0o") || abs.startsWith("0O"))
-                    d = (neg ? -1d : 1d) * Long.parseLong(abs.substring(2), 8);
-                else if (abs.startsWith("0b") || abs.startsWith("0B"))
-                    d = (neg ? -1d : 1d) * Long.parseLong(abs.substring(2), 2);
-                else
-                    d = Double.parseDouble(s);
-                if (Double.isInfinite(d) || Double.isNaN(d))
+            String s = arg.textValue();
+            // The accepted grammar is narrower than Double.parseDouble's: no leading "+",
+            // no bare ".5" or trailing "1.", and no surrounding whitespace. Reproducing
+            // the reference's own regex is the point — parseDouble accepted all of those
+            // and silently returned a number where the reference raises D3030.
+            if (DECIMAL_LITERAL.matcher(s).matches()) {
+                double d = Double.parseDouble(s);
+                if (Double.isInfinite(d) || Double.isNaN(d)) {
                     throw new RuntimeEvaluationException("D3030",
                             "$number: value out of range for number type");
+                }
                 return JsonataRuntime.numNode(d);
-            } catch (NumberFormatException e) {
-                throw new RuntimeEvaluationException("D3030",
-                        "$number: unable to cast value to a number: " + s);
             }
+            String trimmed = s.trim();
+            if (RADIX_LITERAL.matcher(trimmed).matches()) {
+                boolean negative = trimmed.startsWith("-");
+                String magnitude = negative ? trimmed.substring(1) : trimmed;
+                int radix = switch (magnitude.charAt(1)) {
+                    case 'x', 'X' -> 16;
+                    case 'o', 'O' -> 8;
+                    default -> 2;
+                };
+                double d = Long.parseLong(magnitude.substring(2), radix);
+                return JsonataRuntime.numNode(negative ? -d : d);
+            }
+            throw new RuntimeEvaluationException("D3030",
+                    "$number: unable to cast value to a number: " + s);
         }
         throw new RuntimeEvaluationException("D3030", "$number: unable to cast value to a number");
     }
@@ -86,31 +108,75 @@ public final class NumericBuiltins {
         if (JsonataRuntime.missing(number)) return JsonataRuntime.MISSING;
         double v = JsonataRuntime.toNumber(number);
         if (Double.isNaN(v) || Double.isInfinite(v)) return NF.numberNode(v);
-        int p = JsonataRuntime.missing(precision) ? 0 : (int) JsonataRuntime.toNumber(precision);
-        Double fast = roundWithoutDecimalArithmetic(v, p);
-        if (fast != null) return JsonataRuntime.numNode(fast);
-        BigDecimal bd = new BigDecimal(Double.toString(v)).setScale(p, RoundingMode.HALF_EVEN);
-        return JsonataRuntime.numNode(bd.doubleValue());
+        // Clamped, not cast. `(int) 1e15` saturates to Integer.MAX_VALUE, and shifting a decimal
+        // exponent by that produced the literal string "Infinity" for the next parse to choke on.
+        // Beyond +-400 the arithmetic is already saturated -- 10^400 is infinite and 10^-400 is
+        // zero -- so clamping there is exact as well as safe.
+        double requested = JsonataRuntime.missing(precision) ? 0 : JsonataRuntime.toNumber(precision);
+        int p = (int) Math.max(-400, Math.min(400, requested));
+        double rounded = roundHalfEven(v, p);
+        // The reference computes `value * 10^precision`, so a precision that overflows the
+        // product yields undefined -- and it depends on the value, not on the precision alone:
+        // $round(1, 308) is 1, $round(1e15, 308) is undefined.
+        if (!Double.isFinite(rounded)) return JsonataRuntime.MISSING;
+        return JsonataRuntime.numNode(rounded);
     }
 
     /**
-     * Rounds half-to-even in binary floating point, or returns {@code null} when the exact decimal
-     * answer might differ.
+     * Rounds half-to-even at {@code p} decimal places — {@code $round}'s algorithm,
+     * shared with {@code $formatNumber} so the two can never round differently.
      *
-     * <p>The reference implementation rounds the <em>decimal</em> form of the value, which needs
-     * {@code BigDecimal} — the value 2.675 is really 2.67499…, so decimal rounding gives 2.68 where
-     * binary rounding gives 2.67. That only matters when the scaled value sits on a tie; everywhere
-     * else {@link Math#rint} gives the same answer for a fraction of the cost, and {@code $round} is
-     * common enough in reporting expressions to be worth the branch.
+     * <p>A port of the reference's own routine, including its fast path, because the
+     * pairing of ceiling and tie window is what makes the fast path sound and the two
+     * halves cannot be chosen independently. The previous version paired a 1e15 ceiling
+     * with a 1e-9 window: {@code v * 10^p} is accurate to about half an ulp <em>of the
+     * product</em>, and at 1e15 an ulp is 0.125 — eight orders of magnitude wider than
+     * the window — so the fast path sailed past genuine ties and answered confidently
+     * with the wrong value ({@code $round(-36435.03133177965, 10)} among them.)
      */
-    private static Double roundWithoutDecimalArithmetic(double v, int p) {
-        if (p < 0 || p > 15) return null;
-        double factor = POWERS_OF_TEN[p];
-        double scaled = v * factor;
-        if (Math.abs(scaled) >= 1e15) return null;              // precision no longer exact
-        double fraction = Math.abs(scaled - Math.floor(scaled));
-        if (Math.abs(fraction - 0.5) < 1e-9) return null;       // too close to a tie to guess
-        return Math.rint(scaled) / factor;
+    public static double roundHalfEven(double v, int p) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) return v;
+
+        if (p >= 1 && p <= 15) {
+            double scaled = v * POWERS_OF_TEN[p];
+            if (scaled > -1e9 && scaled < 1e9) {
+                double fraction = scaled - Math.floor(scaled);
+                if (fraction > 0.500001 || fraction < 0.499999) {
+                    double rounded = Math.round(scaled) / POWERS_OF_TEN[p];
+                    return rounded == 0 ? 0 : rounded;      // JSON has no -0
+                }
+            }
+        }
+
+        double value = p != 0 ? shiftDecimalExponent(v, p) : v;
+        // JavaScript's Math.round is floor(x + 0.5) — half toward +infinity — and the
+        // half-to-even correction is applied afterwards, so both have to be reproduced.
+        double result = Math.floor(value + 0.5);
+        double diff = result - value;
+        if (Math.abs(diff) == 0.5 && Math.abs(result % 2) == 1) {
+            result = result - 1;
+        }
+        if (p != 0) result = shiftDecimalExponent(result, -p);
+        return result == 0 ? 0 : result;
+    }
+
+    /**
+     * Shifts {@code value}'s decimal exponent by {@code by} through the number's own
+     * decimal string rather than by multiplying.
+     *
+     * <p>Multiplication introduces float noise the rounding then sees: {@code 8.835 * 100}
+     * is {@code 883.4999999999999}, but {@code 8.835e2} is exactly {@code 883.5}, which is
+     * what half-to-even has to be shown.
+     */
+    private static double shiftDecimalExponent(double value, int by) {
+        // A shift can overflow to infinity, and "Infinity" is not a number literal any parser
+        // will take back. Propagate it instead; fn_round turns a non-finite result into
+        // undefined, which is what the reference's own overflow produces.
+        if (!Double.isFinite(value)) return value;
+        String s = JsonataRuntime.renderNumberRaw(value);
+        int e = s.indexOf('e');
+        if (e < 0) return Double.parseDouble(s + "e" + by);
+        return Double.parseDouble(s.substring(0, e) + "e" + (Integer.parseInt(s.substring(e + 1)) + by));
     }
 
     private static final double[] POWERS_OF_TEN = {
@@ -152,37 +218,19 @@ public final class NumericBuiltins {
         double v = JsonataRuntime.toNumber(number);
         String pic = JsonataRuntime.toText(picture);
 
-        char decimalSep  = optChar(options, "decimal-separator",  '.');
-        char groupSep    = optChar(options, "grouping-separator", ',');
-        char exponentSep = optChar(options, "exponent-separator", 'e');
-        String percent   = optStr(options,  "percent",            "%");
-        String perMille  = optStr(options,  "per-mille",          "‰");
-        char zeroDigit   = optChar(options, "zero-digit",         '0');
-        char digitChar   = optChar(options, "digit",              '#');
-        char patternSep  = optChar(options, "pattern-separator",  ';');
-        String minusSign = optStr(options,  "minus-sign",         "-");
+        // The defaults, overridden entry-by-entry by the caller's options object. The
+        // whole map is handed to the engine: fn:format-number is defined over these
+        // properties rather than over a fixed set of separator characters.
+        // The shared defaults are used as-is unless the call supplies an options object,
+        // so the common call allocates no map at all.
+        java.util.Map<String, String> properties = DecimalPicture.DEFAULTS;
+        if (!JsonataRuntime.missing(options) && options.isObject() && !options.isEmpty()) {
+            properties = new java.util.LinkedHashMap<>(DecimalPicture.DEFAULTS);
+            java.util.Map<String, String> overridden = properties;
+            options.properties().forEach(e -> overridden.put(e.getKey(), e.getValue().asText()));
+        }
 
-        int sepIdx  = pic.indexOf(patternSep);
-        String posPic = sepIdx >= 0 ? pic.substring(0, sepIdx) : pic;
-        String negPic = sepIdx >= 0 ? pic.substring(sepIdx + 1) : null;
-        if (negPic != null && negPic.indexOf(patternSep) >= 0)
-            throw new RuntimeEvaluationException("D3080",
-                    "$formatNumber: the picture string must not contain more than one instance of the pattern separator");
-
-        boolean hasPercent  = posPic.contains(percent);
-        boolean hasPerMille = posPic.contains(perMille);
-        boolean isNeg = v < 0;
-        double work = hasPercent  ? Math.abs(v) * 100
-                    : hasPerMille ? Math.abs(v) * 1000
-                    : Math.abs(v);
-
-        String activePic = (isNeg && negPic != null) ? negPic : posPic;
-        String result = DecimalPicture.format(work, activePic,
-                decimalSep, groupSep, exponentSep,
-                percent, perMille, zeroDigit, digitChar);
-
-        if (isNeg && negPic == null) result = minusSign + result;
-        return NF.textNode(result);
+        return NF.textNode(DecimalPicture.format(v, pic, properties));
     }
 
     // =========================================================================
@@ -201,7 +249,9 @@ public final class NumericBuiltins {
         // Numbers beyond long range are only representable via word pictures.
         if (numDouble > Long.MAX_VALUE || numDouble < Long.MIN_VALUE)
             return NF.textNode(IntegerPicture.formatLarge(numDouble, pic));
-        long n = (long) numDouble;
+        // Math.floor, not a (long) truncation: the reference floors, so -12.6 formats as
+        // -13. A cast truncates toward zero and gave -12.
+        long n = (long) Math.floor(numDouble);
         return NF.textNode(IntegerPicture.format(n, pic));
     }
 
@@ -215,7 +265,9 @@ public final class NumericBuiltins {
             return JsonataRuntime.MISSING;
         String s   = JsonataRuntime.toText(string);
         String pic = JsonataRuntime.toText(picture);
-        return JsonataRuntime.numNode(IntegerPicture.parse(s, pic));
+        // An input the picture cannot parse yields NaN, which is JSONata's "undefined".
+        double parsed = IntegerPicture.parse(s, pic);
+        return Double.isNaN(parsed) ? JsonataRuntime.MISSING : JsonataRuntime.numNode(parsed);
     }
 
     // =========================================================================

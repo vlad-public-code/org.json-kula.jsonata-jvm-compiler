@@ -95,20 +95,29 @@ class DateTimeFormattingTest {
 
     // =========================================================================
     // Bug 4 — formatMillisComponent truncated from wrong end for [f01]
-    // 150 ms with width=2 gave "150" (no truncation), should give "15"
+    // [f] is NOT a decimal fraction: the reference formats the raw millisecond value
+    // through the same integer formatter every other component uses, so the width is a
+    // minimum digit count and never truncates. These previously asserted a scaled
+    // fraction, which is where "[f0001] on 1 ms" wrongly gave "0010" instead of "0001".
     // =========================================================================
 
     @Test
-    void bug4_millisComponent_twoDigit_150ms() throws Exception {
+    void millisComponent_twoDigit_150ms_is_not_scaled() throws Exception {
         // 1510067557150 = ...37.150Z
         JsonNode result = eval("$fromMillis(1510067557150, '[f01]')");
-        assertEquals("15", result.textValue(), "150ms in [f01] should scale to 15, not 150");
+        assertEquals("150", result.textValue(), "[f01] formats the raw millisecond value");
     }
 
     @Test
-    void bug4_millisComponent_oneDigit_150ms() throws Exception {
+    void millisComponent_oneDigit_150ms_is_not_scaled() throws Exception {
         JsonNode result = eval("$fromMillis(1510067557150, '[f1]')");
-        assertEquals("1", result.textValue(), "150ms in [f1] should scale to 1");
+        assertEquals("150", result.textValue(), "[f1] formats the raw millisecond value");
+    }
+
+    /** A width wider than the value pads it: 1 ms under [f0001] is "0001", not "0010". */
+    @Test
+    void millisComponent_padsRatherThanScales() throws Exception {
+        assertEquals("0001", eval("$fromMillis(1, '[f0001]')").textValue());
     }
 
     @Test
@@ -153,10 +162,15 @@ class DateTimeFormattingTest {
         assertEquals("23", result.textValue());
     }
 
+    /**
+      * The ordinal modifier follows a digit pattern: {@code [D1o]} is "23rd". A bare
+      * {@code [Do]} leaves "o" as the whole presentation modifier, which is a numbering
+      * sequence with no mandatory digit and therefore D3130 — confirmed against the
+      * reference.
+      */
     @Test
-    void bug6_dayOfMonth_withOrdinal_suffix() throws Exception {
-        // [Do] → "23rd"
-        JsonNode result = eval("$fromMillis(1521801216617, '[Do]')");
+    void dayOfMonth_withOrdinal_suffix() throws Exception {
+        JsonNode result = eval("$fromMillis(1521801216617, '[D1o]')");
         assertEquals("23rd", result.textValue());
     }
 
@@ -284,5 +298,33 @@ class DateTimeFormattingTest {
         JsonNode result = eval(
                 "$toMillis('three hundred and sixty-fifth day of 2018', '[dwo] day of [Y]') ~> $fromMillis()");
         assertEquals("2018-12-31T00:00:00.000Z", result.textValue());
+    }
+
+    // =========================================================================
+    // A fractional second has no name
+    //
+    // Every other component that cannot be named raises D3133; 'f' is formatted on its own
+    // branch, which asked for the name, found no integer picture to fall back on, and let a
+    // NullPointerException out as the user-visible error. (The reference throws a raw
+    // JavaScript TypeError here, which is not a JSONata error either.)
+    // =========================================================================
+
+    @Test
+    void fractionalSecondWithANamePresentationRaisesD3133() {
+        for (String picture : new String[] {"[fn]", "[fN]", "[fNn]"}) {
+            Exception error = assertThrows(Exception.class,
+                    () -> eval("$fromMillis(0, '" + picture + "')"), picture);
+            String message = String.valueOf(error.getMessage());
+            assertTrue(message.contains("Name presentation is not supported"),
+                    picture + " should raise D3133, got: " + message);
+            assertFalse(message.contains("Cannot invoke") || message.contains("NullPointer"),
+                    picture + " leaked a JVM exception: " + message);
+        }
+    }
+
+    @Test
+    void fractionalSecondStillFormatsAsAnInteger() throws Exception {
+        assertEquals("0001", eval("$fromMillis(1, '[f0001]')").textValue());
+        assertEquals("617", eval("$fromMillis(1521801216617, '[f001]')").textValue());
     }
 }
