@@ -33,7 +33,7 @@ The same pipeline exists for JavaScript and Python — see [Sibling implementati
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.5</version>
+    <version>1.0.6</version>
 </dependency>
 ```
 
