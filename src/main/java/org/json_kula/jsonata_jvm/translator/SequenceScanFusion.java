@@ -33,6 +33,12 @@ import java.util.Set;
  * these. This pass rewrites the group into one pass that reads each distinct field once per element
  * and feeds every accumulator from that one read.
  *
+ * <p><strong>Merging the loops is not the optimisation; sharing the field reads is.</strong> A
+ * sibling port measured the two apart: one loop with the predicates left as opaque callbacks was
+ * worth −9%, and the same loop with the predicates pattern-matched so their reads could be shared
+ * was −60%. That is why {@link #matchPred} looks inside a predicate rather than compiling it, and
+ * why a predicate shape it does not recognise is declined rather than absorbed generically.
+ *
  * <h2>Why a separate method</h2>
  *
  * <p>The fused loop is emitted as its own {@code private static} helper rather than inlined into
@@ -53,24 +59,85 @@ import java.util.Set;
  *
  * <h2>Errors</h2>
  *
- * <p>Aggregates raise T0412 on non-numeric data, and the fused loop must still report the error the
- * unfused statements would have. It cannot throw where it finds the bad value: {@code $sum} was
- * bound before {@code $max}, so {@code $sum}'s failure has to win even if {@code $max} meets bad
- * data at an earlier element. So each aggregate records its own first offending value and the scan
- * raises, after the loop, the error of the earliest-bound aggregate that recorded one. That is
- * exactly the outcome of running the passes in order, since a pass fails if and only if it meets
- * any bad value.
+ * <p>An absorbed operation can fail — an aggregate on non-numeric data (T0412), an ordering
+ * comparison on mismatched types (T2009/T2010) — and the fused loop must still report the error the
+ * unfused statements would have. It cannot throw where it finds the offending value, because that
+ * is not where the failure belonged: the operations were separate statements, and a statement the
+ * scan did <em>not</em> absorb may sit between them and fail first.
+ *
+ * <pre>
+ *   ( $e := bad;  $a := $count($e[s = 10]);  $z := $error("boom");  $b := $sum($e.s);  $b )
+ * </pre>
+ *
+ * <p>reports {@code boom}. So each operation records its own first offending value in a slot of its
+ * own and the loop keeps going; the throw happens in {@code aggRead} / {@code cmpRead} at the point
+ * where the original statement read the result. That is exact against the non-absorbed statements
+ * as well as among the absorbed ones, and it costs one null check on a path the type test already
+ * visits.
  */
 final class SequenceScanFusion {
 
     private SequenceScanFusion() {}
 
     /** The operations a fused scan can absorb. */
-    private enum Kind { SUM, AVERAGE, MAX, MIN, COUNT_EQ, FILTER_EQ }
+    private enum Kind { SUM, AVERAGE, MAX, MIN, COUNT, FILTER }
 
-    /** One absorbed operation, together with the AST node it replaces. */
-    private record Spec(Kind kind, String seqVar, String field, AstNode node,
-                        AstNode literal, int stmtIndex) {}
+    // =============================================================================================
+    // Absorbed predicates
+    // =============================================================================================
+
+    /**
+     * The predicate shapes a scan can re-emit against fields it has already read.
+     *
+     * <p>The grammar is deliberately narrow. Everything in it is built from {@code field <op>
+     * literal} leaves, so the fields a predicate reads are known before the loop is emitted, which
+     * is the entire point of the pass — a predicate kept as an opaque callback would re-read inside
+     * itself the fields the loop had just shared.
+     */
+    private sealed interface Pred {}
+
+    /** {@code field <op> literal}. */
+    private record Cmp(String op, String field, AstNode literal) implements Pred {}
+
+    /** {@code left and right} / {@code left or right}. */
+    private record Junction(boolean isAnd, Pred left, Pred right) implements Pred {}
+
+    /** The comparisons that can raise, and so may only appear as a whole predicate. */
+    private static final Set<String> ORDERING = Set.of("<", "<=", ">", ">=");
+
+    /**
+     * One absorbed operation, together with the AST node it replaces.
+     *
+     * @param field the field an aggregate reads; null for a predicate operation
+     * @param pred  the predicate a count or filter applies; null for an aggregate
+     */
+    private record Spec(Kind kind, String seqVar, String field, Pred pred, AstNode node,
+                        int stmtIndex) {
+
+        boolean isAggregate() {
+            return field != null;
+        }
+
+        /** The comparison that may raise, or null when nothing in this operation can. */
+        Cmp throwingCmp() {
+            return pred instanceof Cmp c && ORDERING.contains(c.op()) ? c : null;
+        }
+
+        /** Every field this operation reads, in the order it reads them. */
+        Set<String> fields() {
+            Set<String> out = new LinkedHashSet<>();
+            if (field != null) out.add(field);
+            if (pred != null) collectFields(pred, out);
+            return out;
+        }
+
+        private static void collectFields(Pred p, Set<String> out) {
+            switch (p) {
+                case Cmp c -> out.add(c.field());
+                case Junction j -> { collectFields(j.left(), out); collectFields(j.right(), out); }
+            }
+        }
+    }
 
     /**
      * The result of planning one block.
@@ -125,7 +192,7 @@ final class SequenceScanFusion {
         if (specs.isEmpty()) return Plan.NONE;
 
         // Group by sequence, keeping source order within each group: that order is what decides
-        // which aggregate's error wins, and which slot each result lands in.
+        // which slot each result lands in.
         Map<String, List<Spec>> groups = new LinkedHashMap<>();
         for (Spec s : specs) {
             if (reboundOrUnsafe.contains(s.seqVar())) continue;
@@ -146,17 +213,13 @@ final class SequenceScanFusion {
             String scanVar = "__scan" + id;
             String method = "__scan" + id;
 
-            state.helperMethods.append(emitScanMethod(method, members, t, ctx));
+            state.helperMethods.append(emitScanMethod(method, members, results, scanVar, t, ctx));
 
             int firstUse = members.get(0).stmtIndex();
             for (Spec s : members) firstUse = Math.min(firstUse, s.stmtIndex());
             calls.merge(firstUse,
                     "    JsonNode[] " + scanVar + " = " + method + "($" + group.getKey() + ");\n",
                     String::concat);
-
-            for (int k = 0; k < members.size(); k++) {
-                results.put(members.get(k).node(), scanVar + "[" + k + "]");
-            }
         }
         return results.isEmpty() ? Plan.NONE : new Plan(calls, results);
     }
@@ -170,7 +233,9 @@ final class SequenceScanFusion {
     private static boolean worthFusing(List<Spec> members) {
         if (members.size() < 2) return false;
         if (members.size() >= 3) return true;
-        return members.get(0).field().equals(members.get(1).field());
+        Set<String> shared = new LinkedHashSet<>(members.get(0).fields());
+        shared.retainAll(members.get(1).fields());
+        return !shared.isEmpty();
     }
 
     // =============================================================================================
@@ -247,29 +312,52 @@ final class SequenceScanFusion {
                     && path.steps().size() == 2
                     && path.steps().get(0) instanceof VariableRef seq
                     && path.steps().get(1) instanceof FieldRef fr) {
-                return new Spec(aggregate, seq.name(), fr.name(), n, null, stmtIndex);
+                return new Spec(aggregate, seq.name(), fr.name(), null, n, stmtIndex);
             }
-            // $count($seq[field = literal])
+            // $count($seq[<pred>])
             if ("count".equals(fc.name()) && fc.args().get(0) instanceof PredicateExpr pe) {
-                Spec inner = matchLiteralPredicate(pe, Kind.COUNT_EQ, n, stmtIndex);
+                Spec inner = matchPredicated(pe, Kind.COUNT, n, stmtIndex);
                 if (inner != null) return inner;
             }
         }
-        // $seq[field = literal] used as a value
+        // $seq[<pred>] used as a value
         if (n instanceof PredicateExpr pe) {
-            return matchLiteralPredicate(pe, Kind.FILTER_EQ, n, stmtIndex);
+            return matchPredicated(pe, Kind.FILTER, n, stmtIndex);
         }
         return null;
     }
 
-    /** Matches {@code $seq[field = <literal>]}, the only predicate shape a scan can absorb. */
-    private static Spec matchLiteralPredicate(PredicateExpr pe, Kind kind, AstNode node, int stmtIndex) {
-        if (pe.source() instanceof VariableRef seq
-                && pe.predicate() instanceof BinaryOp op
-                && "=".equals(op.op())
-                && op.left() instanceof FieldRef fr
-                && isLiteral(op.right())) {
-            return new Spec(kind, seq.name(), fr.name(), node, op.right(), stmtIndex);
+    /** Matches {@code $seq[<pred>]} for a predicate the scan can re-emit. */
+    private static Spec matchPredicated(PredicateExpr pe, Kind kind, AstNode node, int stmtIndex) {
+        if (!(pe.source() instanceof VariableRef seq)) return null;
+        Pred pred = matchPred(pe.predicate(), true);
+        return pred == null ? null : new Spec(kind, seq.name(), null, pred, node, stmtIndex);
+    }
+
+    /**
+     * Recognises a predicate the scan can re-emit against pre-read fields, or returns null.
+     *
+     * <p>{@code =} and {@code !=} cannot raise, so they may sit anywhere in the tree: moving one
+     * earlier cannot move an error with it. The ordering comparisons can raise, and the error they
+     * raise has to be deferred to the statement that reads the result (see {@code cmpRead}) — which
+     * is only expressible for a single comparison, so they are admitted as a whole predicate and
+     * not underneath an {@code and} or an {@code or}.
+     *
+     * @param root whether {@code n} is the entire predicate
+     */
+    private static Pred matchPred(AstNode n, boolean root) {
+        if (n instanceof Parenthesized p) return matchPred(p.inner(), root);
+        if (!(n instanceof BinaryOp op)) return null;
+        if ("and".equals(op.op()) || "or".equals(op.op())) {
+            Pred left = matchPred(op.left(), false);
+            if (left == null) return null;
+            Pred right = matchPred(op.right(), false);
+            return right == null ? null : new Junction("and".equals(op.op()), left, right);
+        }
+        boolean comparison = "=".equals(op.op()) || "!=".equals(op.op())
+                || (root && ORDERING.contains(op.op()));
+        if (comparison && op.left() instanceof FieldRef fr && isLiteral(op.right())) {
+            return new Cmp(op.op(), fr.name(), op.right());
         }
         return null;
     }
@@ -284,94 +372,105 @@ final class SequenceScanFusion {
     // =============================================================================================
 
     /**
-     * Emits the helper that performs one fused scan. Specs are grouped by field so that each
-     * distinct field is read once per element, which is the whole point of the pass; within a
-     * field, the numeric aggregates further share a single type test on the value read.
+     * Emits the helper that performs one fused scan and records how each absorbed node reads its
+     * result back.
+     *
+     * <p>Every distinct field the group mentions is read once at the top of the loop body — that is
+     * the whole point of the pass — and the operations then work from those locals.
+     *
+     * <p>One read serves every consumer here, which is worth stating because it is not free: an
+     * aggregate and a predicate must navigate the same way for that to be sound. Both do. {@code
+     * $sum($e.f)} is an aggregate over a <em>path</em> and {@code $e[f = 1]} applies a path step
+     * per element, so both are {@code field(elem, name)} — including for an element that is itself
+     * an array, where the step maps over its members and both can therefore see a value. A version
+     * of this that gated the aggregates on {@code isObject} agreed with its own unfused helpers and
+     * with neither the reference nor the filter beside it.
      */
     private static String emitScanMethod(String name, List<Spec> members,
-                                        Translator t, GenCtx ctx) {
+                                         IdentityHashMap<AstNode, String> results, String scanVar,
+                                         Translator t, GenCtx ctx) {
         StringBuilder body = new StringBuilder();
         StringBuilder decls = new StringBuilder();
-        StringBuilder checks = new StringBuilder();
         List<String> resultExprs = new ArrayList<>();
 
-        // Slot index is the spec's position in source order, which is also the order the results
-        // array is read back in and the order aggregate errors are reported in.
         Map<Spec, String> var = new IdentityHashMap<>();
         for (int k = 0; k < members.size(); k++) {
             var.put(members.get(k), "__v" + k);
         }
 
-        Set<String> fields = new LinkedHashSet<>();
-        for (Spec s : members) fields.add(s.field());
-
-        int fieldIndex = 0;
-        for (String field : fields) {
-            List<Spec> onField = members.stream().filter(s -> s.field().equals(field)).toList();
-            String value = "__fv" + fieldIndex++;
-            body.append("            JsonNode ").append(value)
-                .append(" = field(__e, ").append(ClassAssembler.javaString(field)).append(");\n");
-
-            List<Spec> numeric = onField.stream().filter(s -> isNumericAggregate(s.kind())).toList();
-            if (!numeric.isEmpty()) {
-                emitNumericAggregates(body, numeric, var, value);
-            }
-            for (Spec s : onField) {
-                switch (s.kind()) {
-                    case COUNT_EQ  -> emitCountEq(body, s, var.get(s), value, t, ctx);
-                    case FILTER_EQ -> emitFilterEq(body, var.get(s), value, s.literal(), t, ctx);
-                    default        -> { }
-                }
+        // One local per distinct field, in first-mention order.
+        Map<String, String> local = new LinkedHashMap<>();
+        for (Spec s : members) {
+            for (String f : s.fields()) {
+                if (!local.containsKey(f)) local.put(f, "__fv" + local.size());
             }
         }
+        for (Map.Entry<String, String> e : local.entrySet()) {
+            body.append("            JsonNode ").append(e.getValue())
+                .append(" = field(__e, ").append(ClassAssembler.javaString(e.getKey())).append(");\n");
+        }
 
+        // Aggregates first, grouped by field so the ones sharing a field share a type test too.
+        for (String field : local.keySet()) {
+            List<Spec> numeric = members.stream()
+                    .filter(s -> s.isAggregate() && s.field().equals(field)).toList();
+            if (!numeric.isEmpty()) emitAggregates(body, numeric, var, local.get(field));
+        }
+        for (Spec s : members) {
+            if (!s.isAggregate()) emitPredicated(body, s, var.get(s), local, t, ctx);
+        }
+
+        // Result slots, in source order: the value, then whatever the operation may have to raise.
         for (Spec s : members) {
             String v = var.get(s);
+            int value = resultExprs.size();
             switch (s.kind()) {
                 case SUM -> {
                     decls.append("        double ").append(v).append("s = 0; boolean ").append(v)
                          .append("a = false; JsonNode ").append(v).append("b = null;\n");
-                    checks.append("        if (").append(v).append("b != null) aggFail(")
-                          .append(v).append("b, \"$sum\");\n");
                     resultExprs.add(v + "a ? numNode(" + v + "s) : MISSING");
+                    resultExprs.add(v + "b");
+                    results.put(s.node(), "aggRead(" + slot(scanVar, value) + ", "
+                            + slot(scanVar, value + 1) + ", \"$sum\")");
                 }
                 case AVERAGE -> {
                     decls.append("        double ").append(v).append("s = 0; int ").append(v)
                          .append("n = 0; JsonNode ").append(v).append("b = null;\n");
-                    checks.append("        if (").append(v).append("b != null) avgFail(")
-                          .append(v).append("b);\n");
                     resultExprs.add(v + "n == 0 ? MISSING : numNode(" + v + "s / " + v + "n)");
+                    resultExprs.add(v + "b");
+                    results.put(s.node(), "avgRead(" + slot(scanVar, value) + ", "
+                            + slot(scanVar, value + 1) + ")");
                 }
-                case MAX -> {
-                    decls.append("        double ").append(v).append("s = Double.NEGATIVE_INFINITY; boolean ")
-                         .append(v).append("a = false; JsonNode ").append(v).append("b = null;\n");
-                    checks.append("        if (").append(v).append("b != null) aggFail(")
-                          .append(v).append("b, \"$max\");\n");
+                case MAX, MIN -> {
+                    String seed = s.kind() == Kind.MAX
+                            ? "Double.NEGATIVE_INFINITY" : "Double.POSITIVE_INFINITY";
+                    decls.append("        double ").append(v).append("s = ").append(seed)
+                         .append("; boolean ").append(v).append("a = false; JsonNode ").append(v)
+                         .append("b = null;\n");
                     resultExprs.add(v + "a ? numNode(" + v + "s) : MISSING");
+                    resultExprs.add(v + "b");
+                    results.put(s.node(), "aggRead(" + slot(scanVar, value) + ", "
+                            + slot(scanVar, value + 1) + ", \""
+                            + (s.kind() == Kind.MAX ? "$max" : "$min") + "\")");
                 }
-                case MIN -> {
-                    decls.append("        double ").append(v).append("s = Double.POSITIVE_INFINITY; boolean ")
-                         .append(v).append("a = false; JsonNode ").append(v).append("b = null;\n");
-                    checks.append("        if (").append(v).append("b != null) aggFail(")
-                          .append(v).append("b, \"$min\");\n");
-                    resultExprs.add(v + "a ? numNode(" + v + "s) : MISSING");
-                }
-                case COUNT_EQ -> {
+                case COUNT -> {
                     decls.append("        int ").append(v).append("c = 0;\n");
                     resultExprs.add("number((long) " + v + "c)");
+                    results.put(s.node(), readWithDeferredCmp(s, v, decls, resultExprs, scanVar, value));
                 }
-                case FILTER_EQ -> {
+                case FILTER -> {
                     decls.append("        JsonNode ").append(v).append("x = null, ")
                          .append(v).append("y = null;\n");
                     resultExprs.add("seqResult(" + v + "x, " + v + "y)");
+                    results.put(s.node(), readWithDeferredCmp(s, v, decls, resultExprs, scanVar, value));
                 }
             }
         }
 
         StringBuilder out = new StringBuilder();
         out.append("\n/**\n * Fused scan over one sequence: ").append(members.size())
-           .append(" operations sharing ").append(fields.size())
-           .append(fields.size() == 1 ? " field read" : " field reads").append(" per element.\n */\n");
+           .append(" operations sharing ").append(local.size())
+           .append(local.size() == 1 ? " field read" : " field reads").append(" per element.\n */\n");
         out.append("private static JsonNode[] ").append(name)
            .append("(JsonNode __seq) throws RuntimeEvaluationException {\n");
         out.append(decls);
@@ -380,19 +479,30 @@ final class SequenceScanFusion {
         out.append("        int __n = __isArr ? __seq.size() : 1;\n");
         out.append("        for (int __i = 0; __i < __n; __i++) {\n");
         out.append("            JsonNode __e = __isArr ? __seq.get(__i) : __seq;\n");
-        // The aggregates skip non-object elements, exactly as the unfused helpers do; the filters
-        // do not, because filter() applies field() to whatever the element is.
-        out.append("            boolean __obj = __e.isObject();\n");
         out.append(body);
         out.append("        }\n    }\n");
-        out.append(checks);
         out.append("    return new JsonNode[]{ ").append(String.join(", ", resultExprs)).append(" };\n");
         out.append("}\n");
         return out.toString();
     }
 
-    private static boolean isNumericAggregate(Kind kind) {
-        return kind == Kind.SUM || kind == Kind.AVERAGE || kind == Kind.MAX || kind == Kind.MIN;
+    private static String slot(String scanVar, int index) {
+        return scanVar + "[" + index + "]";
+    }
+
+    /**
+     * Adds the two operand slots an ordering comparison needs and returns the reading expression.
+     * A predicate that cannot raise reads its slot directly.
+     */
+    private static String readWithDeferredCmp(Spec s, String v, StringBuilder decls,
+                                              List<String> resultExprs, String scanVar, int value) {
+        if (s.throwingCmp() == null) return slot(scanVar, value);
+        decls.append("        JsonNode ").append(v).append("l = null, ").append(v).append("r = null;\n");
+        int bad = resultExprs.size();
+        resultExprs.add(v + "l");
+        resultExprs.add(v + "r");
+        return "cmpRead(" + slot(scanVar, value) + ", " + slot(scanVar, bad) + ", "
+                + slot(scanVar, bad + 1) + ")";
     }
 
     /**
@@ -400,8 +510,8 @@ final class SequenceScanFusion {
      * value, then a fold per aggregate. A value that is neither a number nor an array of numbers is
      * recorded rather than thrown on — see the class comment on error ordering.
      */
-    private static void emitNumericAggregates(StringBuilder body, List<Spec> numeric,
-                                              Map<Spec, String> var, String value) {
+    private static void emitAggregates(StringBuilder body, List<Spec> numeric,
+                                       Map<Spec, String> var, String value) {
         StringBuilder fold = new StringBuilder();
         StringBuilder mark = new StringBuilder();
         for (Spec s : numeric) {
@@ -417,7 +527,7 @@ final class SequenceScanFusion {
             }
             mark.append("if (").append(v).append("b == null) ").append(v).append("b = __bad; ");
         }
-        body.append("            if (__obj && ").append(value).append(" != MISSING) {\n");
+        body.append("            if (").append(value).append(" != MISSING) {\n");
         body.append("                if (").append(value).append(".isNumber()) { double __d = ")
             .append(value).append(".doubleValue(); ").append(fold).append("}\n");
         body.append("                else if (").append(value).append(".isArray()) {\n");
@@ -432,36 +542,79 @@ final class SequenceScanFusion {
     }
 
     /**
-     * Emits the {@code $count(seq[field = literal])} test. The comparison is specialised on the
-     * literal's type here, where it is known, rather than re-dispatched per element as {@code
-     * fn_count_field_eq} must do.
+     * Emits one {@code $count($seq[<pred>])} or {@code $seq[<pred>]}, testing the pre-read field
+     * locals rather than navigating again.
      */
-    private static void emitCountEq(StringBuilder body, Spec s, String v, String value,
-                                    Translator t, GenCtx ctx) {
-        String test = switch (s.literal()) {
-            case StringLiteral sl -> value + ".isTextual() && "
-                    + ClassAssembler.javaString(sl.value()) + ".equals(" + value + ".textValue())";
-            case NumberLiteral nl -> value + ".isNumber() && " + value + ".doubleValue() == "
-                    + nl.value();
-            case BooleanLiteral bl -> value + ".isBoolean() && " + value + ".booleanValue() == " + bl.value();
-            default -> "fieldEq(" + value + ", " + s.literal().accept(t, ctx) + ")";
+    private static void emitPredicated(StringBuilder body, Spec s, String v,
+                                       Map<String, String> local, Translator t, GenCtx ctx) {
+        String action = s.kind() == Kind.COUNT ? countAction(v) : filterAction(v);
+        Cmp throwing = s.throwingCmp();
+        if (throwing == null) {
+            body.append("            if (").append(predExpr(s.pred(), local, t, ctx)).append(") {\n")
+                .append(action).append("            }\n");
+            return;
+        }
+        // An ordering comparison records the operands it could not compare and carries on; the
+        // error is raised by cmpRead at the statement that reads this operation's result.
+        String cmp = v + "p";
+        body.append("            JsonNode ").append(cmp).append(" = cmpSafe(")
+            .append(local.get(throwing.field())).append(", ")
+            .append(throwing.literal().accept(t, ctx)).append(", ")
+            .append(cmpOp(throwing.op())).append(");\n");
+        body.append("            if (").append(cmp).append(" == null) { if (").append(v)
+            .append("l == null) { ").append(v).append("l = ").append(local.get(throwing.field()))
+            .append("; ").append(v).append("r = ").append(throwing.literal().accept(t, ctx))
+            .append("; } }\n");
+        body.append("            else if (isTruthy(").append(cmp).append(")) {\n")
+            .append(action).append("            }\n");
+    }
+
+    private static String countAction(String v) {
+        return "                " + v + "c++;\n";
+    }
+
+    /** Accumulates exactly as {@code filter()} does, so nothing is allocated below two matches. */
+    private static String filterAction(String v) {
+        return "                if (" + v + "y != null) seqAdd(" + v + "y, __e);\n"
+             + "                else if (" + v + "x == null) " + v + "x = __e;\n"
+             + "                else { " + v + "y = seqStart(" + v + "x, __e); " + v + "x = null; }\n";
+    }
+
+    private static String cmpOp(String op) {
+        return switch (op) {
+            case "<"  -> "CMP_LT";
+            case "<=" -> "CMP_LE";
+            case ">"  -> "CMP_GT";
+            default   -> "CMP_GE";
         };
-        body.append("            if (__obj && ").append(test).append(") ").append(v).append("c++;\n");
     }
 
     /**
-     * Emits the {@code seq[field = literal]} selection, accumulating exactly as {@code filter()}
-     * does so that a result of nothing or one element allocates nothing.
+     * Renders a predicate as a Java boolean expression over the pre-read field locals. {@code &&}
+     * and {@code ||} reproduce the short-circuit of {@code and_}/{@code or_} exactly, and the
+     * equality tests are specialised on the literal's type here, where it is known, rather than
+     * re-dispatched per element.
      */
-    private static void emitFilterEq(StringBuilder body, String v, String value,
-                                     AstNode literal, Translator t, GenCtx ctx) {
-        body.append("            if (isTruthy(eq(").append(value).append(", ")
-            .append(literal.accept(t, ctx)).append("))) {\n");
-        body.append("                if (").append(v).append("y != null) seqAdd(").append(v).append("y, __e);\n");
-        body.append("                else if (").append(v).append("x == null) ").append(v).append("x = __e;\n");
-        body.append("                else { ").append(v).append("y = seqStart(").append(v)
-            .append("x, __e); ").append(v).append("x = null; }\n");
-        body.append("            }\n");
+    private static String predExpr(Pred p, Map<String, String> local, Translator t, GenCtx ctx) {
+        return switch (p) {
+            case Junction j -> "(" + predExpr(j.left(), local, t, ctx)
+                    + (j.isAnd() ? " && " : " || ") + predExpr(j.right(), local, t, ctx) + ")";
+            case Cmp c -> {
+                String value = local.get(c.field());
+                if ("!=".equals(c.op())) {
+                    yield "isTruthy(ne(" + value + ", " + c.literal().accept(t, ctx) + "))";
+                }
+                yield switch (c.literal()) {
+                    case StringLiteral sl -> value + ".isTextual() && "
+                            + ClassAssembler.javaString(sl.value()) + ".equals(" + value + ".textValue())";
+                    case NumberLiteral nl -> value + ".isNumber() && " + value + ".doubleValue() == "
+                            + nl.value();
+                    case BooleanLiteral bl -> value + ".isBoolean() && " + value + ".booleanValue() == "
+                            + bl.value();
+                    default -> "fieldEq(" + value + ", " + c.literal().accept(t, ctx) + ")";
+                };
+            }
+        };
     }
 
 }

@@ -1365,16 +1365,14 @@ public final class JsonataRuntime {
     public static JsonNode fn_count_field(JsonNode seq, String fieldName) {
         if (missing(seq)) return NF.numberNode(0);
         if (!seq.isArray()) {
-            if (!seq.isObject()) return NF.numberNode(0);
-            JsonNode v = seq.get(fieldName);
-            if (v == null || v == MISSING) return NF.numberNode(0);
+            JsonNode v = field(seq, fieldName);
+            if (v == MISSING) return NF.numberNode(0);
             return v.isArray() ? NF.numberNode(v.size()) : NF.numberNode(1);
         }
         int count = 0;
         for (JsonNode elem : seq) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             count += v.isArray() ? v.size() : 1;
         }
         return NF.numberNode(count);
@@ -1416,11 +1414,16 @@ public final class JsonataRuntime {
         return NF.numberNode(count);
     }
 
+    /**
+     * The per-element test {@code seq[field = literal]} performs. It navigates with {@link #field}
+     * rather than with {@code get}, because a predicate applies full field-navigation semantics to
+     * whatever the element is: an element that is itself an array maps the step over its members
+     * and can therefore match, exactly as {@link #filter} lets it.
+     */
     private static boolean fieldMatches(JsonNode node, String fieldName,
                                         java.util.function.Predicate<JsonNode> matches) {
-        if (!node.isObject()) return false;
-        JsonNode value = node.get(fieldName);
-        return value != null && value != MISSING && matches.test(value);
+        JsonNode value = field(node, fieldName);
+        return value != MISSING && matches.test(value);
     }
 
     public static JsonNode fn_count_filter(JsonNode seq, JsonataLambda predicate) throws RuntimeEvaluationException {
@@ -1433,15 +1436,23 @@ public final class JsonataRuntime {
         return NF.numberNode(count);
     }
 
-    /** Fused $sum(arr.field): navigates field and sums without an intermediate array. */
+    /**
+     * Fused {@code $sum(arr.field)}: navigates field and sums without an intermediate array.
+     *
+     * <p>The navigation goes through {@link #field}, not through {@code get} behind an {@code
+     * isObject} test, because the argument being collapsed is a <em>path</em>: an element that is
+     * itself an array maps the step over its members and contributes them, so {@code $sum($e.f)}
+     * over {@code [{"f":10}, [{"f":3}]]} is 13. Skipping non-objects agrees with that for scalars
+     * — {@code field} yields nothing for them — but silently drops the array case. Every fused
+     * aggregate below navigates the same way for the same reason.
+     */
     public static JsonNode fn_sum_field(JsonNode seq, String fieldName) throws RuntimeEvaluationException {
         if (missing(seq)) return MISSING;
         double sum = 0; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$sum"); sum += sub.doubleValue(); any = true; }
             } else { requireT0412(v, "$sum"); sum += v.doubleValue(); any = true; }
@@ -1455,9 +1466,8 @@ public final class JsonataRuntime {
         double sum = 0; int count = 0;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireAverageArg(sub); sum += sub.doubleValue(); count++; }
             } else { requireAverageArg(v); sum += v.doubleValue(); count++; }
@@ -1508,21 +1518,80 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Raises the error {@code $sum}, {@code $max} or {@code $min} reports for a non-numeric value.
+     * Reads one aggregate out of a fused scan, raising the error that aggregate would have raised.
      *
-     * <p>A fused scan cannot throw where the offending element is found: the aggregates sharing the
-     * loop were separate statements in the source, and the one bound first must be the one that
-     * fails. So the scan records each aggregate's first bad value, and the generated code calls
-     * this afterwards for the earliest-bound aggregate that recorded one — which is exactly the
-     * error the unfused sequence of passes would have raised.
+     * <p>A fused scan cannot throw where the offending element is found. The operations sharing the
+     * loop were separate statements in the source, and the error the expression reports is the one
+     * belonging to the statement that ran first — which may not even be one of the absorbed ones:
+     *
+     * <pre>
+     *   ( $e := bad;  $a := $count($e[s = 10]);  $z := $error("boom");  $b := $sum($e.s);  $b )
+     * </pre>
+     *
+     * <p>must report {@code boom}. So the scan records each aggregate's first offending value and
+     * carries it out in a slot of its own, and the throw happens here, at the point in the block
+     * where the original statement read the result. That makes the ordering exact against the
+     * statements the scan did not absorb, and not merely among the aggregates themselves.
+     *
+     * @param value the aggregate's result, used when it met no bad data
+     * @param bad   the first value that was neither a number nor an array of numbers, or null
      */
-    public static void aggFail(JsonNode bad, String fnName) throws RuntimeEvaluationException {
-        requireT0412(bad, fnName);
+    public static JsonNode aggRead(JsonNode value, JsonNode bad, String fnName)
+            throws RuntimeEvaluationException {
+        if (bad != null) requireT0412(bad, fnName);
+        return value;
     }
 
-    /** The {@link #aggFail} counterpart for {@code $average}, whose message names itself. */
-    public static void avgFail(JsonNode bad) throws RuntimeEvaluationException {
-        requireAverageArg(bad);
+    /** The {@link #aggRead} counterpart for {@code $average}, whose message names itself. */
+    public static JsonNode avgRead(JsonNode value, JsonNode bad) throws RuntimeEvaluationException {
+        if (bad != null) requireAverageArg(bad);
+        return value;
+    }
+
+    /**
+     * Reads a fused filter or count whose predicate compares with an ordering operator, raising the
+     * error that comparison would have raised. The operands are carried out rather than the error
+     * itself, so that the scan allocates nothing on the path that does not fail and the message
+     * still distinguishes T2009 from T2010.
+     */
+    public static JsonNode cmpRead(JsonNode value, JsonNode badLeft, JsonNode badRight)
+            throws RuntimeEvaluationException {
+        if (badLeft != null) throw orderingError(badLeft, badRight);
+        return value;
+    }
+
+    /** Operator selectors for {@link #cmpSafe}, in the order {@code < <= > >=}. */
+    public static final int CMP_LT = 0, CMP_LE = 1, CMP_GT = 2, CMP_GE = 3;
+
+    /**
+     * {@code <}, {@code <=}, {@code >} or {@code >=} without the throw: returns exactly what {@link
+     * #lt} and friends return, or {@code null} where they would have raised. A fused scan uses this
+     * to record the first offending operand pair and keep going, deferring the error to {@link
+     * #cmpRead} at the statement that reads the result — the same deferral {@link #aggRead}
+     * performs for the aggregates, and for the same reason.
+     */
+    public static JsonNode cmpSafe(JsonNode a, JsonNode b, int op) {
+        if (!orderingOk(a) || !orderingOk(b)) return null;
+        if (missing(a) || missing(b)) return MISSING;
+        if (a.isNumber() && b.isNumber()) {
+            double x = a.doubleValue(), y = b.doubleValue();
+            return bool(switch (op) {
+                case CMP_LT -> x < y;
+                case CMP_LE -> x <= y;
+                case CMP_GT -> x > y;
+                default     -> x >= y;
+            });
+        }
+        if (a.isTextual() && b.isTextual()) {
+            int c = a.textValue().compareTo(b.textValue());
+            return bool(switch (op) {
+                case CMP_LT -> c < 0;
+                case CMP_LE -> c <= 0;
+                case CMP_GT -> c > 0;
+                default     -> c >= 0;
+            });
+        }
+        return null;
     }
 
     /** Fused $max(arr.field): navigates field and finds max without an intermediate array. */
@@ -1531,9 +1600,8 @@ public final class JsonataRuntime {
         double max = Double.NEGATIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$max"); double d = sub.doubleValue(); if (d > max) max = d; any = true; }
             } else { requireT0412(v, "$max"); double d = v.doubleValue(); if (d > max) max = d; any = true; }
@@ -1547,14 +1615,12 @@ public final class JsonataRuntime {
         double sum = 0; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$sum"); sum += n.doubleValue(); any = true; } }
                 else { requireT0412(v2, "$sum"); sum += v2.doubleValue(); any = true; }
             }
@@ -1568,14 +1634,12 @@ public final class JsonataRuntime {
         double sum = 0; int count = 0;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireAverageArg(n); sum += n.doubleValue(); count++; } }
                 else { requireAverageArg(v2); sum += v2.doubleValue(); count++; }
             }
@@ -1589,14 +1653,12 @@ public final class JsonataRuntime {
         double max = Double.NEGATIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$max"); double d = n.doubleValue(); if (d > max) max = d; any = true; } }
                 else { requireT0412(v2, "$max"); double d = v2.doubleValue(); if (d > max) max = d; any = true; }
             }
@@ -1610,14 +1672,12 @@ public final class JsonataRuntime {
         double min = Double.POSITIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v1 = elem.get(f1);
-            if (v1 == null || v1 == MISSING) continue;
+            JsonNode v1 = field(elem, f1);
+            if (v1 == MISSING) continue;
             Iterable<JsonNode> sub = v1.isArray() ? v1 : List.of(v1);
             for (JsonNode s : sub) {
-                if (!s.isObject()) continue;
-                JsonNode v2 = s.get(f2);
-                if (v2 == null || v2 == MISSING) continue;
+                JsonNode v2 = field(s, f2);
+                if (v2 == MISSING) continue;
                 if (v2.isArray()) { for (JsonNode n : v2) { requireT0412(n, "$min"); double d = n.doubleValue(); if (d < min) min = d; any = true; } }
                 else { requireT0412(v2, "$min"); double d = v2.doubleValue(); if (d < min) min = d; any = true; }
             }
@@ -1631,9 +1691,8 @@ public final class JsonataRuntime {
         double min = Double.POSITIVE_INFINITY; boolean any = false;
         Iterable<JsonNode> items = seq.isArray() ? seq : List.of(seq);
         for (JsonNode elem : items) {
-            if (!elem.isObject()) continue;
-            JsonNode v = elem.get(fieldName);
-            if (v == null || v == MISSING) continue;
+            JsonNode v = field(elem, fieldName);
+            if (v == MISSING) continue;
             if (v.isArray()) {
                 for (JsonNode sub : v) { requireT0412(sub, "$min"); double d = sub.doubleValue(); if (d < min) min = d; any = true; }
             } else { requireT0412(v, "$min"); double d = v.doubleValue(); if (d < min) min = d; any = true; }
@@ -1886,8 +1945,29 @@ public final class JsonataRuntime {
                 : tuple -> fn_apply(fn, tuple.get(0));
     }
 
+    /**
+     * Rejects a function value in the sequence slot of a higher-order built-in.
+     *
+     * <p>{@code $filter(function($x){$x}, [1,2])} has its arguments the wrong way round. Every
+     * one of these declares its first parameter as {@code a}, so the reference rejects it against
+     * the signature with T0410 before the body runs. Without this the mistake surfaced further
+     * in and worse: T1006 ("not a function") from the *callback* slot for some, and for {@code
+     * $reduce} and {@code $sort} no error at all — they returned the function back, or a
+     * one-element array holding it.
+     *
+     * <p>Only a function is rejected. A scalar there is legal — the sequence slot promotes a
+     * single value to a one-element sequence, so {@code $map(1, $string)} is {@code "1"}.
+     */
+    private static void requireSequenceArgument(JsonNode arr, String fnName)
+            throws RuntimeEvaluationException {
+        if (isLambdaToken(arr))
+            throw new RuntimeEvaluationException("T0410",
+                    "Argument 1 of function " + fnName + " does not match function signature");
+    }
+
     /** {@code $map} with the callback supplied as a value. */
     public static JsonNode fn_map(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "map");
         return lambdaArity(fn) >= 2
                 ? SequenceBuiltins.fn_map_indexed(arr, tupleCallback(fn))
                 : SequenceBuiltins.fn_map(arr, elementCallback(fn));
@@ -1895,6 +1975,7 @@ public final class JsonataRuntime {
 
     /** {@code $filter} with the predicate supplied as a value. */
     public static JsonNode fn_filter(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "filter");
         return lambdaArity(predicate) >= 2
                 ? SequenceBuiltins.fn_filter_indexed(arr, tupleCallback(predicate))
                 : SequenceBuiltins.fn_filter(arr, elementCallback(predicate));
@@ -1902,6 +1983,7 @@ public final class JsonataRuntime {
 
     /** {@code $single} with the predicate supplied as a value. */
     public static JsonNode fn_single(JsonNode arr, JsonNode predicate) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "single");
         return lambdaArity(predicate) >= 2
                 ? SequenceBuiltins.fn_single_indexed(arr, tupleCallback(predicate))
                 : SequenceBuiltins.fn_single(arr, elementCallback(predicate));
@@ -1923,6 +2005,7 @@ public final class JsonataRuntime {
      * literal lambda.
      */
     public static JsonNode fn_sort(JsonNode arr, JsonNode fn) throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "sort");
         return lambdaArity(fn) >= 2
                 ? SequenceBuiltins.fn_sort_comparator(arr, tupleCallback(fn))
                 : SequenceBuiltins.fn_sort(arr, elementCallback(fn));
@@ -1930,6 +2013,7 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_reduce(JsonNode arr, JsonataLambda fn, JsonNode init)
             throws RuntimeEvaluationException {
+        requireSequenceArgument(arr, "reduce");
         return SequenceBuiltins.fn_reduce(arr, fn, init);
     }
 

@@ -108,8 +108,18 @@ public final class NumericBuiltins {
         if (JsonataRuntime.missing(number)) return JsonataRuntime.MISSING;
         double v = JsonataRuntime.toNumber(number);
         if (Double.isNaN(v) || Double.isInfinite(v)) return NF.numberNode(v);
-        int p = JsonataRuntime.missing(precision) ? 0 : (int) JsonataRuntime.toNumber(precision);
-        return JsonataRuntime.numNode(roundHalfEven(v, p));
+        // Clamped, not cast. `(int) 1e15` saturates to Integer.MAX_VALUE, and shifting a decimal
+        // exponent by that produced the literal string "Infinity" for the next parse to choke on.
+        // Beyond +-400 the arithmetic is already saturated -- 10^400 is infinite and 10^-400 is
+        // zero -- so clamping there is exact as well as safe.
+        double requested = JsonataRuntime.missing(precision) ? 0 : JsonataRuntime.toNumber(precision);
+        int p = (int) Math.max(-400, Math.min(400, requested));
+        double rounded = roundHalfEven(v, p);
+        // The reference computes `value * 10^precision`, so a precision that overflows the
+        // product yields undefined -- and it depends on the value, not on the precision alone:
+        // $round(1, 308) is 1, $round(1e15, 308) is undefined.
+        if (!Double.isFinite(rounded)) return JsonataRuntime.MISSING;
+        return JsonataRuntime.numNode(rounded);
     }
 
     /**
@@ -159,6 +169,10 @@ public final class NumericBuiltins {
      * what half-to-even has to be shown.
      */
     private static double shiftDecimalExponent(double value, int by) {
+        // A shift can overflow to infinity, and "Infinity" is not a number literal any parser
+        // will take back. Propagate it instead; fn_round turns a non-finite result into
+        // undefined, which is what the reference's own overflow produces.
+        if (!Double.isFinite(value)) return value;
         String s = JsonataRuntime.renderNumberRaw(value);
         int e = s.indexOf('e');
         if (e < 0) return Double.parseDouble(s + "e" + by);

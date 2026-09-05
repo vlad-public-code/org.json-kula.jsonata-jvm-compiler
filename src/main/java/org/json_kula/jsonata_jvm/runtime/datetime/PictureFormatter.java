@@ -280,6 +280,15 @@ public final class PictureFormatter {
         }
 
         if (component == 'f') {
+            // A fractional second has no name, and asking for one leaves no integer picture to
+            // fall back on. The block above raises D3133 for every other component that cannot be
+            // named; 'f' is formatted here rather than there, so it needs the same guard — without
+            // it the missing picture surfaces as a NullPointerException. The reference throws a
+            // raw JavaScript TypeError for [fn], which is not a JSONata error either.
+            if (spec.names() != null) {
+                throw new RuntimeEvaluationException("D3133",
+                        "Name presentation is not supported for component " + component);
+            }
             // The raw millisecond value goes through the integer path — it is not a
             // scaled decimal fraction, so [f0001] on 1 ms is "0001", not "0010".
             return IntegerPicture.format(dt.getNano() / 1_000_000, spec.integerFormat());

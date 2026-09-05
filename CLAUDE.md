@@ -37,9 +37,13 @@ Stack:
     operation. Planned per block before any statement is compiled; absorbed operations are
     redirected to the scan's result slots through a node-identity memo on `GenState`. The fused loop
     is emitted as its own `private static` helper — inlining it into the block method measured
-    *slower* than not fusing, because the block method grows past what C2 compiles well. Aggregates
-    record their first bad value rather than throwing, so the error the unfused statements would
-    have raised is still the one reported.
+    *slower* than not fusing, because the block method grows past what C2 compiles well. Predicates
+    are pattern-matched rather than compiled as callbacks (`=`, `!=`, `and`, `or` anywhere in the
+    tree; `<`, `<=`, `>`, `>=` as a whole predicate), because sharing the reads is the optimisation
+    and an opaque callback re-reads inside itself what the loop just shared. An operation that can
+    fail records its first offending value and carries on; the throw happens in `aggRead` /
+    `cmpRead` at the statement that reads the result, so the error is ordered exactly against the
+    statements the scan did *not* absorb as well as against the ones it did.
   - Literal nodes and object-constructor key arrays are hoisted to `private static final` fields of the generated class (`GenState.constant` / `GenState.keyArray`), so a predicate does not rebuild them per element per evaluation.
   - All AST node types are handled: literals, field/path/wildcard/descendant navigation, predicates, subscripts, all binary and unary operators, conditionals, function calls (built-ins + user-defined), lambdas, variable bindings, blocks, array/object constructors, range, sort, group-by, chain (`~>`), transform.
   - Blocks with variable bindings are emitted as private helper methods; lambdas are either inlined or also emitted as helper methods.

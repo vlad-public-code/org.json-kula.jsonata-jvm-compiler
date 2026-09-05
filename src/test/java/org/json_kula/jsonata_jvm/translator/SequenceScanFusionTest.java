@@ -141,13 +141,32 @@ class SequenceScanFusionTest {
     }
 
     @Test
-    void nonObjectElementsAreSkippedByAggregatesButSeenByFilters() throws Exception {
+    void scalarElementsContributeNothingToEitherHalf() throws Exception {
         String expr = """
                 ( $s := e;
                   { "sum": $sum($s.salary), "max": $max($s.salary),
                     "senior": $count($s[level = "senior"]) } )""";
         assertJsonEquals(JsonNodeTestHelper.parseJson("{\"sum\":10,\"max\":10,\"senior\":1}"),
                 eval(expr, "{ \"e\": [ 7, \"x\", { \"salary\": 10, \"level\": \"senior\" } ] }"));
+    }
+
+    @Test
+    void anElementThatIsItselfAnArrayIsNavigatedIntoByBothHalves() throws Exception {
+        // Both an aggregate over $s.salary and a predicate on $s apply a field step per element,
+        // and a step maps over an array element rather than skipping it. So one read serves both —
+        // but only because both navigate this way: gating the aggregates on isObject makes $sum
+        // disagree with the $s.salary its own argument spells out.
+        String json = """
+                { "e": [ { "salary": 10, "level": "senior" },
+                         [ { "salary": 3, "level": "senior" } ] ] }""";
+        String expr = """
+                ( $s := e;
+                  { "sum": $sum($s.salary), "min": $min($s.salary), "path": $s.salary,
+                    "senior": $count($s[level = "senior"]) } )""";
+        assertTrue(fused(expr));
+        assertJsonEquals(
+                JsonNodeTestHelper.parseJson("{\"sum\":13,\"min\":3,\"path\":[10,3],\"senior\":2}"),
+                eval(expr, json));
     }
 
     @Test
@@ -330,5 +349,171 @@ class SequenceScanFusionTest {
                     "sum": $sum($s.salary) } )""";
         assertJsonEquals(JsonNodeTestHelper.parseJson("{\"x\":1,\"y\":0,\"sum\":10}"),
                 eval(expr, "{ \"e\": [ { \"salary\": 10, \"level\": \"senior\" }, { \"other\": 1 } ] }"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Predicates beyond field = literal
+    // -------------------------------------------------------------------------
+
+    @Test
+    void inequalityAndJunctionPredicatesAreAbsorbed() throws Exception {
+        String expr = """
+                ( $s := e;
+                  { "notSenior": $count($s[level != "senior"]),
+                    "seniorTen": $count($s[level = "senior" and salary = 10]),
+                    "either":    $count($s[level = "junior" or salary = 20]),
+                    "nested":    $count($s[(level = "senior" and salary = 10) or level = "junior"]),
+                    "picked":    $s[level != "senior"].name } )""";
+        assertTrue(fused(expr));
+        assertJsonEquals(JsonNodeTestHelper.parseJson(
+                        "{\"notSenior\":1,\"seniorTen\":1,\"either\":2,\"nested\":2,\"picked\":\"b\"}"),
+                eval(expr, STAFF));
+    }
+
+    @Test
+    void aJunctionOverTwoFieldsStillReadsEachFieldOnce() throws Exception {
+        // The point of the pass: four operations mentioning `level` between them, one read of it.
+        String generated = source("""
+                ( $s := e;
+                  { "a": $count($s[level = "senior" and salary = 10]),
+                    "b": $count($s[level = "junior" or salary = 20]),
+                    "c": $count($s[level != "senior"]),
+                    "d": $sum($s.salary) } )""");
+        int scan = generated.indexOf("private static JsonNode[] __scan");
+        assertTrue(scan >= 0, "expected a fused scan");
+        String body = generated.substring(scan);
+        assertEquals(1, countOccurrences(body, "field(__e, \"level\")"));
+        assertEquals(1, countOccurrences(body, "field(__e, \"salary\")"));
+    }
+
+    @Test
+    void orderingPredicatesAreAbsorbed() throws Exception {
+        String expr = """
+                ( $s := e;
+                  { "ge": $count($s[salary >= 20]), "gt": $count($s[salary > 20]),
+                    "lt": $count($s[salary < 20]), "le": $count($s[salary <= 20]),
+                    "byName": $count($s[level >= "s"]), "picked": $s[salary > 25].name } )""";
+        assertTrue(fused(expr));
+        assertJsonEquals(JsonNodeTestHelper.parseJson(
+                        "{\"ge\":2,\"gt\":1,\"lt\":1,\"le\":2,\"byName\":2,\"picked\":\"b\"}"),
+                eval(expr, STAFF));
+    }
+
+    @Test
+    void anOrderingComparisonUnderAJunctionIsDeclined() throws Exception {
+        // Its error would have to be deferred to the read, which a compound predicate cannot
+        // express — so that operation stays a pass of its own, and the answer is unchanged.
+        String expr = """
+                ( $s := e;
+                  { "a": $count($s[salary >= 20 and level = "senior"]),
+                    "b": $count($s[level = "senior"]), "c": $sum($s.salary) } )""";
+        assertJsonEquals(JsonNodeTestHelper.parseJson("{\"a\":1,\"b\":2,\"c\":60}"), eval(expr, STAFF));
+    }
+
+    @Test
+    void anOrderingErrorIsRaisedWhereTheComparisonWas() throws Exception {
+        JsonataEvaluationException error = assertThrows(JsonataEvaluationException.class,
+                () -> eval("""
+                        ( $s := e;
+                          { "a": $count($s[salary >= "x"]), "b": $count($s[level = "senior"]),
+                            "c": $sum($s.salary) } )""", STAFF));
+        assertTrue(error.getMessage().contains("ordering operator"),
+                "expected the ordering failure, got: " + error.getMessage());
+    }
+
+    @Test
+    void twoOrderingComparisonsKeepTheirOwnOperandSlots() throws Exception {
+        String expr = """
+                ( $s := e;
+                  $byPay   := $count($s[salary >= 20]);
+                  $byLevel := $count($s[level >= "s"]);
+                  $all     := $sum($s.salary);
+                  [$byPay, $byLevel, $all] )""";
+        assertTrue(fused(expr));
+        assertJsonEquals(JsonNodeTestHelper.parseJson("[2,2,60]"), eval(expr, STAFF));
+    }
+
+    @Test
+    void theEarliestBoundOrderingComparisonReportsTheError() throws Exception {
+        // Both fail, with different errors, and neither fails on the scan's first element: the one
+        // bound first is the one that reports, exactly as two separate passes would have.
+        String expr = """
+                ( $s := e;
+                  $a := $count($s[level >= true]);
+                  $b := $count($s[salary >= "x"]);
+                  $c := $sum($s.salary);
+                  [$a, $b, $c] )""";
+        assertTrue(fused(expr));
+        JsonataEvaluationException error =
+                assertThrows(JsonataEvaluationException.class, () -> eval(expr, STAFF));
+        assertTrue(error.getMessage().contains("numeric or string values"),
+                "expected the T2010 failure of the first comparison, got: " + error.getMessage());
+    }
+
+    @Test
+    void twoOperationsSharingAFieldThroughAPredicateAreWorthFusing() throws Exception {
+        assertTrue(fused("( $s := e; { \"a\": $sum($s.salary), \"b\": $count($s[salary = 10]) } )"));
+        assertFalse(fused("( $s := e; { \"a\": $sum($s.salary), \"b\": $count($s[level = \"x\"]) } )"));
+    }
+
+    // -------------------------------------------------------------------------
+    // An absorbed error does not outrun the statements the scan did not absorb
+    // -------------------------------------------------------------------------
+
+    @Test
+    void anAbsorbedAggregateErrorDoesNotOutrunAnUnabsorbedStatement() throws Exception {
+        // The scan runs at the group's first use, but $sum's failure belongs to the statement that
+        // bound it — which is after $error, so $error is what the expression reports.
+        String json = "{ \"e\": [ { \"s\": 10 }, { \"s\": \"bad\" } ] }";
+        String expr = """
+                ( $e := e;
+                  $a := $count($e[s = 10]);
+                  $z := $error("boom");
+                  $b := $sum($e.s);
+                  $c := $max($e.s);
+                  $b )""";
+        assertTrue(fused(expr));
+        JsonataEvaluationException error =
+                assertThrows(JsonataEvaluationException.class, () -> eval(expr, json));
+        assertTrue(error.getMessage().contains("boom"),
+                "expected the $error, got: " + error.getMessage());
+    }
+
+    @Test
+    void anAbsorbedOrderingErrorDoesNotOutrunAnUnabsorbedStatement() throws Exception {
+        String expr = """
+                ( $s := e;
+                  $a := $count($s[level = "senior"]);
+                  $z := $error("boom");
+                  $b := $count($s[salary >= "x"]);
+                  $c := $sum($s.salary);
+                  $b )""";
+        assertTrue(fused(expr));
+        JsonataEvaluationException error =
+                assertThrows(JsonataEvaluationException.class, () -> eval(expr, STAFF));
+        assertTrue(error.getMessage().contains("boom"),
+                "expected the $error, got: " + error.getMessage());
+    }
+
+    @Test
+    void anAbsorbedAggregateStillFailsAtItsOwnBindingWhenNothingReadsIt() throws Exception {
+        String json = "{ \"e\": [ { \"s\": 10 }, { \"s\": \"bad\" } ] }";
+        JsonataEvaluationException error = assertThrows(JsonataEvaluationException.class,
+                () -> eval("""
+                        ( $e := e;
+                          $a := $sum($e.s);
+                          $b := $count($e[s = 10]);
+                          $c := $max($e.s);
+                          $b )""", json));
+        assertTrue(error.getMessage().contains("$sum"),
+                "expected the $sum failure, got: " + error.getMessage());
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        for (int at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+            count++;
+        }
+        return count;
     }
 }

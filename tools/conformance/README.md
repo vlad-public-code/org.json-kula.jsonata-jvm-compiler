@@ -23,6 +23,10 @@ is right; the reference decides.
 |---|---|
 | `gen_corpus.js <out>` | the mixed cross-port corpus (~3,100 cases, every area) |
 | `gen_sweep.js <area> <out>` | one wide sweep: `numbers`, `formatNumber`, `integers`, `datetime`, `regex`, `strings` |
+| `gen_fusion.js <out>` | 373 blocks that bind a sequence and interrogate it — the shape `SequenceScanFusion` rewrites |
+| `gen_sibling.js <out>` | the findings the sibling ports recorded, as questions for this one |
+| `gen_argfuzz.js <names> <out> [n]` | every built-in against an adversarial argument pool |
+| `scan_leaks.js <cases> <out>` | reports results whose error is not a JSONata error (no ref needed) |
 | `run_js.js <cases> <out>` | evaluates the corpus with jsonata2js |
 | `run_py.py <cases> <out> [src]` | evaluates the corpus with jsonata2py |
 | `arbitrate.js <cases> <java> <ref> [js]` | counts divergences and says who the reference agrees with |
@@ -62,6 +66,35 @@ node tools/conformance/byarea.js cases.json java.json ref.json js.json
 
 `ProbeRunner` bounds each probe with a wall clock, because a pathological probe is a
 finding in its own right rather than a reason to lose the other 3,000 results.
+
+### Leak scanning
+
+`scan_leaks.js` needs no oracle. It reads a `ProbeRunner` output and reports every result whose
+error is not a JSONata error — `ProbeRunner` falls back to the exception's class name when there
+is no code, so a host exception that escaped shows up as `eval:NullPointerException` or
+`eval:JsonataEvaluationException`. Those are bugs regardless of what the reference does: the
+caller gets an error it cannot match on, carrying an internal class name.
+
+```bash
+node tools/conformance/gen_argfuzz.js builtins.txt fuzz.json 2
+java -cp "target/test-classes;target/classes;$(cat target/cp.txt)" \
+     org.json_kula.jsonata_jvm.conformance.ProbeRunner fuzz.json fuzz_out.json
+node tools/conformance/scan_leaks.js fuzz.json fuzz_out.json   # exits non-zero if any leaked
+```
+
+`builtins.txt` is one name per line; generate it from the signature table:
+
+```bash
+grep -o 'Map.entry("[a-zA-Z0-9]*"' \
+     src/main/java/org/json_kula/jsonata_jvm/translator/BuiltinSignatures.java \
+  | sed 's/Map.entry("//;s/"//' | sort -u > builtins.txt
+```
+
+**Generate the reference output in the same UTC day you evaluate it.** A picture with no date
+component defaults to today — `$toMillis("12:30", "[H01]:[m01]")` is one such case in the mixed
+corpus — so a `ref.json` captured before UTC midnight and arbitrated after it reports a spurious
+divergence, off by exactly 86,400,000. Re-run the oracle before believing a count that moved by
+one.
 
 `PictureBench` (same package) times the picture-string built-ins; it reports the minimum of
 several rounds, since a single round varies by more than the effects worth measuring.

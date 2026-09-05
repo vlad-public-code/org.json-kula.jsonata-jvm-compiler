@@ -221,12 +221,31 @@ public final class StringBuiltins {
     // $split
     // =========================================================================
 
+    /**
+     * Validates the optional numeric limit that {@code $split}, {@code $replace} and {@code
+     * $match} each declare as {@code n?}.
+     *
+     * <p>It runs <em>before</em> the undefined-argument short-circuit, because the reference
+     * validates a call against its signature before the function body sees anything:
+     * {@code $split(nope, /a/, "1")} is T0410 there, not undefined. Checking it inside the body
+     * — after the early return — makes a bad argument invisible whenever an earlier one happens
+     * to be absent.
+     */
+    private static void requireOptionalLimit(JsonNode limit, String fnName, int position)
+            throws RuntimeEvaluationException {
+        if (JsonataRuntime.missing(limit)) return;
+        if (!limit.isNumber())
+            throw new RuntimeEvaluationException("T0410",
+                    fnName + ": argument " + position + " must be a number");
+    }
+
     public static JsonNode fn_split(JsonNode str, JsonNode separator) throws RuntimeEvaluationException {
         return fn_split(str, separator, JsonataRuntime.MISSING);
     }
 
     public static JsonNode fn_split(JsonNode str, JsonNode separator, JsonNode limit)
             throws RuntimeEvaluationException {
+        requireOptionalLimit(limit, "$split", 3);
         if (JsonataRuntime.missing(str)) return JsonataRuntime.MISSING;
         if (JsonataRuntime.missing(separator)) separator = NF.textNode("");
         if (!str.isTextual())
@@ -237,12 +256,8 @@ public final class StringBuiltins {
         if (!JsonataRuntime.isRegexToken(separator) && !separator.isTextual())
             throw new RuntimeEvaluationException("T0410",
                     "$split: argument 2 must be a string or regex");
-        if (!JsonataRuntime.missing(limit)) {
-            if (!limit.isNumber())
-                throw new RuntimeEvaluationException("T0410", "$split: argument 3 must be a number");
-            if (limit.doubleValue() < 0)
-                throw new RuntimeEvaluationException("D3020", "$split: limit must be non-negative");
-        }
+        if (!JsonataRuntime.missing(limit) && limit.doubleValue() < 0)
+            throw new RuntimeEvaluationException("D3020", "$split: limit must be non-negative");
         String s = str.textValue();
         // Compared as a number rather than truncated to an int: the reference tests
         // `count < limit`, so a limit of 1.5 admits two pieces, not one.
@@ -331,6 +346,7 @@ public final class StringBuiltins {
 
     public static JsonNode fn_match(JsonNode str, JsonNode pattern, JsonNode limit)
             throws RuntimeEvaluationException {
+        requireOptionalLimit(limit, "$match", 3);
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern))
             return JsonataRuntime.MISSING;
         String s = JsonataRuntime.toText(str);
@@ -381,6 +397,7 @@ public final class StringBuiltins {
     public static JsonNode fn_replace(JsonNode str, JsonNode pattern,
                                       JsonNode replacement, JsonNode limit)
             throws RuntimeEvaluationException {
+        requireOptionalLimit(limit, "$replace", 4);
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(pattern)
                 || JsonataRuntime.missing(replacement))
             return JsonataRuntime.MISSING;
@@ -392,13 +409,8 @@ public final class StringBuiltins {
         if (!JsonataRuntime.isLambdaToken(replacement) && !replacement.isTextual())
             throw new RuntimeEvaluationException("T0410",
                     "$replace: argument 3 must be a string or function");
-        if (!JsonataRuntime.missing(limit)) {
-            if (!limit.isNumber())
-                throw new RuntimeEvaluationException("T0410",
-                        "$replace: argument 4 must be a number");
-            if (limit.doubleValue() < 0)
-                throw new RuntimeEvaluationException("D3011", "$replace: limit must be non-negative");
-        }
+        if (!JsonataRuntime.missing(limit) && limit.doubleValue() < 0)
+            throw new RuntimeEvaluationException("D3011", "$replace: limit must be non-negative");
         String s = str.textValue();
         if (!JsonataRuntime.isRegexToken(pattern) && pattern.textValue().isEmpty())
             throw new RuntimeEvaluationException("D3010",
@@ -429,10 +441,14 @@ public final class StringBuiltins {
                 matchObj.set("next", JsonataRuntime.lambdaNode(
                         ignored -> RegexOps.toMatchObject(cursor.next()), 0));
                 JsonNode repResult = JsonataRuntime.fn_apply(replacement, matchObj);
-                if (!JsonataRuntime.missing(repResult) && !repResult.isTextual())
+                // Undefined is not a string: the reference tests `typeof x === "string"` and
+                // raises D3012 for everything else, so a replacer that navigates to a field the
+                // match object does not have ($m.index — it is `start`/`end` here and there)
+                // fails rather than silently substituting nothing.
+                if (!repResult.isTextual())
                     throw new RuntimeEvaluationException("D3012",
                             "$replace: replacement function must return a string");
-                sb.append(JsonataRuntime.missing(repResult) ? "" : repResult.textValue());
+                sb.append(repResult.textValue());
             } else {
                 sb.append(RegexOps.expandReplacement(
                         JsonataRuntime.toText(replacement), found.match(), found.groups()));
@@ -448,6 +464,13 @@ public final class StringBuiltins {
     // $pad
     // =========================================================================
 
+    /**
+     * The longest string the reference host will build ({@code 2^29 - 24}). Past this V8 raises
+     * {@code RangeError: Invalid string length}, so it is the natural place for {@code $pad} to
+     * stop trying too.
+     */
+    private static final double MAX_PAD_WIDTH = 536_870_888d;
+
     public static JsonNode fn_pad(JsonNode str, JsonNode width, JsonNode padChar)
             throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(str) || JsonataRuntime.missing(width))
@@ -455,7 +478,17 @@ public final class StringBuiltins {
         if (!str.isTextual())
             throw new RuntimeEvaluationException("T0410", "$pad: argument 1 must be a string");
         String s = str.textValue();
-        int w  = (int) JsonataRuntime.toNumber(width);
+        double requested = JsonataRuntime.toNumber(width);
+        // Bounded before anything is allocated. `(int)` saturates 1e15 to Integer.MAX_VALUE and
+        // the builder below then tried for a two-billion-character string: an OutOfMemoryError,
+        // which is not an error the caller can catch and act on -- it can take unrelated work in
+        // the same JVM down with it. The bound is the reference host's own maximum string
+        // length, so every pad it can produce is still produced here, and the width that makes
+        // it throw RangeError is the width that raises here.
+        if (Math.abs(requested) > MAX_PAD_WIDTH)
+            throw new RuntimeEvaluationException("D1001",
+                    "$pad: width out of range: " + JsonataRuntime.renderNumberRaw(requested));
+        int w  = (int) requested;
         String pc = JsonataRuntime.missing(padChar) ? " " : JsonataRuntime.toText(padChar);
         if (pc.isEmpty()) pc = " ";
         int cpLen   = s.codePointCount(0, s.length());
@@ -530,10 +563,16 @@ public final class StringBuiltins {
         // Lenient, like Node's Buffer.from(s, "base64"): characters outside the alphabet
         // are skipped and surplus padding ignored, rather than rejected. The reference
         // decodes "!!!!" to "" and "YQ===" to "a"; a strict decoder threw on both.
+        //
+        // The pad character is not skipped, though — it *ends* the stream, wherever it appears.
+        // Skipping it agrees with Node on every well-formed input, which is why it survived: it
+        // only shows up when the padding is in the middle, as in "YW=J" (decoding to "a"
+        // there, and to "ab" if you read past it).
         String encoded = str.textValue();
         StringBuilder cleaned = new StringBuilder(encoded.length());
         for (int i = 0; i < encoded.length(); i++) {
             char c = encoded.charAt(i);
+            if (c == '=') break;
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
                     || c == '+' || c == '/' || c == '-' || c == '_') {
                 cleaned.append(c == '-' ? '+' : c == '_' ? '/' : c);

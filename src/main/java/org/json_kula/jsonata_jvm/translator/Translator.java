@@ -577,6 +577,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      */
     private static final String UNTRANSLATED_CALLBACK = "__callback_translated_by_builtin__";
 
+    /**
+     * The argument index every {@link #CALLBACK_BUILTINS} member takes its callback in. They all
+     * read {@code n.args().get(1)}: the sequence is first, the callback second, and {@code
+     * $reduce}'s optional initial value third.
+     */
+    private static final int CALLBACK_ARG_INDEX = 1;
+
     @Override
     public String visitFunctionCall(FunctionCall n, GenCtx ctx) {
         // Arguments are never in tail position — only the call site itself may be.
@@ -597,8 +604,14 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         boolean callbackTranslatedByBuiltin =
                 !ctx.state.isLocal(n.name()) && CALLBACK_BUILTINS.contains(n.name());
         List<String> args = new ArrayList<>(n.args().size());
-        for (AstNode arg : n.args()) {
-            args.add(callbackTranslatedByBuiltin && arg instanceof Lambda
+        for (int i = 0; i < n.args().size(); i++) {
+            AstNode arg = n.args().get(i);
+            // Only the callback POSITION is left to the built-in's own generator. A lambda
+            // anywhere else is an ordinary argument — `$filter(function($x){$x}, [1,2])` has the
+            // arguments the wrong way round, which is a T0410 the runtime reports, not a lambda
+            // for the generator to consume. Poisoning it here made the generated class fail to
+            // compile, so a plainly wrong expression came back as a Java compilation error.
+            args.add(callbackTranslatedByBuiltin && i == CALLBACK_ARG_INDEX && arg instanceof Lambda
                     ? UNTRANSLATED_CALLBACK
                     : arg.accept(this, argCtx));
         }
@@ -696,13 +709,19 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     : args.size() == 2
                     ? "fn_substring(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_substring(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "substringBefore" -> args.size() == 1
+            case "substringBefore" -> args.isEmpty()
+                    ? "fn_arity_error(\"substringBefore\", 2, 0)"
+                    : args.size() == 1
                     ? "fn_substringBefore_ctx(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_substringBefore(" + args.get(0) + ", " + args.get(1) + ")";
-            case "substringAfter"  -> args.size() == 1
+            case "substringAfter"  -> args.isEmpty()
+                    ? "fn_arity_error(\"substringAfter\", 2, 0)"
+                    : args.size() == 1
                     ? "fn_substringAfter_ctx(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_substringAfter(" + args.get(0) + ", " + args.get(1) + ")";
-            case "contains"        -> args.size() == 1
+            case "contains"        -> args.isEmpty()
+                    ? "fn_arity_error(\"contains\", 2, 0)"
+                    : args.size() == 1
                     ? "fn_contains(" + contextValue + ", " + args.get(0) + ")"
                     : "fn_contains(" + args.get(0) + ", " + args.get(1) + ")";
             case "split"   -> args.size() == 1
@@ -710,7 +729,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     : args.size() == 2
                     ? "fn_split(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_split(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "match"   -> args.size() == 1
+            case "match"   -> args.isEmpty()
+                    ? "fn_arity_error(\"match\", 2, 0)"
+                    : args.size() == 1
                     ? "fn_match(" + contextValue + ", " + args.get(0) + ")"
                     : args.size() == 2
                     ? "fn_match(" + args.get(0) + ", " + args.get(1) + ")"
@@ -730,7 +751,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "pad"             -> args.size() == 2
                     ? "fn_pad(" + args.get(0) + ", " + args.get(1) + ")"
                     : "fn_pad(" + args.get(0) + ", " + args.get(1) + ", " + args.get(2) + ")";
-            case "eval"            -> args.size() == 1
+            case "eval"            -> args.isEmpty()
+                    ? "fn_arity_error(\"eval\", 1, 0)"
+                    : args.size() == 1
                     ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ")"
                     : "fn_eval(" + args.get(0) + ", " + args.get(1) + ")";
             case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, contextValue) + ")";

@@ -23,13 +23,13 @@ final class FunctionCallCodeGen {
      * <p>The callee is a field of the step context, so it is resolved at runtime by
      * {@code fieldFunction}; whether the name is also a built-in is known now, and is
      * baked in so the runtime can report T1005 instead of T1006 for a missing one.
-     * Arguments follow the ordinary calling convention: none becomes {@code NULL}, one is
+     * Arguments follow the ordinary calling convention: none becomes {@code MISSING}, one is
      * passed through, several are packed.
      */
     static String genFieldFunctionCall(FunctionCall n, List<String> args, GenCtx ctx) {
         String callee = "fieldFunction(" + ctx.ctxVar + ", \"" + n.name() + "\", "
                 + org.json_kula.jsonata_jvm.parser.Parser.isBuiltin(n.name()) + ")";
-        String argument = args.isEmpty() ? "NULL"
+        String argument = args.isEmpty() ? "MISSING"
                 : args.size() == 1 ? args.get(0)
                 : "packArgs(" + String.join(", ", args) + ")";
         return "fn_apply(" + callee + ", " + argument + ")";
@@ -55,7 +55,10 @@ final class FunctionCallCodeGen {
             // can unpack each parameter via the multi-param inline-lambda pattern.
             // packArgs is used (not array) to avoid flattening array arguments.
             if (args.size() <= 1) {
-                return applyFn + "(" + fnRef + ", " + (args.isEmpty() ? "NULL" : args.get(0)) + ")";
+                // No argument means the parameter is *undefined*, not JSON null: the reference
+                // has `(function($x){$exists($x)})()` false, and `$type($x)` undefined. Passing
+                // NULL here made both report a real null, which is an observable value.
+                return applyFn + "(" + fnRef + ", " + (args.isEmpty() ? "MISSING" : args.get(0)) + ")";
             } else {
                 return applyFn + "(" + fnRef + ", packArgs(" + String.join(", ", args) + "))";
             }

@@ -399,6 +399,14 @@ Deliberate, and each verified rather than assumed. These are the 19 that remain.
 - `$fromMillis(ms, "[fn]")` and `[fN]`, `[fNn]` — the reference throws a raw JavaScript
   `TypeError`, not a JSONata error. A D3133 is raised instead. (18 of the 20 remaining
   date/time sweep cases)
+
+  > This entry was aspirational when first written: `f` is formatted on its own branch, which
+  > asked for a name it cannot have, found no integer picture to fall back on, and let a
+  > `NullPointerException` out as the user-visible error. The arbiter counted it as the same
+  > divergence either way, because both sides raise *something* — which is how an entry in a
+  > known-divergence list can go stale without any count moving. Fixed, and pinned by
+  > `DateTimeFormattingTest.fractionalSecondWithANamePresentationRaisesD3133`; a sweep of every
+  > component against `n`/`N`/`Nn` found no other component with the same hole.
 - `$toMillis("2023-13-01")`, `"2023-00-01"`, `"2023-01-00"`, `"2023-01-32"` — the reference
   leaks a NaN/invalid-`Date` artefact and returns undefined. D3110 is raised instead.
   In-range days still roll over, which *is* reference behaviour. (4 cases)
@@ -444,6 +452,84 @@ Deliberate, and each verified rather than assumed. These are the 19 that remain.
   "keep the array" rule. It reads as an artefact of how its evaluator seeds the input
   sequence when the first step is an array constructor, and undoing the collapse here would
   change sequence semantics that the seven agreeing rows above depend on.
+
+# Follow-up: the sibling ports' findings, and a leak sweep
+
+**Date:** 2026-09-05
+
+Two sweeps, both prompted by the question "is there anything left?" rather than by a symptom.
+`tools/conformance/gen_sibling.js` and `gen_argfuzz.js` + `scan_leaks.js` are what they left
+behind; `conformance/ReferenceParityTest` pins the results.
+
+## 1. Asking the reference about the siblings' findings
+
+jsonata2py's review closes with items it fixed, items it left open, and two pre-existing bugs it
+surfaced but did not fix. None of that transfers by assumption — **a finding in one port is a
+question for the others, never an answer** — so each became a probe here. 91 cases; 85 agreed
+first time, and the six that did not were all this port's own bugs rather than the sibling's:
+
+| finding | here |
+|---|---|
+| `$o.g()` calls a function held in a field | already correct — the `is_variable` fix has an equivalent here |
+| `$replace`'s replacer gets the raw matcher closure | already correct — `$keys` reports `match/start/end/groups/next`, as the reference does |
+| `$match(str, re, -1)` should be D3040 | already correct |
+| a fractional limit compares rather than truncates | already correct |
+| `[1,2].$count()`, `{"a":1}.$keys()` | agree with the reference here |
+| `$base64decode` strictness | **divergent** — see below |
+| nested `$eval` shares the outer clock | already correct |
+| `$reduce` validates a dynamic reducer's arity | already correct |
+
+The six real ones:
+
+- **A zero-argument call bound the first parameter to JSON `null`.** The runtime convention was
+  "no argument becomes NULL", which is right for a *bound* function's packing convention and
+  wrong for an ordinary call: `(function($x){$exists($x)})()` was true and `$type($x)` was
+  `"null"`. Both are undefined in the reference. Two emission sites, one word each.
+- **`$match` never type-checked its optional limit**, though `$split` and `$replace` — the same
+  `n?` slot — both did.
+- **All three checked it in the wrong place.** The reference validates a call against its
+  signature *before* the body runs, so `$split(nope, /a/, "1")` is T0410 there; here the
+  undefined-argument short-circuit returned first and the bad argument was never seen.
+- **A `$replace` replacer returning undefined substituted nothing** instead of raising D3012.
+  The reference tests `typeof x === "string"` and rejects everything else; an explicit
+  "undefined is allowed" guard here exempted exactly the case that matters, since a replacer
+  navigating to a field the match object lacks is how you get there.
+- **`$base64decode` skipped the pad character** rather than stopping at it. Skipping agrees with
+  Node on every well-formed input, so only mid-string padding tells them apart (`"YW=J"`).
+
+## 2. Leak sweep: no host exception should reach the caller
+
+An error carrying a JVM class name instead of a JSONata code is one a caller cannot match on.
+92,421 fuzz cases (every built-in, 0-3 arguments from an adversarial pool) found **123 leaks in
+four families**, now zero:
+
+| leak | cause |
+|---|---|
+| 111 × a Java **compilation error** | `$filter(function($x){$x}, [1,2])` — a lambda in the *sequence* slot was taken for the callback the built-in generates itself, so the "the generator will fill this in" placeholder was emitted into the sequence slot. A plainly wrong expression came back as `cannot find symbol` naming generated code. |
+| 5 × `IndexOutOfBoundsException` | `$contains()`, `$eval()`, `$match()`, `$substringBefore()`, `$substringAfter()` indexed an empty argument list. |
+| 5 × `NumberFormatException` | `$round(1, 1e15)`: `(int) 1e15` saturates, shifting a decimal exponent by `Integer.MAX_VALUE` produced the literal string `"Infinity"`, and the next parse choked on it. |
+| 2 × **`OutOfMemoryError`** | `$pad("x", 1e15)` tried for a two-billion-character string. The worst of the four by some distance: it is not contained to the call that caused it. |
+
+Fixing the first also fixed a wrong *answer*: `$reduce(function($a,$b){$a}, [1,2])` returned the
+function and `$sort(fn, [1,2])` a one-element array holding it, where the reference raises T0410.
+
+The `$round` fix is worth stating precisely, because the rule is not "a big precision is an
+error": the reference computes `value * 10^precision`, so it depends on both. `$round(1, 308)`
+is 1 and `$round(1e15, 308)` is undefined. Checking the shifted value for finiteness reproduces
+that exactly, with no threshold to tune. Verified over a 144-case grid: 0 divergences.
+
+## 3. What these two sweeps left open
+
+- **`$pad` past the maximum string length** is D1001 here and `RangeError` — a raw host error,
+  not a JSONata one — in the reference. Not reconcilable; a JSONata code is the better of the
+  two, and unlike an `OutOfMemoryError` it is contained.
+- **A boolean in a numeric argument is coerced here and rejected there.** `$round(true)`,
+  `$abs(true)`, `$floor(true)`, `$ceil(true)`, `$sqrt(true)`, `$power(true,2)`,
+  `$formatNumber(true,"0")`, `$formatInteger(true,"0")`, `$pad("x",true)`, `$round(1,true)` all
+  answer here and are T0410 there — 11 of an 18-case probe. One root cause: `toNumber` accepts
+  a boolean and the numeric built-ins call it without a type check. It is a family, not a case
+  — every `n` parameter in the signature table — so it wants its own sweep rather than a partial
+  fix, in the spirit of jsonata2py leaving its regex-dialect families whole.
 
 ## Where this port is better
 

@@ -299,4 +299,32 @@ class DateTimeFormattingTest {
                 "$toMillis('three hundred and sixty-fifth day of 2018', '[dwo] day of [Y]') ~> $fromMillis()");
         assertEquals("2018-12-31T00:00:00.000Z", result.textValue());
     }
+
+    // =========================================================================
+    // A fractional second has no name
+    //
+    // Every other component that cannot be named raises D3133; 'f' is formatted on its own
+    // branch, which asked for the name, found no integer picture to fall back on, and let a
+    // NullPointerException out as the user-visible error. (The reference throws a raw
+    // JavaScript TypeError here, which is not a JSONata error either.)
+    // =========================================================================
+
+    @Test
+    void fractionalSecondWithANamePresentationRaisesD3133() {
+        for (String picture : new String[] {"[fn]", "[fN]", "[fNn]"}) {
+            Exception error = assertThrows(Exception.class,
+                    () -> eval("$fromMillis(0, '" + picture + "')"), picture);
+            String message = String.valueOf(error.getMessage());
+            assertTrue(message.contains("Name presentation is not supported"),
+                    picture + " should raise D3133, got: " + message);
+            assertFalse(message.contains("Cannot invoke") || message.contains("NullPointer"),
+                    picture + " leaked a JVM exception: " + message);
+        }
+    }
+
+    @Test
+    void fractionalSecondStillFormatsAsAnInteger() throws Exception {
+        assertEquals("0001", eval("$fromMillis(1, '[f0001]')").textValue());
+        assertEquals("617", eval("$fromMillis(1521801216617, '[f001]')").textValue());
+    }
 }
