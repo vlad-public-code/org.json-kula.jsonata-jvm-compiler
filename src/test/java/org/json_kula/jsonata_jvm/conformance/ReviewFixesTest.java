@@ -348,4 +348,66 @@ class ReviewFixesTest {
             assertEquals("D1001", errorCode("$string({\"a\": 1e308 * 10})"));
         }
     }
+
+    /**
+     * J-10: a call with several arguments packs them into a tuple, and the callee spreads a
+     * tuple over its parameters. A plain array passed as the single argument is not a tuple, so
+     * it binds whole to the first parameter — before the {@code PackedArgs} marker the callee
+     * could not tell the two apart and mis-unpacked every array-first function.
+     *
+     * <p>The runtime's own higher-order callback tuples carry the same marker, so the cases below
+     * also pin that {@code $map}/{@code $reduce}/{@code $sort}/{@code $sift}/{@code $each}/
+     * {@code $single}/{@code $filter} still spread their arguments.
+     */
+    @Nested
+    class J10MultiParameterUnpacking {
+
+        @Test
+        void singleArrayArgumentBindsWholeToTheFirstParameter() throws Exception {
+            assertEquals("ab", eval(
+                    "( $f := function($arr, $sep){ $join($arr, $sep) }; $f([\"a\",\"b\"]) )")
+                    .textValue());
+        }
+
+        @Test
+        void twoArgumentsStillSpread() throws Exception {
+            assertEquals("a-b", eval(
+                    "( $f := function($arr, $sep){ $join($arr, $sep) }; $f([\"a\",\"b\"], \"-\") )")
+                    .textValue());
+        }
+
+        @Test
+        void aSecondParameterIsAbsentWhenOnlyAnArrayWasPassed() throws Exception {
+            assertEquals("[1,2]", json("( $f := function($a,$b){ [$a,$b] }; $f([1,2]) )"));
+        }
+
+        @Test
+        void mapCallbackStillReceivesValueIndexAndArray() throws Exception {
+            assertEquals("[[1,0,2],[2,1,2]]",
+                    json("$map([1,2], function($v,$i,$a){ [$v,$i,$count($a)] })"));
+        }
+
+        @Test
+        void reduceCallbackStillReceivesTheAccumulator() throws Exception {
+            assertEquals("6", json("$reduce([1,2,3], function($acc,$v){ $acc+$v })"));
+        }
+
+        @Test
+        void sortComparatorStillReceivesBothOperands() throws Exception {
+            assertEquals("[1,2,3]", json("$sort([3,1,2], function($a,$b){ $a > $b })"));
+        }
+
+        @Test
+        void siftAndEachStillReceiveValueAndKey() throws Exception {
+            assertEquals("{\"b\":2}", json("$sift({\"a\":1,\"b\":2}, function($v,$k){ $k=\"b\" })"));
+            assertEquals("\"a1\"", json("$each({\"a\":1}, function($v,$k){ $k & $v })"));
+        }
+
+        @Test
+        void singleAndFilterStillReceiveTheIndex() throws Exception {
+            assertEquals("2", json("$single([1,2,3], function($v,$i){ $i=1 })"));
+            assertEquals("[2,3]",
+                    json("$filter([1,2,3], function($v,$i,$a){ $i > 0 and $count($a)=3 })"));
+        }
+    }
 }

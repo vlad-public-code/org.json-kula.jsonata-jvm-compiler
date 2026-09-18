@@ -859,10 +859,30 @@ public final class JsonataRuntime {
      * which flattens array values. Used by generated code to pack multi-arg calls to
      * user-defined lambdas so that array arguments are preserved as single elements.
      */
-    public static ArrayNode packArgs(JsonNode... elements) {
-        ArrayNode result = NF.arrayNode(elements.length);
-        for (JsonNode e : elements) result.add(e != null ? e : MISSING);
-        return result;
+    public static PackedArgs packArgs(JsonNode... elements) {
+        return PackedArgs.of(NF, elements);
+    }
+
+    /**
+     * Packs an argument tuple the runtime builds itself for a higher-order callback —
+     * {@code [value, index, array]} for {@code $map}, {@code [acc, elem, index, array]} for
+     * {@code $reduce}, {@code [a, b]} for a comparator. These are spread positionally over the
+     * callback's parameters, so they carry the same marker a call site's {@link #packArgs} does:
+     * positional spreading is what the marker means, and a plain array argument must never be
+     * mistaken for one (see {@link PackedArgs}).
+     */
+    public static PackedArgs packTuple(JsonNode... elements) {
+        return PackedArgs.of(NF, elements);
+    }
+
+    /**
+     * True when {@code node} is a call tuple that should be spread over a lambda's parameters.
+     * Generated code calls this rather than testing {@code isArray()}: an ordinary array passed
+     * as the single argument is an array, not a tuple, and spreading it bound
+     * {@code $f(["a","b"])} as two arguments (J-10).
+     */
+    public static boolean isPacked(JsonNode node) {
+        return node instanceof PackedArgs;
     }
 
     /** Creates a JSON array from the given elements, skipping missing values. */
@@ -898,7 +918,7 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < size; i++) {
             JsonNode item = seq.isArray() ? seq.get(i) : seq;
-            JsonNode elems = elemsFn.apply(NF.arrayNode().add(item).add(NF.numberNode(i)));
+            JsonNode elems = elemsFn.apply(packTuple(item, NF.numberNode(i)));
             if (elems == null || elems == MISSING) continue;
             if (elems.isArray()) {
                 for (JsonNode e : elems) {
@@ -2046,11 +2066,11 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         if (seq.isArray()) {
             for (int i = 0; i < seq.size(); i++) {
-                JsonNode val = fn.apply(NF.arrayNode().add(seq.get(i)).add(NF.numberNode(i)));
+                JsonNode val = fn.apply(packTuple(seq.get(i), NF.numberNode(i)));
                 if (val != MISSING) appendToSequence(result, val);
             }
         } else {
-            JsonNode val = fn.apply(NF.arrayNode().add(seq).add(NF.numberNode(0)));
+            JsonNode val = fn.apply(packTuple(seq, NF.numberNode(0)));
             if (val != MISSING) appendToSequence(result, val);
         }
         return unwrap(result);
@@ -2512,7 +2532,7 @@ public final class JsonataRuntime {
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> e = it.next();
             // fn receives [value, key, object] — value first, matching JSONata spec
-            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            JsonNode triple = packTuple(e.getValue(), NF.textNode(e.getKey()), obj);
             JsonNode r = fn.apply(triple);
             if (!missing(r)) result.add(r);
         }

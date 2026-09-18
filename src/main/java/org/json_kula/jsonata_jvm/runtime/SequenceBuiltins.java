@@ -210,8 +210,8 @@ final class SequenceBuiltins {
         // The mirror is only needed when the first answer is falsy, so an already-ordered pair
         // still costs one call.
         Comparator<JsonNode> cmp = (a, b) -> {
-            if (JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(a).add(b)))) return 1;
-            return JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(b).add(a))) ? -1 : 0;
+            if (JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(a, b)))) return 1;
+            return JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(b, a))) ? -1 : 0;
         };
         list.sort(cmp);
         ArrayNode result = NF.arrayNode();
@@ -335,7 +335,7 @@ final class SequenceBuiltins {
         ArrayNode arrNode = NF.arrayNode();
         items.forEach(arrNode::add);
         for (int i = start; i < items.size(); i++) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)).add(NF.numberNode(i)).add(arrNode));
+            acc = fn.apply(JsonataRuntime.packTuple(acc, items.get(i), NF.numberNode(i), arrNode));
         }
         return acc;
     }
@@ -352,7 +352,7 @@ final class SequenceBuiltins {
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < items.size(); i++) {
-            JsonNode val = fn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr));
+            JsonNode val = fn.apply(JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arr));
             if (!JsonataRuntime.missing(val)) result.add(val);
         }
         return result;
@@ -371,7 +371,7 @@ final class SequenceBuiltins {
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < items.size(); i++) {
             if (JsonataRuntime.isTruthy(predicate.apply(
-                    NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr))))
+                    JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arr))))
                 result.add(items.get(i));
         }
         return JsonataRuntime.unwrap(result);
@@ -423,8 +423,7 @@ final class SequenceBuiltins {
         items.forEach(arrNode::add);
         JsonNode found = null;
         for (int i = 0; i < items.size(); i++) {
-            com.fasterxml.jackson.databind.node.ArrayNode tuple = NF.arrayNode()
-                    .add(items.get(i)).add(NF.numberNode(i)).add(arrNode);
+            JsonNode tuple = JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arrNode);
             if (JsonataRuntime.isTruthy(predicate.apply(tuple))) {
                 if (found != null)
                     throw new RuntimeEvaluationException("D3138", "$single: more than one match found");
@@ -448,7 +447,7 @@ final class SequenceBuiltins {
         ObjectNode result = NF.objectNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> e = it.next();
-            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            JsonNode triple = JsonataRuntime.packTuple(e.getValue(), NF.textNode(e.getKey()), obj);
             if (JsonataRuntime.isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
         }
         return result.isEmpty() ? JsonataRuntime.MISSING : result;
