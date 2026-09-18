@@ -2212,6 +2212,10 @@ public final class JsonataRuntime {
         return result.isEmpty() ? MISSING : result;
     }
 
+    /** The reference's wording for a delete clause that is not a string or array of strings. */
+    private static final String T2012_MESSAGE =
+            "The delete clause of the transform expression must evaluate to a string or array of strings";
+
     /**
      * Implements the JSONata transform operator {@code src ~> |location|update[,delete]|}.
      *
@@ -2225,12 +2229,14 @@ public final class JsonataRuntime {
      * @param source      the document to transform
      * @param locationFn  lambda that navigates to the nodes to update (receives the copy)
      * @param updateFn    lambda that produces the update object (receives each matched node)
-     * @param deleteFields a string or array-of-strings naming fields to delete, or MISSING
+     * @param deleteFn    lambda producing the field name(s) to delete, evaluated against each
+     *                    matched node exactly as {@code updateFn} is, or {@code null} when the
+     *                    transform has no delete clause
      */
     public static JsonNode fn_transform(JsonNode source,
                                         JsonataLambda locationFn,
                                         JsonataLambda updateFn,
-                                        JsonNode deleteFields)
+                                        JsonataLambda deleteFn)
             throws RuntimeEvaluationException {
         if (missing(source)) return MISSING;
         // Deep-copy so mutations don't affect the caller's document.
@@ -2252,17 +2258,24 @@ public final class JsonataRuntime {
                                 "T2011", "The update clause of the transform operator requires an object literal as the second operand");
                     update.fields().forEachRemaining(e -> targetObj.set(e.getKey(), e.getValue()));
                 }
-                // Delete fields.
-                if (!missing(deleteFields)) {
-                    if (!deleteFields.isTextual() && !deleteFields.isArray())
-                        throw new RuntimeEvaluationException(
-                                "T2012", "The delete clause of the transform operator is not valid, must be a string or array of strings");
-                    if (deleteFields.isTextual()) {
-                        targetObj.remove(deleteFields.textValue());
-                    } else {
-                        for (JsonNode f : deleteFields) {
-                            if (f.isTextual()) targetObj.remove(f.textValue());
-                        }
+                // Delete fields. The clause is evaluated against EACH matched node, like the
+                // update clause — `$ ~> |a|{}, del|` deletes the key that each node's own `del`
+                // field names. Evaluating it once in the outer context made it a lookup of a
+                // top-level `del` field, which is normally absent, so it deleted nothing (J-14).
+                if (deleteFn == null) continue;
+                JsonNode deleteFields = deleteFn.apply(target);
+                if (missing(deleteFields)) continue;
+                if (!deleteFields.isTextual() && !deleteFields.isArray())
+                    throw new RuntimeEvaluationException("T2012", T2012_MESSAGE);
+                if (deleteFields.isTextual()) {
+                    targetObj.remove(deleteFields.textValue());
+                } else {
+                    for (JsonNode f : deleteFields) {
+                        // A non-string element is an error, not something to skip: the reference
+                        // reports T2012 for `|a|{}, [1]|`.
+                        if (!f.isTextual())
+                            throw new RuntimeEvaluationException("T2012", T2012_MESSAGE);
+                        targetObj.remove(f.textValue());
                     }
                 }
             }

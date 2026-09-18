@@ -57,6 +57,10 @@ class ReviewFixesTest {
         return errorCode(expression, NullNode.instance);
     }
 
+    private static String errorCode(String expression, String inputJson) throws Exception {
+        return errorCode(expression, MAPPER.readTree(inputJson));
+    }
+
     private static String errorCode(String expression, JsonNode input) {
         JsonataEvaluationException e = assertThrows(JsonataEvaluationException.class,
                 () -> eval(expression, input));
@@ -562,6 +566,62 @@ class ReviewFixesTest {
             assertEquals("[\"1\",\"2\",\"3\"]", json("$map([1,2,3], $string)"));
             assertEquals("[1,2,3]", json("$filter([1,2,3], $boolean)"));
             assertEquals("[[1,0],[2,1]]", json("$map([1,2], $append)"));
+        }
+    }
+
+    /** J-13: a chain step written as a call is invoked, not composed. */
+    @Nested
+    class J13ChainCallInvokes {
+
+        @Test
+        void callStepOnAFunctionValueInvokes() throws Exception {
+            assertEquals("function",
+                    eval("( $f := function($x){$x}; $f ~> $type() )").textValue());
+            assertEquals("function", eval("$trim ~> $type()").textValue());
+        }
+
+        @Test
+        void valueStepWithoutParenthesesStillComposes() throws Exception {
+            assertEquals("HI", eval("( $f := $trim ~> $uppercase; $f(\"  hi  \") )").textValue());
+        }
+
+        @Test
+        void ordinaryChainIsUnaffected() throws Exception {
+            assertEquals("HI", eval("\"  hi  \" ~> $trim() ~> $uppercase()").textValue());
+        }
+    }
+
+    /** J-14: the delete clause is evaluated against each matched node, in that node's context. */
+    @Nested
+    class J14TransformDeletePerMatch {
+
+        @Test
+        void deleteClauseSeesTheMatchedNode() throws Exception {
+            assertEquals("{\"a\":{\"del\":\"k\"}}",
+                    json("$ ~> |a|{}, del|", "{\"a\":{\"k\":1,\"del\":\"k\"}}"));
+        }
+
+        @Test
+        void arrayOfNamesDeletesEach() throws Exception {
+            assertEquals("{\"a\":{\"w\":3}}",
+                    json("$ ~> |a|{}, [\"y\",\"z\"]|", "{\"a\":{\"y\":1,\"z\":2,\"w\":3}}"));
+        }
+
+        @Test
+        void anAbsentDeleteResultIsANoOp() throws Exception {
+            assertEquals("{\"a\":{\"y\":1}}",
+                    json("$ ~> |a|{}, \"nope\"|", "{\"a\":{\"y\":1}}"));
+        }
+
+        @Test
+        void aNonStringElementIsT2012() throws Exception {
+            assertEquals("T2012", errorCode("$ ~> |a|{}, [1]|", "{\"a\":{\"y\":1}}"));
+        }
+
+        @Test
+        void aTransformWithoutADeleteClauseStillWorks() throws Exception {
+            assertEquals("{\"a\":{\"y\":1,\"x\":2}}",
+                    json("$ ~> |a|{\"x\":2}|", "{\"a\":{\"y\":1}}"));
         }
     }
 }

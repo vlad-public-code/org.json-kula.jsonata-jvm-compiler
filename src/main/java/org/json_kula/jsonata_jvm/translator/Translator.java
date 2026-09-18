@@ -1284,9 +1284,22 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         for (int i = 1; i < n.steps().size(); i++) {
             AstNode step = n.steps().get(i);
             String fnExpr = chainStepToLambda(step, ctx);
-            expr = "fn_pipe(" + expr + ", " + fnExpr + ")";
+            // A step WRITTEN as a call is an invocation, never a composition: `$f ~> $type()`
+            // asks for the type of $f, which is "function". fn_pipe composes whenever its left
+            // operand is itself a function value, so routing a call step through it returned a
+            // composed lambda instead of the answer (J-13). Composition stays for value steps —
+            // `$trim ~> $uppercase`, written without parentheses.
+            expr = isCallStep(step)
+                    ? "fn_apply(" + fnExpr + ", " + expr + ")"
+                    : "fn_pipe(" + expr + ", " + fnExpr + ")";
         }
         return expr;
+    }
+
+    /** Whether a chain step was written as a call, and so must be invoked rather than composed. */
+    private static boolean isCallStep(AstNode step) {
+        return step instanceof FunctionCall
+                || (step instanceof ForceArray fa && fa.source() instanceof FunctionCall);
     }
 
     /**
@@ -1336,11 +1349,21 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         String locExpr  = n.pattern().accept(this, ctx.withCtx(locVar));
         String updVar   = "__tu" + ctx.state.nextId();
         String updExpr  = n.update().accept(this, ctx.withCtx(updVar));
-        String delExpr  = n.delete() != null ? n.delete().accept(this, ctx) : "MISSING";
+        String delExpr  = transformDeleteCallback(n.delete(), ctx);
         return "fn_transform(" + srcExpr
                 + ", " + locVar + " -> " + locExpr
                 + ", " + updVar + " -> " + updExpr
                 + ", " + delExpr + ")";
+    }
+
+    /**
+     * Compiles a transform's delete clause as a per-match callback, like the update clause, so it
+     * sees each matched node as its context (J-14). Absent clause: {@code null}.
+     */
+    private String transformDeleteCallback(AstNode delete, GenCtx ctx) {
+        if (delete == null) return "(JsonataLambda) null";
+        String delVar = "__td" + ctx.state.nextId();
+        return "(JsonataLambda) (" + delVar + " -> " + delete.accept(this, ctx.withCtx(delVar)) + ")";
     }
 
     @Override
@@ -1354,7 +1377,7 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         String locExpr = n.pattern().accept(this, ctx.withCtx(locVar));
         String updVar  = "__tu" + ctx.state.nextId();
         String updExpr = n.update().accept(this, ctx.withCtx(updVar));
-        String delExpr = n.delete() != null ? n.delete().accept(this, ctx) : "MISSING";
+        String delExpr = transformDeleteCallback(n.delete(), ctx);
         return "lambdaNode(" + srcVar + " -> fn_transform(" + srcVar
                 + ", " + locVar + " -> " + locExpr
                 + ", " + updVar + " -> " + updExpr
