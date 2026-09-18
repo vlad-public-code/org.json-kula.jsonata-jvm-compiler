@@ -91,10 +91,8 @@ public final class Optimizer {
             if (operand instanceof NumberLiteral nl) {
                 return new NumberLiteral(-nl.value());
             }
-            // -(-x) → x
-            if (operand instanceof UnaryMinus inner) {
-                return inner.operand();
-            }
+            // NOTE: `-(-x)` is deliberately NOT folded to `x`. Unary minus is only defined
+            // for numbers, so `-(-"a")` must raise D1002 rather than yield "a".
             return operand == n.operand() ? n : new UnaryMinus(operand);
         }
 
@@ -121,13 +119,14 @@ public final class Optimizer {
 
             // true ? a : b  →  a
             if (condition instanceof BooleanLiteral bl && bl.value()) return then;
-            // false ? a : b  →  b   (or null if no else-branch)
-            if (condition instanceof BooleanLiteral bl && !bl.value()) {
-                return otherwise != null ? otherwise : new NullLiteral();
-            }
-            // null ? a : b  →  b
-            if (condition instanceof NullLiteral) {
-                return otherwise != null ? otherwise : new NullLiteral();
+            // false ? a : b  →  b;  null ? a : b  →  b.
+            // With no else-branch the expression yields *undefined*, not JSON null, and the
+            // AST has no literal for undefined — so the ConditionalExpr is kept and the
+            // translator produces the right (absent) value. Folding it to a NullLiteral
+            // injected a `null` into every array and object the expression sat in.
+            if ((condition instanceof BooleanLiteral bl2 && !bl2.value())
+                    || condition instanceof NullLiteral) {
+                if (otherwise != null) return otherwise;
             }
 
             return condition == n.condition() && then == n.then() && otherwise == n.otherwise()
@@ -192,7 +191,7 @@ public final class Optimizer {
             AstNode source    = rewrite(n.source());
             AstNode predicate = rewrite(n.predicate());
             return source == n.source() && predicate == n.predicate()
-                    ? n : new PredicateExpr(source, predicate);
+                    ? n : new PredicateExpr(source, predicate, n.stage());
         }
 
         @Override
@@ -208,7 +207,7 @@ public final class Optimizer {
         @Override
         public AstNode visitArrayConstructor(ArrayConstructor n, Void c) {
             List<AstNode> elements = rewriteList(n.elements());
-            return elements.equals(n.elements()) ? n : new ArrayConstructor(elements);
+            return elements.equals(n.elements()) ? n : new ArrayConstructor(elements, n.pathHead());
         }
 
         @Override
@@ -222,13 +221,13 @@ public final class Optimizer {
         @Override
         public AstNode visitFunctionCall(FunctionCall n, Void c) {
             List<AstNode> args = rewriteList(n.args());
-            return args.equals(n.args()) ? n : new FunctionCall(n.name(), args);
+            return args.equals(n.args()) ? n : new FunctionCall(n.name(), args, n.isVariable());
         }
 
         @Override
         public AstNode visitLambda(Lambda n, Void c) {
             AstNode body = rewrite(n.body());
-            return body == n.body() ? n : new Lambda(n.params(), body);
+            return body == n.body() ? n : new Lambda(n.params(), body, n.signature());
         }
 
         @Override
@@ -424,9 +423,10 @@ public final class Optimizer {
             AstNode boolFold = tryFoldBoolIdentity(op, left, right);
             if (boolFold != null) return boolFold;
 
-            // --- Arithmetic identity / absorption ---
-            AstNode numFold = tryFoldNumIdentity(op, left, right);
-            if (numFold != null) return numFold;
+            // NOTE: there is deliberately no arithmetic identity/absorption rule here
+            // (`x+0`, `x*1`, `x*0`, ...). They all assume the non-literal operand is a
+            // number, which the optimizer cannot know: `nope * 0` must stay *undefined*,
+            // and `"a" + 0` must raise T2001 — folding produced 0 and "a".
 
             // --- String identity ---
             // `x & ""` is only the identity when x is *already* a string: `&` stringifies,
@@ -447,14 +447,15 @@ public final class Optimizer {
             if (op.equals("/") || op.equals("%")) {
                 if (r == 0) return null;
             }
-            // Guard: do not fold multiplication where result would be infinity
-            // This is needed for proper error reporting in cases like 1/(10e300 * 10e100)
-            if (op.equals("*")) {
-                double result = l * r;
-                if (Double.isInfinite(result)) {
-                    return null;
-                }
-            }
+            // Guard: never fold to a non-finite value. A NumberLiteral(Infinity) both
+            // loses the runtime's D1001 report and used to emit `number(Infinity)`, which
+            // does not compile.
+            AstNode folded = foldNumNumRaw(op, l, r);
+            if (folded instanceof NumberLiteral nl && !Double.isFinite(nl.value())) return null;
+            return folded;
+        }
+
+        private static AstNode foldNumNumRaw(String op, double l, double r) {
             return switch (op) {
                 case "+"  -> new NumberLiteral(l + r);
                 case "-"  -> new NumberLiteral(l - r);
@@ -496,45 +497,13 @@ public final class Optimizer {
 
         /** Boolean identity/absorption rules where only one side is a literal. */
         private static AstNode tryFoldBoolIdentity(String op, AstNode left, AstNode right) {
-            if ("and".equals(op)) {
-                // Absorption: one false side → always false
-                if (isFalse(left) || isFalse(right)) return new BooleanLiteral(false);
-                // Identity: true and x → x, but ONLY when x is already a boolean literal.
-                // For non-boolean x the runtime wraps the result in bool(...); returning x
-                // raw would drop that wrapping and change the result type.
-                if (isTrue(left)  && right instanceof BooleanLiteral) return right;
-                if (isTrue(right) && left  instanceof BooleanLiteral) return left;
-            }
-            if ("or".equals(op)) {
-                // Absorption: one true side → always true
-                if (isTrue(left) || isTrue(right))   return new BooleanLiteral(true);
-                // Identity: false or x → x, but ONLY when x is already a boolean literal.
-                if (isFalse(left)  && right instanceof BooleanLiteral) return right;
-                if (isFalse(right) && left  instanceof BooleanLiteral) return left;
-            }
+            // Only the *left* literal may absorb: the reference short-circuits `and`/`or`
+            // on the left operand and never evaluates the right one, so `false and X` is
+            // false for any X. A literal on the *right* absorbs nothing — the left operand
+            // still runs and may raise, so `$error("x") and false` must be D3137, not false.
+            if ("and".equals(op) && isFalse(left)) return new BooleanLiteral(false);
+            if ("or".equals(op)  && isTrue(left))  return new BooleanLiteral(true);
             return null;
-        }
-
-        /** Arithmetic identity and absorption rules. */
-        private static AstNode tryFoldNumIdentity(String op, AstNode left, AstNode right) {
-            boolean leftZero  = isNumber(left,  0);
-            boolean rightZero = isNumber(right, 0);
-            boolean leftOne   = isNumber(left,  1);
-            boolean rightOne  = isNumber(right, 1);
-
-            return switch (op) {
-                case "+" -> leftZero ? right : rightZero ? left : null;
-                case "-" -> rightZero ? left : null;
-                case "*" -> {
-                    if (leftZero || rightZero) yield new NumberLiteral(0);
-                    if (leftOne)  yield right;
-                    if (rightOne) yield left;
-                    yield null;
-                }
-                case "/" -> rightOne ? left : null;   // do NOT fold /0
-                case "%" -> null;
-                default  -> null;
-            };
         }
 
         // ---- Helpers ----
@@ -545,10 +514,6 @@ public final class Optimizer {
 
         private static boolean isFalse(AstNode n) {
             return n instanceof BooleanLiteral bl && !bl.value();
-        }
-
-        private static boolean isNumber(AstNode n, double v) {
-            return n instanceof NumberLiteral nl && nl.value() == v;
         }
 
         private List<AstNode> rewriteList(List<AstNode> nodes) {

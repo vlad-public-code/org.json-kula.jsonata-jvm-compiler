@@ -25,6 +25,42 @@ class OptimizerTest {
     }
 
     // =========================================================================
+    // Record flags carried on rebuilt nodes (J-2)
+    // =========================================================================
+
+    /**
+     * Four AST records carry a flag beyond their children: {@code Lambda.signature},
+     * {@code PredicateExpr.stage}, {@code FunctionCall.isVariable} and
+     * {@code ArrayConstructor.pathHead}. The optimizer rebuilds a node whenever one of its
+     * children is rewritten, and rebuilding through the short convenience constructor reset
+     * the flag to its default — silently, and only for expressions that happened to contain a
+     * constant fold.
+     */
+    @Test
+    void optimize_rebuiltNodes_keepTheirFlags() {
+        // Each child below contains a fold ("" & "a", 1+0) so the parent is genuinely rebuilt.
+        AstNode foldableStr = new BinaryOp("&", new StringLiteral(""), new StringLiteral("a"));
+        AstNode foldableNum = new BinaryOp("+", new NumberLiteral(1), new NumberLiteral(0));
+
+        Lambda lambda = (Lambda) Optimizer.optimize(
+                new Lambda(List.of("x"), foldableStr, "<s>"));
+        assertNotSame(foldableStr, lambda.body());
+        assertEquals("<s>", lambda.signature(), "Lambda.signature was dropped");
+
+        PredicateExpr pred = (PredicateExpr) Optimizer.optimize(
+                new PredicateExpr(new VariableRef("x"), foldableNum, true));
+        assertTrue(pred.stage(), "PredicateExpr.stage was dropped");
+
+        FunctionCall call = (FunctionCall) Optimizer.optimize(
+                new FunctionCall("g", List.of(foldableNum), true));
+        assertTrue(call.isVariable(), "FunctionCall.isVariable was dropped");
+
+        ArrayConstructor arr = (ArrayConstructor) Optimizer.optimize(
+                new ArrayConstructor(List.of(foldableNum), true));
+        assertTrue(arr.pathHead(), "ArrayConstructor.pathHead was dropped");
+    }
+
+    // =========================================================================
     // Terminals — must survive the optimizer unchanged
     // =========================================================================
 
@@ -81,11 +117,12 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_doubleUnaryMinus_eliminated() throws ParseException {
-        // -(-$x)  →  $x
+    void optimize_doubleUnaryMinus_notEliminated() throws ParseException {
+        // -(-$x) is NOT $x: unary minus is only defined for numbers, so `-(-"a")` must raise
+        // D1002 (reference jsonata 2.2.2). Folding it away returned "a".
         AstNode inner = new VariableRef("x");
         AstNode ast = Optimizer.optimize(new UnaryMinus(new UnaryMinus(inner)));
-        assertEquals(inner, ast);
+        assertEquals(new UnaryMinus(new UnaryMinus(inner)), ast);
     }
 
     @Test
@@ -148,51 +185,48 @@ class OptimizerTest {
     // Arithmetic identity / absorption
     // =========================================================================
 
+    // None of `x+0`, `x-0`, `x*1`, `x*0`, `x/1` may be folded: each assumes the non-literal
+    // operand is a number, which the optimizer cannot know. Against reference jsonata 2.2.2,
+    // `nope * 0` is *undefined* (not 0) and `"a" + 0` raises T2001 (not "a").
+
     @Test
-    void optimize_addZeroRight_eliminated() throws ParseException {
-        // $x + 0  →  $x
-        assertEquals(new VariableRef("x"), opt("$x + 0"));
+    void optimize_addZeroRight_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("+", new VariableRef("x"), new NumberLiteral(0)), opt("$x + 0"));
     }
 
     @Test
-    void optimize_addZeroLeft_eliminated() throws ParseException {
-        // 0 + $x  →  $x
-        assertEquals(new VariableRef("x"), opt("0 + $x"));
+    void optimize_addZeroLeft_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("+", new NumberLiteral(0), new VariableRef("x")), opt("0 + $x"));
     }
 
     @Test
-    void optimize_subtractZero_eliminated() throws ParseException {
-        // $x - 0  →  $x
-        assertEquals(new VariableRef("x"), opt("$x - 0"));
+    void optimize_subtractZero_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("-", new VariableRef("x"), new NumberLiteral(0)), opt("$x - 0"));
     }
 
     @Test
-    void optimize_multiplyByOne_eliminated() throws ParseException {
-        // $x * 1  →  $x
-        assertEquals(new VariableRef("x"), opt("$x * 1"));
+    void optimize_multiplyByOne_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("*", new VariableRef("x"), new NumberLiteral(1)), opt("$x * 1"));
     }
 
     @Test
-    void optimize_multiplyOneByX_eliminated() throws ParseException {
-        // 1 * $x  →  $x
-        assertEquals(new VariableRef("x"), opt("1 * $x"));
+    void optimize_multiplyOneByX_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("*", new NumberLiteral(1), new VariableRef("x")), opt("1 * $x"));
     }
 
     @Test
-    void optimize_multiplyByZero_foldedToZero() throws ParseException {
-        // $x * 0  →  0
-        assertEquals(new NumberLiteral(0), opt("$x * 0"));
+    void optimize_multiplyByZero_notFolded() throws ParseException {
+        assertEquals(new BinaryOp("*", new VariableRef("x"), new NumberLiteral(0)), opt("$x * 0"));
     }
 
     @Test
-    void optimize_zeroMultiplyX_foldedToZero() throws ParseException {
-        assertEquals(new NumberLiteral(0), opt("0 * $x"));
+    void optimize_zeroMultiplyX_notFolded() throws ParseException {
+        assertEquals(new BinaryOp("*", new NumberLiteral(0), new VariableRef("x")), opt("0 * $x"));
     }
 
     @Test
-    void optimize_divideByOne_eliminated() throws ParseException {
-        // $x / 1  →  $x
-        assertEquals(new VariableRef("x"), opt("$x / 1"));
+    void optimize_divideByOne_notEliminated() throws ParseException {
+        assertEquals(new BinaryOp("/", new VariableRef("x"), new NumberLiteral(1)), opt("$x / 1"));
     }
 
     // =========================================================================
@@ -277,9 +311,17 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_xAndFalse_shortCircuitedToFalse() throws ParseException {
-        // $x and false  →  false  (regardless of $x)
-        assertEquals(new BooleanLiteral(false), opt("$x and false"));
+    void optimize_xAndFalse_notShortCircuited() throws ParseException {
+        // The reference short-circuits on the LEFT operand only, so the left side still runs
+        // and may raise: `$error("x") and false` is D3137, not false.
+        assertEquals(new BinaryOp("and", new VariableRef("x"), new BooleanLiteral(false)),
+                opt("$x and false"));
+    }
+
+    @Test
+    void optimize_falseAndX_shortCircuitedToFalse() throws ParseException {
+        // `false and X` never evaluates X in the reference, so this fold is sound.
+        assertEquals(new BooleanLiteral(false), opt("false and $x"));
     }
 
     @Test
@@ -290,9 +332,15 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_xOrTrue_shortCircuitedToTrue() throws ParseException {
-        // $x or true  →  true
-        assertEquals(new BooleanLiteral(true), opt("$x or true"));
+    void optimize_xOrTrue_notShortCircuited() throws ParseException {
+        // Mirror of `$x and false`: the left operand still runs.
+        assertEquals(new BinaryOp("or", new VariableRef("x"), new BooleanLiteral(true)),
+                opt("$x or true"));
+    }
+
+    @Test
+    void optimize_trueOrX_shortCircuitedToTrue() throws ParseException {
+        assertEquals(new BooleanLiteral(true), opt("true or $x"));
     }
 
     // =========================================================================
@@ -318,9 +366,18 @@ class OptimizerTest {
     }
 
     @Test
-    void optimize_conditionalFalseNoElse_returnsNull() throws ParseException {
-        // false ? "yes"  →  null
-        assertEquals(new NullLiteral(), opt("false ? \"yes\""));
+    void optimize_conditionalFalseNoElse_notFolded() throws ParseException {
+        // `false ? "yes"` is *undefined*, not JSON null (reference jsonata 2.2.2 drops it from
+        // the surrounding array/object). There is no AST literal for undefined, so the node is
+        // kept and the translator produces the absent value.
+        assertEquals(new ConditionalExpr(new BooleanLiteral(false), new StringLiteral("yes"), null),
+                opt("false ? \"yes\""));
+    }
+
+    @Test
+    void optimize_conditionalNullNoElse_notFolded() throws ParseException {
+        assertEquals(new ConditionalExpr(new NullLiteral(), new StringLiteral("yes"), null),
+                opt("null ? \"yes\""));
     }
 
     @Test
