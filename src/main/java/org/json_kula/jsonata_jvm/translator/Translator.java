@@ -162,7 +162,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitDeferredError(DeferredError n, GenCtx ctx) {
-        return "fn_throw(\"" + n.code() + "\", \"" + n.message().replace("\"", "\\\"") + "\")";
+        // javaString, not a hand-rolled quote escape: a backslash or newline in the message
+        // (reachable through a backtick identifier) produced uncompilable Java (J-21).
+        return "fn_throw(" + ClassAssembler.javaString(n.code()) + ", "
+                + ClassAssembler.javaString(n.message()) + ")";
     }
 
     @Override
@@ -189,15 +192,45 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             String alias = ctx.state.getAlias(n.name());
             return alias != null ? alias : "$" + n.name();
         }
-        // Built-in function used as a first-class value (e.g. in a ~> chain):
-        // wrap it as an inline lambda so it can be stored / applied later.
-        String wrapper = BUILTIN_LAMBDA_WRAPPERS.get(n.name());
-        if (wrapper != null) return "lambdaNode((__bArg -> " + wrapper + "(__bArg)), 1)";
-        String binaryWrapper = BUILTIN_BINARY_LAMBDA_WRAPPERS.get(n.name());
-        if (binaryWrapper != null) return "lambdaNode((__bArg -> " + binaryWrapper
-                + "(__bArg.isArray() ? __bArg.get(0) : __bArg,"
-                + " __bArg.isArray() && __bArg.size() > 1 ? __bArg.get(1) : MISSING)), 2)";
+        // Built-in function used as a first-class value (e.g. in a ~> chain, or passed to
+        // $map): wrap it as an inline lambda so it can be stored and applied later.
+        String signature = BuiltinSignatures.signatureOf(n.name());
+        if (signature != null) return genBuiltinValue(n.name(), signature, ctx);
         return "resolveBinding(\"" + n.name() + "\")";
+    }
+
+    /**
+     * Builds the function <em>value</em> of a built-in, derived from its declared signature.
+     *
+     * <p>Two hand-maintained wrapper maps used to decide this, so only the couple of dozen
+     * built-ins someone had remembered to list were usable as values and the rest — {@code $abs},
+     * {@code $floor}, {@code $round}, {@code $join}, {@code $split}, {@code $replace},
+     * {@code $pad} and more — failed with T1006 "not a function" (J-17). Every name in
+     * {@link BuiltinSignatures} is now a value.
+     *
+     * <p>The wrapper is a synthetic lambda {@code function($p0, …, $pN){ $name($p0, …, $pN) }},
+     * so it reuses the ordinary call path: argument unpacking, context substitution and the
+     * built-in dispatch all behave exactly as they do for a call written out by hand. The arity
+     * counts only the required parameters: a higher-order built-in passes as many arguments as
+     * the callback's arity, so an optional slot would be filled with the element's index —
+     * {@code $map([1,2,3], $string)} would pass 0, 1, 2 as {@code $string}'s prettify flag.
+     */
+    private String genBuiltinValue(String name, String signature, GenCtx ctx) {
+        int arity = org.json_kula.jsonata_jvm.runtime.FunctionSignature.requiredArityOf(signature);
+        if (arity < 0) arity = 1; // variadic: the single-argument form is the useful one
+        int id = ctx.state.nextId();
+        List<String> params = new ArrayList<>(arity);
+        List<AstNode> args = new ArrayList<>(arity);
+        for (int i = 0; i < arity; i++) {
+            String param = "__bv" + id + "_" + i;
+            params.add(param);
+            args.add(new VariableRef(param));
+        }
+        Lambda lam = new Lambda(params, new FunctionCall(name, args));
+        String body = arity == 0
+                ? FunctionCallCodeGen.inlineLambda(this, lam, ctx)
+                : FunctionCallCodeGen.buildInlineLambda(this, lam, ctx);
+        return "lambdaNode(" + body + ", " + arity + ")";
     }
 
     @Override

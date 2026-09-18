@@ -275,49 +275,65 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Dynamic filter: probes the predicate with MISSING to determine mode.
-     * If the result is a number → index subscript; otherwise → boolean filter.
-     * This implements JSONata semantics where {@code arr[expr]} can be either
-     * a positional subscript or a filter depending on what {@code expr} evaluates to.
-     * <p>
-     * Rationale: numeric expressions like {@code 5*0.2} or variable references
-     * like {@code $n} (bound to a number) are context-independent so they return
-     * the same value regardless of which element they are applied to — including
-     * MISSING. Boolean/path expressions applied to MISSING return MISSING or a
-     * boolean, never a number, so they fall through to filter mode.
+     * Dynamic filter: {@code seq[expr]} is a positional subscript or a boolean filter depending
+     * on what {@code expr} evaluates to — decided <em>per element</em>, exactly as the reference
+     * does it.
+     *
+     * <p>For each element the predicate is evaluated against that element; a numeric result (or
+     * an array of numbers) selects by <em>index</em>, so the element is kept when one of those
+     * numbers, floored and wrapped when negative, equals the element's own position. Anything
+     * else is a truthiness test.
+     *
+     * <p>Probing once with MISSING to pick a mode for the whole sequence was wrong twice over:
+     * {@code $.arr[a]} over {@code [{"a":0},{"a":1},{"a":5}]} gave the truthy elements
+     * {@code [{"a":1},{"a":5}]} where the reference gives the elements whose {@code a} equals
+     * their index, {@code [{"a":0},{"a":1}]}; and the extra evaluation with an absent context was
+     * observable for any predicate with a side effect ({@code $error}, {@code $random}, a bound
+     * function).
      */
     public static JsonNode dynamicFilter(JsonNode seq, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = deadlineGuard(predicate);
         if (seq == null || seq == MISSING) return MISSING;
-        JsonNode probe = predicate.apply(MISSING);
-        if (probe != null && probe != MISSING) {
-            if (probe.isNumber()) return subscript(seq, probe);
-            if (probe.isArray()) {
-                // Check if all elements are integers; if not, fall through to filter mode
-                boolean allInts = true;
-                for (JsonNode idx : probe) {
-                    if (!idx.isNumber()) { allInts = false; break; }
+        int size = seq.isArray() ? seq.size() : 1;
+        ArrayNode result = NF.arrayNode();
+        for (int i = 0; i < size; i++) {
+            JsonNode elem = seq.isArray() ? seq.get(i) : seq;
+            if (matchesPredicate(predicate.apply(elem), i, size)) result.add(elem);
+        }
+        return unwrap(result);
+    }
+
+    /**
+     * Whether a predicate result keeps the element at {@code index} of a sequence of
+     * {@code size}: a number or array of numbers matches by position, anything else by
+     * truthiness.
+     */
+    private static boolean matchesPredicate(JsonNode res, int index, int size) {
+        if (res == null || res == MISSING) return false;
+        if (res.isNumber()) return indexMatches(res, index, size);
+        if (res.isArray() && !res.isEmpty()) {
+            boolean allNumbers = true;
+            for (JsonNode n : res) {
+                if (!n.isNumber()) { allNumbers = false; break; }
+            }
+            if (allNumbers) {
+                for (JsonNode n : res) {
+                    if (indexMatches(n, index, size)) return true;
                 }
-                if (allInts) {
-                    // Multi-index subscript: a sorted set gives unique indices in natural array
-                    // order in one pass, where scanning a list for duplicates was quadratic.
-                    int size = seq.isArray() ? seq.size() : 1;
-                    java.util.TreeSet<Integer> indices = new java.util.TreeSet<>();
-                    for (JsonNode idx : probe) {
-                        int i = (int) idx.doubleValue();
-                        int actual = i < 0 ? size + i : i;
-                        if (actual >= 0 && actual < size) indices.add(actual);
-                    }
-                    ArrayNode result = NF.arrayNode();
-                    for (int i : indices) {
-                        JsonNode val = seq.isArray() ? seq.get(i) : (i == 0 ? seq : MISSING);
-                        if (!missing(val)) result.add(val);
-                    }
-                    return unwrap(result);
-                }
+                return false;
             }
         }
-        return filter(seq, predicate);
+        return isTruthy(res);
+    }
+
+    /** One index from a predicate result: floored, and counted from the end when negative. */
+    private static boolean indexMatches(JsonNode number, int index, int size) {
+        double d = number.doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d)) return false;
+        long i = (long) Math.floor(d);
+        if (i < 0) i += size;
+        return i == index;
     }
 
     /**
@@ -804,16 +820,24 @@ public final class JsonataRuntime {
         return missing(left) ? right : left;
     }
 
-    /** Tests whether {@code item} is contained in {@code seq}. */
+    /**
+     * Tests whether {@code item} is contained in {@code seq}.
+     *
+     * <p>The reference compares with JavaScript {@code ===}, so only scalars can match: an object
+     * or array on the left is compared by identity and a freshly built one never equals anything
+     * in the sequence. Deep equality made {@code [1,2] in [[1,2],[3]]} true where the reference
+     * says false (J-19).
+     */
     public static JsonNode in_(JsonNode item, JsonNode seq) {
         if (missing(item) || missing(seq)) return bool(false);
+        if (item.isContainerNode()) return bool(false);
         if (seq.isArray()) {
             for (JsonNode elem : seq) {
-                if (eq(item, elem).booleanValue()) return bool(true);
+                if (!elem.isContainerNode() && eq(item, elem).booleanValue()) return bool(true);
             }
             return bool(false);
         }
-        return eq(item, seq);
+        return seq.isContainerNode() ? bool(false) : eq(item, seq);
     }
 
     /**

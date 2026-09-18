@@ -410,4 +410,158 @@ class ReviewFixesTest {
                     json("$filter([1,2,3], function($v,$i,$a){ $i > 0 and $count($a)=3 })"));
         }
     }
+
+    /**
+     * J-12: {@code seq[expr]} picks index-mode or filter-mode per element, not once for the
+     * whole sequence by probing the predicate with an absent context.
+     */
+    @Nested
+    class J12PerElementFilterMode {
+
+        private static final String ARR = "{\"arr\":[{\"a\":0},{\"a\":1},{\"a\":5}]}";
+
+        @Test
+        void aNumericResultSelectsByIndexPerElement() throws Exception {
+            // Keeps the elements whose `a` equals their own position, not the truthy ones.
+            assertEquals("[{\"a\":0},{\"a\":1}]", json("$.arr[a]", ARR));
+        }
+
+        @Test
+        void aBooleanResultStillFilters() throws Exception {
+            assertEquals("[{\"a\":1},{\"a\":5}]", json("$.arr[a>0]", ARR));
+        }
+
+        @Test
+        void noPositionMatchYieldsNothing() throws Exception {
+            assertEquals("**undefined**", json("$.arr[a-1]", ARR));
+        }
+
+        @Test
+        void aNegativeIndexCountsFromTheEnd() throws Exception {
+            assertEquals("{\"a\":0}", json("$.arr[a][0]", ARR));
+        }
+
+        @Test
+        void aLiteralSubscriptIsStillASubscript() throws Exception {
+            assertEquals("{\"a\":0}", json("arr[0]", ARR));
+        }
+    }
+
+    /** J-16: a negated numeric literal is an operand, so postfix and chain steps follow it. */
+    @Nested
+    class J16NegativeLiteralKeepsParsing {
+
+        @Test
+        void chainStepAfterANegativeLiteral() throws Exception {
+            assertEquals(3, eval("-3 ~> $abs").intValue());
+        }
+
+        @Test
+        void plainNegativeLiteralIsUnchanged() throws Exception {
+            assertEquals(-3, eval("-3").intValue());
+        }
+
+        @Test
+        void arithmeticOnANegativeLiteralIsUnchanged() throws Exception {
+            assertEquals(-1, eval("-3 + 2").intValue());
+        }
+    }
+
+    /** J-18: a radix literal wider than 64 bits is a finite double, not a raw parse failure. */
+    @Nested
+    class J18WideRadixLiterals {
+
+        @Test
+        void aHexLiteralWiderThanALongParses() throws Exception {
+            assertEquals(4.722366482869645e21,
+                    eval("$number(\"0xFFFFFFFFFFFFFFFFFF\")").doubleValue(), 0.0);
+        }
+
+        @Test
+        void ordinaryRadixLiteralsAreUnchanged() throws Exception {
+            assertEquals(511, eval("$number(\"0o777\")").intValue());
+            assertEquals(255, eval("$number(\"0xff\")").intValue());
+        }
+    }
+
+    /** J-19: `in` compares with strict equality, so a container on the left never matches. */
+    @Nested
+    class J19InUsesStrictEquality {
+
+        @Test
+        void anArrayOnTheLeftNeverMatches() throws Exception {
+            assertFalse(eval("[1,2] in [[1,2],[3]]").booleanValue());
+        }
+
+        @Test
+        void anObjectOnTheLeftNeverMatches() throws Exception {
+            assertFalse(eval("{\"a\":1} in [{\"a\":1}]").booleanValue());
+        }
+
+        @Test
+        void scalarsStillMatchByValue() throws Exception {
+            assertTrue(eval("1 in [1,2]").booleanValue());
+            assertTrue(eval("\"a\" in [\"a\",\"b\"]").booleanValue());
+            assertFalse(eval("3 in [1,2]").booleanValue());
+        }
+    }
+
+    /**
+     * J-21: a deferred error's code and message are emitted with the shared Java string escaper.
+     *
+     * <p>No expression reaches it with a character that needs escaping today — the message only
+     * ever names a built-in — so this pins the behaviour of the path rather than a former crash.
+     */
+    @Nested
+    class J21DeferredErrorEscaping {
+
+        @Test
+        void aBuiltinCalledWithoutItsDollarRaisesT1005WhenReached() {
+            assertEquals("T1005", errorCode("count([1,2])"));
+        }
+
+        @Test
+        void andIsNotRaisedWhenControlNeverReachesIt() throws Exception {
+            assertEquals(1, eval("false ? count([1,2]) : 1").intValue());
+        }
+    }
+
+    /**
+     * J-17: every built-in is usable as a function value, not the two dozen someone had listed
+     * in a hand-maintained wrapper map. The wrapper is derived from the declared signature.
+     *
+     * <p>Its arity counts required parameters only. The reference instead uses the
+     * implementation's full parameter count, which shows up in one corner: a higher-order
+     * built-in passes the element index into an optional slot, so the reference's
+     * {@code $map([1.234,5.678], $round)} is {@code [1,5.7]} (precision 0 then 1) where this port
+     * gives {@code [1,6]}. Matching that would mean feeding the index into {@code $string}'s
+     * prettify flag too; required-only arity is the reading that keeps the common cases right.
+     */
+    @Nested
+    class J17BuiltinsAsFunctionValues {
+
+        @Test
+        void abs() throws Exception {
+            assertEquals("[1.5,2.5]", json("$map([1.5,-2.5], $abs)"));
+            assertEquals(3, eval("-3 ~> $abs").intValue());
+        }
+
+        @Test
+        void floorAndTrim() throws Exception {
+            assertEquals("[1,2]", json("$map([1.7,2.2], $floor)"));
+            assertEquals("\"x\"", json("$map([\" x \"], $trim)"));
+        }
+
+        @Test
+        void aTwoParameterBuiltinAsAReducer() throws Exception {
+            assertEquals(8, eval("$reduce([2,3], $power)").intValue());
+        }
+
+        @Test
+        void theBuiltinsThatAlreadyWorkedStillDo() throws Exception {
+            assertEquals("[\"1\",\"2\",\"3\"]", json("$map([1,2,3], $string)"));
+            assertEquals("[1,2,3]", json("$filter([1,2,3], $boolean)"));
+            assertEquals("[[1,0],[2,1]]", json("$map([1,2], $append)"));
+        }
+    }
 }

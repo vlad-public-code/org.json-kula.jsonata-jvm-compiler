@@ -272,7 +272,10 @@ public final class Parser {
             if (peek().type() == NUMBER) {
                 double v = parseDouble(peek().value(), peek().position());
                 cursor++;
-                return new NumberLiteral(-v);
+                // The negated literal is still an operand: `-3 ~> $abs` and `-3[0]` have to keep
+                // parsing postfix and chain steps. Returning it directly ended the expression and
+                // made `-3 ~> $abs` a parse error (J-16).
+                return parseChainFrom(parsePostfixFrom(new NumberLiteral(-v)));
             }
             return new UnaryMinus(parseUnary());
         }
@@ -289,7 +292,11 @@ public final class Parser {
 
     // Level 11: ~> function chaining
     private AstNode parseChain() throws ParseException {
-        AstNode left = parsePostfix();
+        return parseChainFrom(parsePostfix());
+    }
+
+    /** Continues chain parsing from an already-parsed left operand. */
+    private AstNode parseChainFrom(AstNode left) throws ParseException {
         if (peek().type() == TILDE_GT) {
             List<AstNode> steps = new ArrayList<>();
             steps.add(left);
@@ -304,7 +311,11 @@ public final class Parser {
 
     // Level 12: postfix — . [] ^() {} ||
     private AstNode parsePostfix() throws ParseException {
-        AstNode node = parsePrimary();
+        return parsePostfixFrom(parsePrimary());
+    }
+
+    /** Continues postfix parsing from an already-parsed primary. */
+    private AstNode parsePostfixFrom(AstNode node) throws ParseException {
 
         // A `[]` seen on a node whose result is not a sequence. It is not discarded — the mark
         // lives on the node and is read by the next thing that does produce one — but if the

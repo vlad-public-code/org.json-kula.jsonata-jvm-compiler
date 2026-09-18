@@ -201,7 +201,27 @@ public final class FunctionSignature {
      * decides how many arguments reach it (see {@link BoundFunctionValue}) and how much a built-in
      * higher-order function passes a callback.
      */
-    static int arityOf(String signature) {
+    /**
+     * The number of <em>required</em> parameters of {@code signature} — the arity a built-in has
+     * when it is used as a function value.
+     *
+     * <p>Optional parameters are excluded on purpose. A higher-order built-in passes as many
+     * arguments as the callback's arity, so counting {@code $string}'s optional {@code prettify}
+     * flag would make {@code $map([1,2,3], $string)} pass the element's index into it and fail
+     * with "Argument 2 of function $string must be a boolean".
+     */
+    public static int requiredArityOf(String signature) {
+        List<ParamSpec> params = parseParams(signature);
+        if (params == null) return LambdaNode.UNKNOWN_ARITY;
+        int required = 0;
+        for (ParamSpec p : params) {
+            if (p.variadic()) return LambdaNode.UNKNOWN_ARITY;
+            if (!p.optional()) required++;
+        }
+        return required;
+    }
+
+    public static int arityOf(String signature) {
         List<ParamSpec> params = parseParams(signature);
         if (params == null) return LambdaNode.UNKNOWN_ARITY;
         for (ParamSpec p : params) {
