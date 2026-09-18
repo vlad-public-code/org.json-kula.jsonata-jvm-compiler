@@ -529,10 +529,13 @@ public final class StringBuiltins {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isTextual()) return arg;
         try {
-            JsonNode sanitized = JsonataRuntime.sanitizeForString(arg);
-            String raw = PRETTY_WRITER.writeValueAsString(sanitized);
-            raw = raw.replace(" : ", ": ").replace("[ ]", "[]");
-            return NF.textNode(raw);
+            if (arg.isNumber() && !Double.isFinite(arg.doubleValue()))
+                throw new RuntimeEvaluationException("D3001",
+                        "Attempting to invoke a non-numeric value as a numeric function");
+            // Produced directly rather than by post-processing a printer's output: the old
+            // `raw.replace(" : ", ": ")` also rewrote string *values* containing " : ",
+            // turning $string({"a": "x : y"}, true) into {"a": "x: y"}.
+            return NF.textNode(JsonataRuntime.serializeJson(arg, true));
         } catch (RuntimeEvaluationException e) {
             throw new RuntimeEvaluationException(e.getErrorCode(), "$string: " + e.getMessage());
         } catch (Exception e) {

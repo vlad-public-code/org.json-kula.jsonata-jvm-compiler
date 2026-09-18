@@ -1092,16 +1092,9 @@ public final class JsonataRuntime {
         if (missing(arg)) return MISSING;
         if (arg.isNumber() && (Double.isInfinite(arg.doubleValue()) || Double.isNaN(arg.doubleValue())))
             throw new RuntimeEvaluationException("D3001", "Attempting to invoke a non-numeric value as a numeric function");
-        // Check if containers contain Infinity values (throws D1001)
-        if (arg.isObject() || arg.isArray()) checkNoInfinity(arg);
+        // A non-finite number *inside* a container is D1001, and serializeJson raises it during
+        // the single walk it already makes — no separate scan of the tree.
         return NF.textNode(toText(arg));
-    }
-
-    private static void checkNoInfinity(JsonNode node) throws RuntimeEvaluationException {
-        if (node.isNumber() && (Double.isInfinite(node.doubleValue()) || Double.isNaN(node.doubleValue())))
-            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
-        if (node.isArray()) { for (JsonNode e : node) checkNoInfinity(e); }
-        if (node.isObject()) { for (JsonNode v : node) checkNoInfinity(v); }
     }
 
     public static JsonNode fn_string(JsonNode arg, JsonNode prettify) throws RuntimeEvaluationException {
@@ -1871,6 +1864,12 @@ public final class JsonataRuntime {
         return SequenceBuiltins.fn_sort(arg, keyFn);
     }
 
+    /** Order-by sort on one key with an explicit direction (see SequenceBuiltins.fn_sort). */
+    public static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn, boolean descending)
+            throws RuntimeEvaluationException {
+        return SequenceBuiltins.fn_sort(arg, keyFn, descending);
+    }
+
     public static JsonNode fn_sort_comparator(JsonNode arg, JsonataLambda comparatorFn)
             throws RuntimeEvaluationException {
         return SequenceBuiltins.fn_sort_comparator(arg, comparatorFn);
@@ -2068,6 +2067,10 @@ public final class JsonataRuntime {
         if (seq == null || seq == MISSING) return MISSING;
         if (!seq.isArray()) return seq.isObject() ? seq : MISSING;
         ObjectNode result = NF.objectNode();
+        // Keys whose accumulated array was built *here*. A value taken straight out of an
+        // item may be an array the caller's document owns, so appending to it in place
+        // would corrupt the input; only an array this method allocated may be extended.
+        java.util.Set<String> owned = new java.util.HashSet<>();
         for (JsonNode item : seq) {
             if (!item.isObject()) continue;
             java.util.Iterator<java.util.Map.Entry<String, JsonNode>> it = item.fields();
@@ -2079,14 +2082,15 @@ public final class JsonataRuntime {
                     result.set(k, v);
                 } else {
                     JsonNode existing = result.get(k);
-                    if (existing.isArray()) {
+                    if (existing.isArray() && owned.contains(k)) {
                         ArrayNode arr = (ArrayNode) existing;
                         if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
                     } else {
                         ArrayNode arr = NF.arrayNode();
-                        arr.add(existing);
+                        if (existing.isArray()) arr.addAll((ArrayNode) existing); else arr.add(existing);
                         if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
                         result.set(k, arr);
+                        owned.add(k);
                     }
                 }
             }
@@ -2878,7 +2882,82 @@ public final class JsonataRuntime {
         // Function and regex values render as the empty string (JSONata spec); LambdaNode and
         // RegexNode serialize themselves that way, so containers need no defensive copy.
         if (n instanceof LambdaNode || n instanceof RegexNode) return "";
-        return n.toString();
+        return serializeJson(n, false);
+    }
+
+    /**
+     * Serialises a container the way the reference's {@code $string} does.
+     *
+     * <p>Jackson's own {@code toString()} renders numbers with Java's formatting, which is not
+     * ECMAScript's: {@code 0.1 + 0.2} came out as {@code 0.30000000000000004} where the
+     * reference prints {@code 0.3} (its replacer rounds a non-integer to 15 significant
+     * digits), and {@code 1e21} came out as {@code 1.0E21} rather than {@code 1e+21}. Scalars
+     * were already correct because they go through {@link #numberToString}; containers did not.
+     *
+     * <p>Pretty output is {@code JSON.stringify(x, null, 2)}: two-space indent, {@code ": "}
+     * between key and value, and {@code {}} / {@code []} for the empty containers. It is
+     * produced directly rather than by rewriting a printer's output — the old
+     * {@code replace(" : ", ": ")} also rewrote every string <em>value</em> containing
+     * {@code " : "}.
+     *
+     * <p>The non-finite check happens during this single walk, so a container is not traversed
+     * twice just to look for an Infinity.
+     */
+    public static String serializeJson(JsonNode n, boolean pretty) throws RuntimeEvaluationException {
+        StringBuilder sb = new StringBuilder();
+        writeJson(n, sb, pretty, 0);
+        return sb.toString();
+    }
+
+    private static void writeJson(JsonNode n, StringBuilder sb, boolean pretty, int depth)
+            throws RuntimeEvaluationException {
+        if (n == null || n.isMissingNode()) { sb.append("null"); return; }
+        if (n instanceof LambdaNode || n instanceof RegexNode) { sb.append("\"\""); return; }
+        if (n.isNumber()) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d))
+                throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+            sb.append(numberToString(d));
+            return;
+        }
+        if (n.isArray()) {
+            if (n.isEmpty()) { sb.append("[]"); return; }
+            sb.append('[');
+            boolean first = true;
+            for (JsonNode e : n) {
+                if (!first) sb.append(',');
+                first = false;
+                newlineIndent(sb, pretty, depth + 1);
+                writeJson(e, sb, pretty, depth + 1);
+            }
+            newlineIndent(sb, pretty, depth);
+            sb.append(']');
+            return;
+        }
+        if (n.isObject()) {
+            if (n.isEmpty()) { sb.append("{}"); return; }
+            sb.append('{');
+            boolean first = true;
+            for (java.util.Map.Entry<String, JsonNode> e : n.properties()) {
+                if (!first) sb.append(',');
+                first = false;
+                newlineIndent(sb, pretty, depth + 1);
+                sb.append(NF.textNode(e.getKey()).toString());
+                sb.append(pretty ? ": " : ":");
+                writeJson(e.getValue(), sb, pretty, depth + 1);
+            }
+            newlineIndent(sb, pretty, depth);
+            sb.append('}');
+            return;
+        }
+        // Strings, booleans and null: Jackson's own rendering is already JSON.
+        sb.append(n.toString());
+    }
+
+    private static void newlineIndent(StringBuilder sb, boolean pretty, int depth) {
+        if (!pretty) return;
+        sb.append('\n');
+        for (int i = 0; i < depth * 2; i++) sb.append(' ');
     }
 
     /**

@@ -95,9 +95,13 @@ final class GenCtx {
         return new GenCtx(newCtx, rootVar, state, newParents, inArrayConstructorStep, arrayConstructorPreserve, crossJoinParent, false, primaryContextVar, tuplePos);
     }
 
-    /** Returns a new context with the given parent vars list. */
+    /**
+     * Returns a new context with the given parent vars list. Clears the tail-position flag:
+     * this is only used while compiling path internals, never for a lambda's returned
+     * expression, so a call inside must produce a value rather than the TCO sentinel.
+     */
     GenCtx withParents(List<String> newParentVars) {
-        return new GenCtx(ctxVar, rootVar, state, newParentVars, inArrayConstructorStep, arrayConstructorPreserve, crossJoinParent, isTailPosition, primaryContextVar, tuplePos);
+        return new GenCtx(ctxVar, rootVar, state, newParentVars, inArrayConstructorStep, arrayConstructorPreserve, crossJoinParent, false, primaryContextVar, tuplePos);
     }
 
     /** Returns a new context with inArrayConstructorStep flag set. */
@@ -110,9 +114,9 @@ final class GenCtx {
         return new GenCtx(ctxVar, rootVar, state, parentVars, inArrayConstructorStep, true, crossJoinParent, false, primaryContextVar, tuplePos);
     }
 
-    /** Returns a new context with the cross-join parent variable set. */
+    /** Returns a new context with the cross-join parent variable set (never a tail position). */
     GenCtx withCrossJoinParent(String cjp) {
-        return new GenCtx(ctxVar, rootVar, state, parentVars, inArrayConstructorStep, arrayConstructorPreserve, cjp, isTailPosition, primaryContextVar, tuplePos);
+        return new GenCtx(ctxVar, rootVar, state, parentVars, inArrayConstructorStep, arrayConstructorPreserve, cjp, false, primaryContextVar, tuplePos);
     }
 
     /** Returns a new context with the tail-position flag set to {@code tp}. */

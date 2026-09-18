@@ -89,11 +89,12 @@ class SortingGroupingTest {
     @Test
     void sort_phoneByTypeDescending() throws Exception {
         // Phone^(>type) — sort phones reverse-alphabetically by type.
-        // Implemented as fn_reverse(fn_sort(...)), so equal-key elements
-        // also appear in reversed order (01962 001235 before 01962 001234).
+        // A descending order-by is a STABLE sort on the inverted comparison, not the reverse
+        // of an ascending sort, so the two "office" entries keep their input order. Verified
+        // against reference jsonata 2.2.2.
         assertJsonEqual(
-                "[{\"type\":\"office\",\"number\":\"01962 001235\"},"
-                        + "{\"type\":\"office\",\"number\":\"01962 001234\"},"
+                "[{\"type\":\"office\",\"number\":\"01962 001234\"},"
+                        + "{\"type\":\"office\",\"number\":\"01962 001235\"},"
                         + "{\"type\":\"mobile\",\"number\":\"077 7700 1234\"},"
                         + "{\"type\":\"home\",\"number\":\"0203 544 1234\"}]",
                 eval("Phone^(>type)", FRED));
