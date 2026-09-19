@@ -624,4 +624,71 @@ class ReviewFixesTest {
                     json("$ ~> |a|{\"x\":2}|", "{\"a\":{\"y\":1}}"));
         }
     }
+
+    /**
+     * J-20: the comparator sort is the reference's merge sort, so a user comparator that is not
+     * a consistent ordering cannot trip TimSort's contract check.
+     */
+    @Nested
+    class J20ComparatorSort {
+
+        @Test
+        void anOrdinaryComparatorStillSorts() throws Exception {
+            assertEquals("[1,2,3]", json("$sort([3,1,2], function($a,$b){ $a > $b })"));
+        }
+
+        @Test
+        void equalElementsKeepInputOrder() throws Exception {
+            assertEquals("[{\"n\":\"a\",\"p\":1},{\"n\":\"b\",\"p\":1},{\"n\":\"c\",\"p\":0}]",
+                    json("$sort($, function($a,$b){ $a.p < $b.p })",
+                            "[{\"n\":\"a\",\"p\":1},{\"n\":\"b\",\"p\":1},{\"n\":\"c\",\"p\":0}]"));
+        }
+
+        @Test
+        void anInconsistentComparatorDoesNotThrow() throws Exception {
+            // Always "after": TimSort rejected this as a contract violation with a code-less
+            // error. A merge sort simply asks each pair once and returns an order.
+            JsonNode r = eval("$sort([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,"
+                    + "23,24,25,26,27,28,29,30,31,32,33], function($a,$b){ true })");
+            assertTrue(r.isArray());
+            assertEquals(33, r.size());
+        }
+    }
+
+    /** J-22: three smaller divergences from the reference. */
+    @Nested
+    class J22MinorDivergences {
+
+        @Test
+        void mergeRejectsANonObjectElement() {
+            assertEquals("T0412", errorCode("$merge([1, {\"a\":1}])"));
+        }
+
+        @Test
+        void mergeStillMergesObjects() throws Exception {
+            assertEquals("{\"a\":1,\"b\":2}", json("$merge([{\"a\":1}, {\"b\":2}])"));
+        }
+
+        @Test
+        void lookupRejectsANonStringKey() {
+            assertEquals("T0410", errorCode("$lookup({\"a\":1}, 1)"));
+        }
+
+        @Test
+        void lookupStillLooksUp() throws Exception {
+            assertEquals(1, eval("$lookup({\"a\":1}, \"a\")").intValue());
+        }
+
+        @Test
+        void aComposedFunctionStillHitsTheRecursionLimit() {
+            // Composition used to call the two lambdas directly, skipping the depth check.
+            assertEquals("U1001", errorCode(
+                    "( $f := function($n){ $n = 0 ? 0 : ($g := $f ~> $number; $g($n - 1)) }; $f(2000) )"));
+        }
+
+        @Test
+        void compositionStillComposes() throws Exception {
+            assertEquals("HI", eval("( $f := $trim ~> $uppercase; $f(\"  hi  \") )").textValue());
+        }
+    }
 }

@@ -93,9 +93,12 @@ final class LambdaRegistry {
                     "T2006", "Right-hand side of ~> is not a function; got: " + fn);
         }
         if (isLambdaToken(arg)) {
-            final JsonataLambda f = lookupLambda(arg);
-            final JsonataLambda g = lookupLambda(fn);
-            return lambdaNode(x -> g.apply(f.apply(x)), arityOf(arg));
+            // Through fn_apply, not the raw lambdas: calling them directly skipped the U1001
+            // recursion-depth check and the evaluation deadline, so a composed function was a
+            // hole in both (J-22).
+            final JsonNode f = arg;
+            final JsonNode g = fn;
+            return lambdaNode(x -> fn_apply(g, fn_apply(f, x)), arityOf(arg));
         }
         return lookupLambda(fn).apply(arg);
     }

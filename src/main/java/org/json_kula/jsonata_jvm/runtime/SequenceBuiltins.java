@@ -203,20 +203,43 @@ final class SequenceBuiltins {
         final JsonataLambda compare = JsonataRuntime.deadlineGuard(comparatorFn);
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
-        // The comparator answers one question — "should $a come after $b?" — so the mirrored
-        // question has to be asked as well to tell "equal" from "before": answering -1 for both
-        // makes the comparator inconsistent, and equal elements then get reordered rather than
-        // keeping their input order (the official suite's $sort-by-price case proves it).
-        // The mirror is only needed when the first answer is falsy, so an already-ordered pair
-        // still costs one call.
-        Comparator<JsonNode> cmp = (a, b) -> {
-            if (JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(a, b)))) return 1;
-            return JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(b, a))) ? -1 : 0;
-        };
-        list.sort(cmp);
-        ArrayNode result = NF.arrayNode();
-        list.forEach(result::add);
+        // The reference's own merge sort, driven by the single question the comparator answers:
+        // "should $a come after $b?". List.sort needed a three-way answer, so the mirrored
+        // question had to be asked too — which cost a second call per unordered pair and, worse,
+        // handed TimSort a comparator a user is free to make inconsistent ($random() > 0.5, or
+        // any non-transitive rule). TimSort detects that and throws "Comparison method violates
+        // its general contract", surfacing as a code-less evaluation failure (J-20). A merge
+        // sort asks each pair once, never validates transitivity, keeps equal elements in input
+        // order, and compares in the same order the reference does.
+        List<JsonNode> sorted = mergeSortNodes(list,
+                (a, b) -> JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(a, b))));
+        ArrayNode result = NF.arrayNode(sorted.size());
+        sorted.forEach(result::add);
         return result;
+    }
+
+    /** "Does {@code a} sort after {@code b}?" — the one question a JSONata comparator answers. */
+    @FunctionalInterface
+    private interface SortsAfter {
+        boolean test(JsonNode a, JsonNode b) throws RuntimeEvaluationException;
+    }
+
+    /** A stable merge sort over nodes, ordered by {@code after}; mirrors {@link #mergeSort}. */
+    private static List<JsonNode> mergeSortNodes(List<JsonNode> items, SortsAfter after)
+            throws RuntimeEvaluationException {
+        if (items.size() <= 1) return items;
+        int middle = items.size() / 2;
+        List<JsonNode> left  = mergeSortNodes(new ArrayList<>(items.subList(0, middle)), after);
+        List<JsonNode> right = mergeSortNodes(new ArrayList<>(items.subList(middle, items.size())), after);
+        List<JsonNode> merged = new ArrayList<>(items.size());
+        int li = 0, ri = 0;
+        while (li < left.size() && ri < right.size()) {
+            if (after.test(left.get(li), right.get(ri))) merged.add(right.get(ri++));
+            else merged.add(left.get(li++));
+        }
+        while (li < left.size())  merged.add(left.get(li++));
+        while (ri < right.size()) merged.add(right.get(ri++));
+        return merged;
     }
 
     /**

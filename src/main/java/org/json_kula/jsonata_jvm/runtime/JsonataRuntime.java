@@ -2283,12 +2283,17 @@ public final class JsonataRuntime {
         return copy;
     }
 
-    public static JsonNode fn_merge(JsonNode arr) {
+    public static JsonNode fn_merge(JsonNode arr) throws RuntimeEvaluationException {
         if (missing(arr)) return MISSING;
         ObjectNode result = NF.objectNode();
         Iterable<JsonNode> items = arr.isArray() ? arr : List.of(arr);
         for (JsonNode item : items) {
-            if (item.isObject()) item.fields().forEachRemaining(e -> result.set(e.getKey(), e.getValue()));
+            // $merge declares <a<o>:o>, so a non-object element is T0412, not something to skip:
+            // `$merge([1, {"a":1}])` was quietly {"a":1} where the reference rejects it (J-22).
+            if (!item.isObject())
+                throw new RuntimeEvaluationException(
+                        "T0412", "Argument 1 of function \"merge\" must be an array of \"objects\"");
+            item.fields().forEachRemaining(e -> result.set(e.getKey(), e.getValue()));
         }
         return result;
     }
@@ -2297,10 +2302,14 @@ public final class JsonataRuntime {
      * Returns the value associated with {@code key} in {@code obj}.
      * When {@code obj} is an array of objects, returns an array of all matching values.
      */
-    public static JsonNode fn_lookup(JsonNode obj, JsonNode key) {
+    public static JsonNode fn_lookup(JsonNode obj, JsonNode key) throws RuntimeEvaluationException {
         if (missing(obj) || missing(key)) return MISSING;
         String k = key.textValue();
-        if (k == null) return MISSING;
+        // $lookup declares <x-s:x>: a non-string key does not match the signature. Returning
+        // undefined hid the mistake instead of reporting it (J-22).
+        if (k == null)
+            throw new RuntimeEvaluationException(
+                    "T0410", "Argument 2 of function \"lookup\" does not match function signature");
         if (obj.isObject()) {
             JsonNode v = obj.get(k);
             return (v == null || v == MISSING) ? MISSING : v;
