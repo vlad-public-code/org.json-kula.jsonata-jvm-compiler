@@ -860,4 +860,28 @@ class ReviewFixesTest {
             assertEquals(6, e.evaluate(NullNode.instance).intValue());
         }
     }
+
+    /** P-6: $toMillis branches on the shape of the string, not on parse exceptions. */
+    @Nested
+    class P6ToMillisShapes {
+
+        @Test
+        void partialDatesStillParse() throws Exception {
+            assertEquals(1672531200000L, eval("$toMillis(\"2023\")").longValue());
+            assertEquals(1682899200000L, eval("$toMillis(\"2023-05\")").longValue());
+            assertEquals(1684281600000L, eval("$toMillis(\"2023-05-17\")").longValue());
+        }
+
+        @Test
+        void instantsStillParse() throws Exception {
+            assertEquals(1684324800000L, eval("$toMillis(\"2023-05-17T12:00:00Z\")").longValue());
+            assertEquals(1684324800500L, eval("$toMillis(\"2023-05-17T12:00:00.500Z\")").longValue());
+        }
+
+        @Test
+        void aBareOffsetIsStillNormalised() throws Exception {
+            assertEquals(1684317600000L,
+                    eval("$toMillis(\"2023-05-17T12:00:00+0200\")").longValue());
+        }
+    }
 }
