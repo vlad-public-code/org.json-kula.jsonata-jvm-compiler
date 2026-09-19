@@ -173,6 +173,19 @@ b", /$/)} found two matches where
 
     /** Builds a regex that matches the literal string {@code s} (no special regex chars). */
     static org.joni.Regex buildLiteralRegex(String s) {
+        // Cached like a regex literal. `$replace(x, "old", "new")` inside a $map over 100k rows
+        // compiled 100k identical regexes (P-3). The key is namespaced with a leading  so a
+        // literal string can never collide with a real "pattern flags" key.
+        String key = "literal " + s;
+        Map<String, org.joni.Regex> instanceMap = EvaluationContext.getInstanceRegexes();
+        if (instanceMap != null) return instanceMap.computeIfAbsent(key, k -> compileLiteral(s));
+        synchronized (REGEX_REGISTRY) {
+            return REGEX_REGISTRY.computeIfAbsent(key, k -> compileLiteral(s));
+        }
+    }
+
+    /** Builds the escaped-literal regex that {@link #buildLiteralRegex} caches. */
+    private static org.joni.Regex compileLiteral(String s) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

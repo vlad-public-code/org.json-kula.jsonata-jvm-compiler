@@ -185,11 +185,40 @@ final class RegexOps {
         private final org.joni.Matcher matcher;
         private int cursor;              // byte offset just past the previous match
         private boolean started;
+        /** Last (byte, char) offset pair converted — matches are monotonic, so it is reusable. */
+        private int memoByte;
+        private int memoChar;
+        /** True when every byte is ASCII, in which case a byte offset is already a char offset. */
+        private final boolean ascii;
 
         MatchCursor(String subject, org.joni.Regex regex) {
             this.subject = subject;
             this.bytes = subject.getBytes(StandardCharsets.UTF_8);
             this.matcher = regex.matcher(bytes);
+            this.ascii = bytes.length == subject.length();
+        }
+
+        /**
+         * The character index for {@code bytePos}, continued from the previous conversion.
+         *
+         * <p>{@link RegexOps#bytePosToCharPos} rescans from the start of the subject every time,
+         * and a scan calls it twice per match — so matching a 1 MB subject with 100k matches
+         * walked on the order of 10^10 code points (P-2). Matches arrive in increasing order, so
+         * the walk can simply resume where the last one stopped, making a whole scan linear.
+         */
+        private int charPos(int bytePos) {
+            if (ascii) return bytePos;
+            if (bytePos < memoByte) { memoByte = 0; memoChar = 0; }
+            int charPos = memoChar;
+            int b = memoByte;
+            while (b < bytePos && charPos < subject.length()) {
+                int cp = subject.codePointAt(charPos);
+                charPos += Character.charCount(cp);
+                b += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+            }
+            memoByte = b;
+            memoChar = charPos;
+            return charPos;
         }
 
         /**
@@ -233,8 +262,7 @@ final class RegexOps {
 
             started = true;
             cursor = endByte;
-            return new Match(text, bytePosToCharPos(subject, found),
-                    bytePosToCharPos(subject, endByte), groups, endByte);
+            return new Match(text, charPos(found), charPos(endByte), groups, endByte);
         }
     }
 

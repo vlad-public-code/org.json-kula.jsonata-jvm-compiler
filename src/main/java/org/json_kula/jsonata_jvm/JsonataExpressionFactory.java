@@ -52,10 +52,22 @@ public class JsonataExpressionFactory {
      * magnitude more than evaluating the result. Almost every real use evaluates the same handful of
      * expression strings repeatedly (often the same one per element of a sequence), so caching turns
      * all but the first into a map lookup. Bounded because the key comes from the data and could
-     * otherwise grow without limit; the eviction order is arbitrary, which only costs a recompile.
+     * otherwise grow without limit.
+     *
+     * <p>Access-ordered with least-recently-used eviction. Clearing the whole cache on overflow
+     * meant that a data-driven mix of more than 256 distinct expressions alternated between
+     * "everything cached" and "recompile everything" — ~85 ms of javac and a fresh class loader
+     * per entry, for a working set only slightly too large (P-8). Evicting one entry degrades
+     * smoothly instead. Synchronised because LinkedHashMap's access order mutates on reads.
      */
     private static final int EVAL_CACHE_LIMIT = 256;
-    private final Map<String, JsonataExpression> evalCache = new ConcurrentHashMap<>();
+    private final Map<String, JsonataExpression> evalCache = java.util.Collections.synchronizedMap(
+            new java.util.LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, JsonataExpression> eldest) {
+                    return size() > EVAL_CACHE_LIMIT;
+                }
+            });
 
     private final JsonataExpressionLoader loader = new JsonataExpressionLoader();
 
@@ -68,7 +80,6 @@ public class JsonataExpressionFactory {
                 JsonataExpression compiled = evalCache.get(expr);
                 if (compiled == null) {
                     compiled = compile(expr);
-                    if (evalCache.size() >= EVAL_CACHE_LIMIT) evalCache.clear();
                     evalCache.put(expr, compiled);
                 }
                 // The caller's bindings travel into the evaluated text: the reference evaluates

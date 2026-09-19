@@ -166,6 +166,32 @@ public final class FunctionSignature {
      */
     static List<ParamSpec> parseParams(String signature) {
         if (signature == null || signature.length() < 2) return null;
+        List<ParamSpec> cached = PARSED.get(signature);
+        if (cached != null) return cached == UNPARSEABLE ? null : cached;
+        List<ParamSpec> parsed = parseParamsUncached(signature);
+        // A signature is a small fixed string in practice, but it can reach here from expression
+        // text (a lambda may declare one), so the cache is capped rather than unbounded. Dropping
+        // it wholesale is fine: the entries cost one parse each to rebuild.
+        if (PARSED.size() >= PARSED_LIMIT) PARSED.clear();
+        PARSED.put(signature, parsed == null ? UNPARSEABLE : parsed);
+        return parsed;
+    }
+
+    /** Parsed signatures, so a bound-function call or value reference does not re-parse (P-4). */
+    private static final java.util.concurrent.ConcurrentHashMap<String, List<ParamSpec>> PARSED =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final int PARSED_LIMIT = 512;
+
+    /**
+     * Marker for "this signature does not parse", so the failure is cached too. A fresh instance,
+     * never {@code List.of()}: a zero-parameter signature ({@code <:n>}) parses to an empty list,
+     * and {@code List.of()} is a singleton that would compare identical to it.
+     */
+    private static final List<ParamSpec> UNPARSEABLE =
+            java.util.Collections.unmodifiableList(new ArrayList<>());
+
+    private static List<ParamSpec> parseParamsUncached(String signature) {
         if (signature.charAt(0) != '<' || signature.charAt(signature.length() - 1) != '>')
             return null;
 

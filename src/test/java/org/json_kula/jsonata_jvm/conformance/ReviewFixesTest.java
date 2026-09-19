@@ -762,4 +762,65 @@ class ReviewFixesTest {
             assertEquals(1, eval("( $x := 1; $eval(\"$x\", {\"a\":1}) )").intValue());
         }
     }
+
+    /**
+     * Performance fixes that must not change any answer: P-2 (incremental byte→char offsets),
+     * P-3 (cached literal regexes), P-4 (cached parsed signatures), P-5 (incremental object
+     * index), P-8 (LRU $eval cache).
+     */
+    @Nested
+    class PerformanceFixesKeepTheSameAnswers {
+
+        @Test
+        void matchIndicesAreCharacterOffsetsInAMultibyteSubject() throws Exception {
+            assertEquals("[{\"match\":\"a\",\"index\":0,\"groups\":[]},"
+                            + "{\"match\":\"b\",\"index\":2,\"groups\":[]},"
+                            + "{\"match\":\"c\",\"index\":4,\"groups\":[]}]",
+                    json("$match(\"aébécé\", /[a-z]/)"));
+            assertEquals("[{\"match\":\"a\",\"index\":3,\"groups\":[]},"
+                            + "{\"match\":\"b\",\"index\":4,\"groups\":[]},"
+                            + "{\"match\":\"c\",\"index\":5,\"groups\":[]}]",
+                    json("$match(\"日本語abc\", /[a-c]/)"));
+        }
+
+        @Test
+        void replaceAndSplitStillHandleMultibyteSubjects() throws Exception {
+            assertEquals("日本X日本X", eval("$replace(\"日本a日本a\", \"a\", \"X\")").textValue());
+            assertEquals("[\"\",\"1\",\"2\",\"\"]", json("$split(\"é1é2é\", \"é\")"));
+        }
+
+        @Test
+        void aLargeMultibyteScanIsLinear() throws Exception {
+            // Rescanning from the start twice per match made this quadratic: 20k matches over a
+            // multibyte subject took minutes. It is well under a second once the walk resumes.
+            long started = System.currentTimeMillis();
+            JsonNode r = eval("$count($match($join([1..20000].($string($) & \"é\")), /é/))");
+            assertEquals(20000, r.intValue());
+            assertTrue(System.currentTimeMillis() - started < 20000,
+                    "scan took " + (System.currentTimeMillis() - started) + "ms");
+        }
+
+        @Test
+        void repeatedLiteralReplacementsAgree() throws Exception {
+            assertEquals("[\"X1\",\"X2\",\"X3\"]",
+                    json("$map([\"a1\",\"a2\",\"a3\"], function($v){ $replace($v, \"a\", \"X\") })"));
+        }
+
+        @Test
+        void aWideObjectStillReadsBackEveryKey() throws Exception {
+            // More fields than the index threshold, built by a group-by, then read back.
+            assertEquals(200, eval("$count($keys([1..200].{ \"k\" & $string($): $ }))").intValue());
+            assertEquals(37, eval("([1..200].{ \"k\" & $string($): $ }).k37").intValue());
+        }
+
+        @Test
+        void distinctEvalExpressionsStillEvaluate() throws Exception {
+            // Each distinct text is a javac run, so this stays small: exercising the 256-entry
+            // limit itself would cost ~300 compilations and minutes of suite time. What it pins
+            // is that reading through the cache still returns the right expression — the LRU
+            // change alters which entry is dropped, not what a hit returns.
+            assertEquals(20, eval("$count([1..20].$eval($string($) & \" + 0\"))").intValue());
+            assertEquals(210, eval("$sum([1..20].$eval($string($) & \" + 0\"))").intValue());
+        }
+    }
 }

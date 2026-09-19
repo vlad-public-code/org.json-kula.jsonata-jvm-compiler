@@ -138,8 +138,12 @@ final class ConstructedObjectMap extends AbstractMap<String, JsonNode> {
         }
         keys[size] = key;
         values[size] = value;
+        // The index stays valid: an append gives the new key the next slot and moves no other.
+        // Dropping it here made an alternating put/get pattern — a transform's update clause,
+        // $merge, a $sift result — rebuild the whole index after every write, O(n) per operation
+        // and O(n^2) over a wide object (P-5). A remove still drops it, since that shifts slots.
+        if (index != null) index.put(key, size);
         size++;
-        index = null;
         return null;
     }
 
