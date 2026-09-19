@@ -43,6 +43,12 @@ final class LambdaRegistry {
      */
     private static final ThreadLocal<TailCallData> PENDING_TAIL_CALL = ThreadLocal.withInitial(() -> null);
 
+    /** Detaches this thread's fallback counters; see EvaluationContext.releaseThreadState. */
+    static void releaseThreadState() {
+        CALL_DEPTH.remove();
+        PENDING_TAIL_CALL.remove();
+    }
+
     /**
      * Wraps {@code fn} as a JSONata function value of unknown arity.
      */

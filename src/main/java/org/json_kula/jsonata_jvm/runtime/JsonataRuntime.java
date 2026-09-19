@@ -92,6 +92,18 @@ public final class JsonataRuntime {
     }
 
     /**
+     * Detaches this thread's JSONata evaluation state.
+     *
+     * <p>Call it from a thread-teardown or application-shutdown hook when a pooled thread will
+     * not evaluate again — in a container that redeploys the application, the state otherwise
+     * keeps this library's class loader reachable from the thread. It is not needed for
+     * correctness, and it is a no-op while an evaluation is in progress on the calling thread.
+     */
+    public static void releaseThreadState() {
+        EvaluationContext.releaseThreadState();
+    }
+
+    /**
      * Packs the block locals captured at a {@code $eval} call site. Names and values are
      * positional; an absent value is dropped rather than bound to MISSING.
      */

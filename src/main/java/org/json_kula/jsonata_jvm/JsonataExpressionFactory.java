@@ -61,6 +61,9 @@ public class JsonataExpressionFactory {
      * smoothly instead. Synchronised because LinkedHashMap's access order mutates on reads.
      */
     private static final int EVAL_CACHE_LIMIT = 256;
+
+    /** Longest {@code $eval} text that is worth retaining; see the cache note above. */
+    private static final int EVAL_CACHE_MAX_KEY_CHARS = 8192;
     private final Map<String, JsonataExpression> evalCache = java.util.Collections.synchronizedMap(
             new java.util.LinkedHashMap<>(16, 0.75f, true) {
                 @Override
@@ -80,7 +83,11 @@ public class JsonataExpressionFactory {
                 JsonataExpression compiled = evalCache.get(expr);
                 if (compiled == null) {
                     compiled = compile(expr);
-                    evalCache.put(expr, compiled);
+                    // Bounded by key size as well as by count: the key comes from the document,
+                    // so 256 megabyte-long expression strings would be retained along with their
+                    // generated classes (M-3). An expression this large is not the repeated-use
+                    // case the cache exists for, so it is compiled and used without being kept.
+                    if (expr.length() <= EVAL_CACHE_MAX_KEY_CHARS) evalCache.put(expr, compiled);
                 }
                 // The caller's bindings travel into the evaluated text: the reference evaluates
                 // the string in the current environment, so `$eval("$y + 1")` must see a `y`

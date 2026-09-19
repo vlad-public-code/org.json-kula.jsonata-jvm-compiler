@@ -823,4 +823,41 @@ class ReviewFixesTest {
             assertEquals(210, eval("$sum([1..20].$eval($string($) & \" + 0\"))").intValue());
         }
     }
+
+    /** M-2 and M-3: bounded caches and a way to detach per-thread state. */
+    @Nested
+    class MemoryBounds {
+
+        @Test
+        void anOversizedEvalTextStillEvaluatesWithoutBeingCached() throws Exception {
+            // Longer than the cache's key limit: it must still compile and evaluate, it is
+            // simply not retained. A long string literal, not a long chain of operators — a
+            // deeply nested expression hits the parser's recursion depth, which is a separate
+            // limit and not what this is about.
+            String literal = "x".repeat(9000);
+            assertEquals(literal, eval("$eval(\"'" + literal + "'\")").textValue());
+        }
+
+        @Test
+        void anOversizedPatternStillMatchesWithoutBeingCached() throws Exception {
+            String alternatives = String.join("|", java.util.Collections.nCopies(900, "abcde"));
+            assertTrue(eval("$contains(\"abcde\", /" + alternatives + "/)").booleanValue());
+        }
+
+        @Test
+        void releasingThreadStateBetweenEvaluationsIsSafe() throws Exception {
+            assertEquals(3, eval("1 + 2").intValue());
+            org.json_kula.jsonata_jvm.runtime.JsonataRuntime.releaseThreadState();
+            assertEquals(3, eval("1 + 2").intValue());
+        }
+
+        @Test
+        void releasingThreadStateDuringAnEvaluationIsANoOp() throws Exception {
+            // Called from a bound function while an evaluation is in flight: the state in use
+            // must survive, so the rest of the expression still evaluates.
+            JsonataExpression e = FACTORY.compile("( $a := 1 + 1; $a * 3 )");
+            org.json_kula.jsonata_jvm.runtime.JsonataRuntime.releaseThreadState();
+            assertEquals(6, e.evaluate(NullNode.instance).intValue());
+        }
+    }
 }

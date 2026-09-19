@@ -174,6 +174,24 @@ final class EvaluationContext {
         return EMPTY_BINDINGS;
     }
 
+    /**
+     * Detaches this thread's evaluation state, for a thread that will not evaluate again.
+     *
+     * <p>The state is small and is cleared when an evaluation ends, but the object itself stays
+     * attached to the thread — and through its class, to the class loader that loaded this
+     * library. On a pooled thread in a container that redeploys the application, that is the
+     * classic class-loader leak (M-2). Detaching on every evaluation instead would put a
+     * ThreadLocal removal and re-insertion on the hottest path there is, so it is offered as an
+     * explicit call for the shutdown or thread-teardown hook that wants it.
+     *
+     * <p>Calling it during an evaluation is a no-op: the state in flight is still needed.
+     */
+    static void releaseThreadState() {
+        if (CURRENT.get().active) return;
+        CURRENT.remove();
+        LambdaRegistry.releaseThreadState();
+    }
+
     /** Returns {@code true} if an evaluation is currently active on this thread. */
     static boolean isActive() {
         return CURRENT.get().active;
