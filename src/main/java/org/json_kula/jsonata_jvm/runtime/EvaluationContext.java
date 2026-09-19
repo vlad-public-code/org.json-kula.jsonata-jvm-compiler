@@ -50,13 +50,15 @@ final class EvaluationContext {
         void begin(JsonataBindings bindings, long millis, Map<String, org.joni.Regex> instanceRegexes,
                    int timeoutMs, JsonataRuntime.EvalDelegate evalDelegate) {
             if (active) {
-                // Nested evaluation: suspend the enclosing one rather than overwriting it. The
-                // inner evaluation gets its own recursion budget, which is restored on the way out.
+                // Nested evaluation: suspend the enclosing one rather than overwriting it.
                 this.suspended = new Frame(this.bindings, this.millis, this.timeoutDeadline,
                         this.instanceRegexes, this.evalDelegate,
                         this.callDepth, this.pendingTailCall, this.suspended);
-                this.callDepth = null;
-                this.pendingTailCall = null;
+                // The recursion budget is NOT reset. A nested evaluation is part of the outer
+                // one, so a function that recurses through $eval has to keep counting against
+                // the same U1001 limit — with a fresh counter the limit never fired and the
+                // recursion ran until the JVM stack gave out (J-11). pendingTailCall is kept
+                // with it: it belongs to the same trampoline.
             }
             boolean nested = this.suspended != null && active;
             this.active = true;
@@ -67,7 +69,14 @@ final class EvaluationContext {
             // `$eval("$millis()") = $millis()` true, as the reference guarantees.
             this.millis = nested ? this.suspended.millis() : millis;
             this.instanceRegexes = instanceRegexes;
-            this.timeoutDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
+            // A nested evaluation can only tighten the deadline, never extend it. The inner
+            // expression is usually a cached $eval compile with no timeout of its own, so
+            // recomputing the deadline from it handed any expression that reaches $eval an
+            // unlimited budget — a timeout anyone could step around (J-11).
+            long ownDeadline = timeoutMs > 0 ? millis + timeoutMs : Long.MAX_VALUE;
+            this.timeoutDeadline = nested
+                    ? Math.min(this.suspended.timeoutDeadline(), ownDeadline)
+                    : ownDeadline;
             this.evalDelegate = evalDelegate;
         }
 
@@ -142,6 +151,16 @@ final class EvaluationContext {
             perEval.getFunctions().forEach(merged::bindFunction);
         }
         CURRENT.get().begin(merged, System.currentTimeMillis(), instanceRegexes, timeoutMs, evalDelegate);
+    }
+
+    /**
+     * The merged bindings of the evaluation in progress, or {@code null} when none is active.
+     * {@code $eval} passes these to the nested evaluation so the evaluated text can see the
+     * caller's per-evaluation bindings.
+     */
+    static JsonataBindings currentBindings() {
+        EvalState s = CURRENT.get();
+        return s.active ? s.bindings : null;
     }
 
     /** The {@code $eval} delegate of the expression being evaluated, or {@code null}. */

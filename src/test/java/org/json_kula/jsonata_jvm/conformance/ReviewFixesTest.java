@@ -3,6 +3,7 @@ package org.json_kula.jsonata_jvm.conformance;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
+import org.json_kula.jsonata_jvm.JsonataBindings;
 import org.json_kula.jsonata_jvm.JsonataEvaluationException;
 import org.json_kula.jsonata_jvm.JsonataExpression;
 import org.json_kula.jsonata_jvm.JsonataExpressionFactory;
@@ -689,6 +690,76 @@ class ReviewFixesTest {
         @Test
         void compositionStillComposes() throws Exception {
             assertEquals("HI", eval("( $f := $trim ~> $uppercase; $f(\"  hi  \") )").textValue());
+        }
+    }
+
+    /**
+     * J-11: {@code $eval} evaluates in the caller's environment, and shares the caller's
+     * recursion budget and deadline instead of getting fresh ones.
+     */
+    @Nested
+    class J11EvalEnvironment {
+
+        @Test
+        void seesABlockLocal() throws Exception {
+            assertEquals(6, eval("( $x := 5; $eval(\"$x + 1\") )").intValue());
+            assertEquals(10, eval("( $x := 5; $y := 2; $eval(\"$x * $y\") )").intValue());
+        }
+
+        @Test
+        void seesALocalFunction() throws Exception {
+            assertEquals(8, eval("( $g := function($v){$v*2}; $eval(\"$g(4)\") )").intValue());
+        }
+
+        @Test
+        void seesPerEvaluationBindings() throws Exception {
+            JsonataBindings b = new JsonataBindings();
+            b.bindValue("y", MAPPER.readTree("41"));
+            assertEquals(42, FACTORY.compile("$eval(\"$y + 1\")")
+                    .evaluate(NullNode.instance, b).intValue());
+        }
+
+        @Test
+        void aLocalShadowsABindingOfTheSameName() throws Exception {
+            JsonataBindings b = new JsonataBindings();
+            b.bindValue("x", MAPPER.readTree("1"));
+            assertEquals(5, FACTORY.compile("( $x := 5; $eval(\"$x\") )")
+                    .evaluate(NullNode.instance, b).intValue());
+        }
+
+        @Test
+        void recursionThroughEvalReachesABase() throws Exception {
+            assertEquals(0, eval("( $f := function($n){ $n = 0 ? 0 "
+                    + ": $eval(\"$f(\" & $string($n-1) & \")\") }; $f(5) )").intValue());
+        }
+
+        @Test
+        void recursionThroughEvalSharesTheBudget() {
+            // A fresh counter per nested evaluation meant U1001 never fired and the recursion
+            // ran until the JVM stack gave out.
+            assertEquals("U1001", errorCode("( $f := function($n){ $n = 0 ? 0 "
+                    + ": $eval(\"$f(\" & $string($n-1) & \")\") }; $f(500) )"));
+        }
+
+        @Test
+        void theTimeoutIsNotEscapedThroughEval() throws Exception {
+            JsonataExpression e = FACTORY.compile("$eval(\"$sum([1..3000000])\")");
+            e.setTimeout(50);
+            long started = System.currentTimeMillis();
+            JsonataEvaluationException x = assertThrows(JsonataEvaluationException.class,
+                    () -> e.evaluate(NullNode.instance));
+            assertEquals("U1001", x.getErrorCode());
+            assertTrue(System.currentTimeMillis() - started < 2000);
+        }
+
+        @Test
+        void theFrozenClockIsStillInherited() throws Exception {
+            assertTrue(eval("$eval(\"$millis()\") = $millis()").booleanValue());
+        }
+
+        @Test
+        void anExplicitContextArgumentStillWins() throws Exception {
+            assertEquals(1, eval("( $x := 1; $eval(\"$x\", {\"a\":1}) )").intValue());
         }
     }
 }

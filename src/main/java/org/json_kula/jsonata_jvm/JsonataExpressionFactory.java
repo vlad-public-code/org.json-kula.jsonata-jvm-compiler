@@ -63,7 +63,7 @@ public class JsonataExpressionFactory {
     private final JsonataRuntime.EvalDelegate evalDelegate;
 
     public JsonataExpressionFactory() {
-        this.evalDelegate = ((expr, ctx) -> {
+        this.evalDelegate = ((expr, ctx, locals) -> {
             try {
                 JsonataExpression compiled = evalCache.get(expr);
                 if (compiled == null) {
@@ -71,22 +71,52 @@ public class JsonataExpressionFactory {
                     if (evalCache.size() >= EVAL_CACHE_LIMIT) evalCache.clear();
                     evalCache.put(expr, compiled);
                 }
+                // The caller's bindings travel into the evaluated text: the reference evaluates
+                // the string in the current environment, so `$eval("$y + 1")` must see a `y`
+                // passed to evaluate(). Without them $eval ran with nothing bound and every
+                // reference to a caller variable was undefined (J-11).
+                JsonataBindings inherited = mergeForEval(JsonataRuntime.currentBindings(), locals);
                 if (ctx != null && !ctx.isMissingNode()) {
-                    return compiled.evaluate(ctx);
+                    return compiled.evaluate(ctx, inherited);
                 }
-                return compiled.evaluate(com.fasterxml.jackson.databind.node.NullNode.instance);
+                return compiled.evaluate(
+                        com.fasterxml.jackson.databind.node.NullNode.instance, inherited);
             } catch (JsonataCompilationException e) {
                 if ("T1005".equals(e.getErrorCode())) {
                     throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated");
                 }
                 throw new RuntimeEvaluationException("D3120", "The expression cannot be parsed");
             } catch (JsonataEvaluationException e) {
-                throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated");
+                // A runaway stop is not "this expression cannot be evaluated" — it is the outer
+                // evaluation's own timeout or recursion limit firing, and it has to reach the
+                // caller as U1001 rather than be reported as a fault in the evaluated text.
+                // Masking it also made it look recoverable (J-11).
+                if ("U1001".equals(e.getErrorCode()))
+                    throw new RuntimeEvaluationException("U1001", e.getMessage(), e);
+                // Keep the cause: the code and message stay D3121 as the reference reports them,
+                // but the underlying failure is otherwise unrecoverable for anyone debugging.
+                throw new RuntimeEvaluationException("D3121", "The expression cannot be evaluated", e);
             }
         });
         // Also the process-wide fallback, for hand-written expression classes that open an
         // evaluation frame without a delegate of their own.
         JsonataRuntime.registerEvalDelegate(evalDelegate);
+    }
+
+    /**
+     * Layers a {@code $eval} call site's block locals over the caller's bindings. The locals win:
+     * an inner {@code $x := …} shadows a binding of the same name, exactly as it does outside
+     * {@code $eval}.
+     */
+    private static JsonataBindings mergeForEval(JsonataBindings frame, JsonataBindings locals) {
+        if (locals == null || locals.isEmpty()) return frame;
+        if (frame == null || frame.isEmpty()) return locals;
+        JsonataBindings merged = new JsonataBindings();
+        frame.getValues().forEach(merged::bindValue);
+        frame.getFunctions().forEach(merged::bindFunction);
+        locals.getValues().forEach(merged::bindValue);
+        locals.getFunctions().forEach(merged::bindFunction);
+        return merged;
     }
 
     /**

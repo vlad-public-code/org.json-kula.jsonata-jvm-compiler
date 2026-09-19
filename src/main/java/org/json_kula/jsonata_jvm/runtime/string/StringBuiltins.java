@@ -512,13 +512,23 @@ public final class StringBuiltins {
     // =========================================================================
 
     public static JsonNode fn_eval(JsonNode expr, JsonNode context) throws RuntimeEvaluationException {
+        return fn_eval(expr, context, null);
+    }
+
+    /**
+     * {@code $eval}, with the block locals captured at the call site so the evaluated text can
+     * see them — the reference evaluates the string in the current environment.
+     */
+    public static JsonNode fn_eval(JsonNode expr, JsonNode context,
+                                   org.json_kula.jsonata_jvm.JsonataBindings locals)
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(expr)) return JsonataRuntime.MISSING;
         JsonataRuntime.EvalDelegate delegate = JsonataRuntime.getEvalDelegate();
         if (delegate == null)
             throw new RuntimeEvaluationException(null,
                     "$eval: no eval delegate registered (create a JsonataExpressionFactory first)");
         JsonNode ctx = JsonataRuntime.missing(context) ? JsonataRuntime.MISSING : context;
-        return delegate.eval(JsonataRuntime.toText(expr), ctx);
+        return delegate.eval(JsonataRuntime.toText(expr), ctx, locals);
     }
 
     // =========================================================================

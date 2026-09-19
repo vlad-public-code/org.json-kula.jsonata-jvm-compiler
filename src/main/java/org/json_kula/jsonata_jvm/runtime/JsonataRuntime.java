@@ -47,7 +47,13 @@ public final class JsonataRuntime {
      */
     @FunctionalInterface
     public interface EvalDelegate {
-        JsonNode eval(String expr, JsonNode context) throws RuntimeEvaluationException;
+        /**
+         * @param locals block locals captured at the {@code $eval} call site, or {@code null};
+         *               they are layered over the caller's own bindings.
+         */
+        JsonNode eval(String expr, JsonNode context,
+                      org.json_kula.jsonata_jvm.JsonataBindings locals)
+                throws RuntimeEvaluationException;
     }
 
     private static volatile EvalDelegate EVAL_DELEGATE = null;
@@ -83,6 +89,27 @@ public final class JsonataRuntime {
     public static EvalDelegate getEvalDelegate() {
         EvalDelegate frameDelegate = EvaluationContext.getEvalDelegate();
         return frameDelegate != null ? frameDelegate : EVAL_DELEGATE;
+    }
+
+    /**
+     * Packs the block locals captured at a {@code $eval} call site. Names and values are
+     * positional; an absent value is dropped rather than bound to MISSING.
+     */
+    public static org.json_kula.jsonata_jvm.JsonataBindings evalLocals(String[] names, JsonNode[] values) {
+        org.json_kula.jsonata_jvm.JsonataBindings b = new org.json_kula.jsonata_jvm.JsonataBindings();
+        for (int i = 0; i < names.length && i < values.length; i++) {
+            JsonNode v = values[i];
+            if (v != null && !missing(v)) b.bindValue(names[i], v);
+        }
+        return b;
+    }
+
+    /**
+     * The bindings of the evaluation in progress, or {@code null} when none is active — what
+     * {@code $eval} hands to the nested evaluation so the evaluated text can see them.
+     */
+    public static org.json_kula.jsonata_jvm.JsonataBindings currentBindings() {
+        return EvaluationContext.currentBindings();
     }
 
     // =========================================================================
@@ -1363,6 +1390,13 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_eval(JsonNode expr, JsonNode context) throws RuntimeEvaluationException {
         return StringBuiltins.fn_eval(expr, context);
+    }
+
+    /** {@code $eval} with the block locals captured at the call site (see the translator). */
+    public static JsonNode fn_eval(JsonNode expr, JsonNode context,
+                                   org.json_kula.jsonata_jvm.JsonataBindings locals)
+            throws RuntimeEvaluationException {
+        return StringBuiltins.fn_eval(expr, context, locals);
     }
 
     public static JsonNode fn_base64encode(JsonNode str) throws RuntimeEvaluationException {

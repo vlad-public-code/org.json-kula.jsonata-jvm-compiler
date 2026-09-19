@@ -121,6 +121,17 @@ final class GenState {
      * scope, meaning it should be emitted as a Java local variable reference
      * rather than a runtime binding lookup.
      */
+    /**
+     * Every local name visible at this point, innermost scope first, each appearing once.
+     * A name rebound in an inner scope is listed only with its innermost binding — the one
+     * {@link #getAlias} would resolve. Used to snapshot block locals for {@code $eval}.
+     */
+    java.util.List<String> visibleLocals() {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        for (Set<String> scope : scopeStack) names.addAll(scope);
+        return new java.util.ArrayList<>(names);
+    }
+
     boolean isLocal(String name) {
         for (Set<String> scope : scopeStack) {
             if (scope.contains(name)) return true;

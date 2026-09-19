@@ -38,6 +38,16 @@ public final class ScopeAnalyzer {
     static Set<String> computeHolderNeeded(List<AstNode> exprs, Set<String> blockLocalNames) {
         Set<String> result = new HashSet<>();
 
+        // $eval can name anything that is in scope where it is written, and the names live in a
+        // string this compiler cannot read. So a block containing $eval keeps every one of its
+        // locals in an array holder: they are then in scope for the whole block and the call site
+        // can snapshot them (J-11). Without this, a lambda that recurses through
+        // $eval("$f(...)") could not see itself — the self-reference is invisible inside the
+        // string, so `f` was never registered and the nested evaluation reported it undefined.
+        if (exprs.stream().anyMatch(ScopeAnalyzer::containsEvalCall)) {
+            result.addAll(blockLocalNames);
+        }
+
         // Build an index: variable name → position in binding list.
         List<VariableBinding> bindings = exprs.stream()
                 .filter(e -> e instanceof VariableBinding)
@@ -207,6 +217,38 @@ public final class ScopeAnalyzer {
         Set<String> bound = new HashSet<>();
         collectFreeVarsInto(node, used, bound);
         return used.contains(name);
+    }
+
+    /** Returns {@code true} if {@code node} contains a call to {@code $eval} anywhere. */
+    static boolean containsEvalCall(AstNode node) {
+        if (node == null) return false;
+        return switch (node) {
+            case AstNode.FunctionCall fc         -> (fc.isVariable() && "eval".equals(fc.name()))
+                    || fc.args().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            case AstNode.PathExpr pe             -> pe.steps().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            case AstNode.ObjectConstructor oc    -> oc.pairs().stream()
+                    .anyMatch(p -> containsEvalCall(p.key()) || containsEvalCall(p.value()));
+            case AstNode.ArrayConstructor ac     -> ac.elements().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            case AstNode.PredicateExpr pe        -> containsEvalCall(pe.source()) || containsEvalCall(pe.predicate());
+            case AstNode.ArraySubscript as       -> containsEvalCall(as.source()) || containsEvalCall(as.index());
+            case AstNode.BinaryOp bo             -> containsEvalCall(bo.left()) || containsEvalCall(bo.right());
+            case AstNode.ConditionalExpr ce      -> containsEvalCall(ce.condition()) || containsEvalCall(ce.then())
+                    || (ce.otherwise() != null && containsEvalCall(ce.otherwise()));
+            case AstNode.Block blk               -> blk.expressions().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            case AstNode.Lambda lam              -> containsEvalCall(lam.body());
+            case AstNode.LambdaCall lc           -> containsEvalCall(lc.lambda())
+                    || lc.args().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            case AstNode.VariableBinding vb      -> containsEvalCall(vb.value());
+            case AstNode.SortExpr se             -> containsEvalCall(se.source())
+                    || se.keys().stream().anyMatch(k -> containsEvalCall(k.key()));
+            case AstNode.ForceArray fa           -> containsEvalCall(fa.source());
+            case AstNode.GroupByExpr gbe         -> containsEvalCall(gbe.source())
+                    || gbe.pairs().stream().anyMatch(p -> containsEvalCall(p.key()) || containsEvalCall(p.value()));
+            case AstNode.UnaryMinus um           -> containsEvalCall(um.operand());
+            case AstNode.Parenthesized p         -> containsEvalCall(p.inner());
+            case AstNode.ChainExpr ch            -> ch.steps().stream().anyMatch(ScopeAnalyzer::containsEvalCall);
+            default                              -> false;
+        };
     }
 
     /**

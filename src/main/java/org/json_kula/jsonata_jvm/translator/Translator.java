@@ -808,8 +808,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "eval"            -> args.isEmpty()
                     ? "fn_arity_error(\"eval\", 1, 0)"
                     : args.size() == 1
-                    ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ")"
-                    : "fn_eval(" + args.get(0) + ", " + args.get(1) + ")";
+                    ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ", " + evalLocalsSnapshot(ctx) + ")"
+                    : "fn_eval(" + args.get(0) + ", " + args.get(1) + ", " + evalLocalsSnapshot(ctx) + ")";
             case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "base64decode"    -> "fn_base64decode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "encodeUrlComponent" -> "fn_encodeUrlComponent(" + ClassAssembler.oneArg(args) + ")";
@@ -1294,6 +1294,27 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                     : "fn_pipe(" + expr + ", " + fnExpr + ")";
         }
         return expr;
+    }
+
+    /**
+     * A snapshot of the block locals visible at a {@code $eval} call site.
+     *
+     * <p>Per-evaluation bindings reach the evaluated text through the frame, but a block local
+     * ({@code ( $x := 5; $eval("$x + 1") )}) is a Java local in the generated method and is
+     * invisible to it. The reference evaluates the string in the current environment, so the
+     * names are captured here by value and passed along (J-11).
+     */
+    private String evalLocalsSnapshot(GenCtx ctx) {
+        List<String> names = ctx.state.visibleLocals();
+        if (names.isEmpty()) return "(org.json_kula.jsonata_jvm.JsonataBindings) null";
+        StringBuilder keys = new StringBuilder();
+        StringBuilder values = new StringBuilder();
+        for (int i = 0; i < names.size(); i++) {
+            if (i > 0) { keys.append(", "); values.append(", "); }
+            keys.append(ClassAssembler.javaString(names.get(i)));
+            values.append(visitVariableRef(new VariableRef(names.get(i)), ctx));
+        }
+        return "evalLocals(new String[]{" + keys + "}, new JsonNode[]{" + values + "})";
     }
 
     /** Whether a chain step was written as a call, and so must be invoked rather than composed. */
