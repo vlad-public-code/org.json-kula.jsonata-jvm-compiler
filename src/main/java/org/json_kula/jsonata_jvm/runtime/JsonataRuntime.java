@@ -334,13 +334,28 @@ public final class JsonataRuntime {
             throws RuntimeEvaluationException {
         predicate = deadlineGuard(predicate);
         if (seq == null || seq == MISSING) return MISSING;
-        int size = seq.isArray() ? seq.size() : 1;
-        ArrayNode result = NF.arrayNode();
+        final boolean isArray = seq.isArray();
+        int size = isArray ? seq.size() : 1;
+        // Accumulated the way filter() does: nothing is allocated for zero or one match, which
+        // is the common shape, and the array is only created on the second.
+        ArrayNode result = null;
+        JsonNode single = null;
         for (int i = 0; i < size; i++) {
-            JsonNode elem = seq.isArray() ? seq.get(i) : seq;
-            if (matchesPredicate(predicate.apply(elem), i, size)) result.add(elem);
+            JsonNode elem = isArray ? seq.get(i) : seq;
+            if (!matchesPredicate(predicate.apply(elem), i, size)) continue;
+            if (result != null) {
+                result.add(elem);
+            } else if (single == null) {
+                single = elem;
+            } else {
+                result = NF.arrayNode(size);
+                result.add(single);
+                result.add(elem);
+                single = null;
+            }
         }
-        return unwrap(result);
+        if (result != null) return result;
+        return single != null ? single : MISSING;
     }
 
     /**
