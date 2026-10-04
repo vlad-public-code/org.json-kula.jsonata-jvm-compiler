@@ -59,7 +59,7 @@ final class BoundFunctionValue {
         final List<JsonNode> args;
         if (arity == 0) {
             args = List.of();
-        } else if (arity >= 2 && arg != null && arg.isArray()) {
+        } else if (arity >= 2 && JsonataRuntime.isPacked(arg)) {
             args = new ArrayList<>(arity);
             for (int i = 0; i < arity; i++) args.add(arg.get(i) != null ? arg.get(i) : JsonataRuntime.MISSING);
         } else {

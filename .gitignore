@@ -37,3 +37,7 @@ build/
 
 ### Claude Code ###
 .claude/settings.local.json
+
+### Design MDs ###
+docs/design/
+tools/

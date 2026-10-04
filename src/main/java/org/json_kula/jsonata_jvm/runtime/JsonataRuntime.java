@@ -47,7 +47,13 @@ public final class JsonataRuntime {
      */
     @FunctionalInterface
     public interface EvalDelegate {
-        JsonNode eval(String expr, JsonNode context) throws RuntimeEvaluationException;
+        /**
+         * @param locals block locals captured at the {@code $eval} call site, or {@code null};
+         *               they are layered over the caller's own bindings.
+         */
+        JsonNode eval(String expr, JsonNode context,
+                      org.json_kula.jsonata_jvm.JsonataBindings locals)
+                throws RuntimeEvaluationException;
     }
 
     private static volatile EvalDelegate EVAL_DELEGATE = null;
@@ -83,6 +89,39 @@ public final class JsonataRuntime {
     public static EvalDelegate getEvalDelegate() {
         EvalDelegate frameDelegate = EvaluationContext.getEvalDelegate();
         return frameDelegate != null ? frameDelegate : EVAL_DELEGATE;
+    }
+
+    /**
+     * Detaches this thread's JSONata evaluation state.
+     *
+     * <p>Call it from a thread-teardown or application-shutdown hook when a pooled thread will
+     * not evaluate again — in a container that redeploys the application, the state otherwise
+     * keeps this library's class loader reachable from the thread. It is not needed for
+     * correctness, and it is a no-op while an evaluation is in progress on the calling thread.
+     */
+    public static void releaseThreadState() {
+        EvaluationContext.releaseThreadState();
+    }
+
+    /**
+     * Packs the block locals captured at a {@code $eval} call site. Names and values are
+     * positional; an absent value is dropped rather than bound to MISSING.
+     */
+    public static org.json_kula.jsonata_jvm.JsonataBindings evalLocals(String[] names, JsonNode[] values) {
+        org.json_kula.jsonata_jvm.JsonataBindings b = new org.json_kula.jsonata_jvm.JsonataBindings();
+        for (int i = 0; i < names.length && i < values.length; i++) {
+            JsonNode v = values[i];
+            if (v != null && !missing(v)) b.bindValue(names[i], v);
+        }
+        return b;
+    }
+
+    /**
+     * The bindings of the evaluation in progress, or {@code null} when none is active — what
+     * {@code $eval} hands to the nested evaluation so the evaluated text can see them.
+     */
+    public static org.json_kula.jsonata_jvm.JsonataBindings currentBindings() {
+        return EvaluationContext.currentBindings();
     }
 
     // =========================================================================
@@ -275,49 +314,80 @@ public final class JsonataRuntime {
     }
 
     /**
-     * Dynamic filter: probes the predicate with MISSING to determine mode.
-     * If the result is a number → index subscript; otherwise → boolean filter.
-     * This implements JSONata semantics where {@code arr[expr]} can be either
-     * a positional subscript or a filter depending on what {@code expr} evaluates to.
-     * <p>
-     * Rationale: numeric expressions like {@code 5*0.2} or variable references
-     * like {@code $n} (bound to a number) are context-independent so they return
-     * the same value regardless of which element they are applied to — including
-     * MISSING. Boolean/path expressions applied to MISSING return MISSING or a
-     * boolean, never a number, so they fall through to filter mode.
+     * Dynamic filter: {@code seq[expr]} is a positional subscript or a boolean filter depending
+     * on what {@code expr} evaluates to — decided <em>per element</em>, exactly as the reference
+     * does it.
+     *
+     * <p>For each element the predicate is evaluated against that element; a numeric result (or
+     * an array of numbers) selects by <em>index</em>, so the element is kept when one of those
+     * numbers, floored and wrapped when negative, equals the element's own position. Anything
+     * else is a truthiness test.
+     *
+     * <p>Probing once with MISSING to pick a mode for the whole sequence was wrong twice over:
+     * {@code $.arr[a]} over {@code [{"a":0},{"a":1},{"a":5}]} gave the truthy elements
+     * {@code [{"a":1},{"a":5}]} where the reference gives the elements whose {@code a} equals
+     * their index, {@code [{"a":0},{"a":1}]}; and the extra evaluation with an absent context was
+     * observable for any predicate with a side effect ({@code $error}, {@code $random}, a bound
+     * function).
      */
     public static JsonNode dynamicFilter(JsonNode seq, JsonataLambda predicate)
             throws RuntimeEvaluationException {
+        predicate = deadlineGuard(predicate);
         if (seq == null || seq == MISSING) return MISSING;
-        JsonNode probe = predicate.apply(MISSING);
-        if (probe != null && probe != MISSING) {
-            if (probe.isNumber()) return subscript(seq, probe);
-            if (probe.isArray()) {
-                // Check if all elements are integers; if not, fall through to filter mode
-                boolean allInts = true;
-                for (JsonNode idx : probe) {
-                    if (!idx.isNumber()) { allInts = false; break; }
-                }
-                if (allInts) {
-                    // Multi-index subscript: a sorted set gives unique indices in natural array
-                    // order in one pass, where scanning a list for duplicates was quadratic.
-                    int size = seq.isArray() ? seq.size() : 1;
-                    java.util.TreeSet<Integer> indices = new java.util.TreeSet<>();
-                    for (JsonNode idx : probe) {
-                        int i = (int) idx.doubleValue();
-                        int actual = i < 0 ? size + i : i;
-                        if (actual >= 0 && actual < size) indices.add(actual);
-                    }
-                    ArrayNode result = NF.arrayNode();
-                    for (int i : indices) {
-                        JsonNode val = seq.isArray() ? seq.get(i) : (i == 0 ? seq : MISSING);
-                        if (!missing(val)) result.add(val);
-                    }
-                    return unwrap(result);
-                }
+        final boolean isArray = seq.isArray();
+        int size = isArray ? seq.size() : 1;
+        // Accumulated the way filter() does: nothing is allocated for zero or one match, which
+        // is the common shape, and the array is only created on the second.
+        ArrayNode result = null;
+        JsonNode single = null;
+        for (int i = 0; i < size; i++) {
+            JsonNode elem = isArray ? seq.get(i) : seq;
+            if (!matchesPredicate(predicate.apply(elem), i, size)) continue;
+            if (result != null) {
+                result.add(elem);
+            } else if (single == null) {
+                single = elem;
+            } else {
+                result = NF.arrayNode(size);
+                result.add(single);
+                result.add(elem);
+                single = null;
             }
         }
-        return filter(seq, predicate);
+        if (result != null) return result;
+        return single != null ? single : MISSING;
+    }
+
+    /**
+     * Whether a predicate result keeps the element at {@code index} of a sequence of
+     * {@code size}: a number or array of numbers matches by position, anything else by
+     * truthiness.
+     */
+    private static boolean matchesPredicate(JsonNode res, int index, int size) {
+        if (res == null || res == MISSING) return false;
+        if (res.isNumber()) return indexMatches(res, index, size);
+        if (res.isArray() && !res.isEmpty()) {
+            boolean allNumbers = true;
+            for (JsonNode n : res) {
+                if (!n.isNumber()) { allNumbers = false; break; }
+            }
+            if (allNumbers) {
+                for (JsonNode n : res) {
+                    if (indexMatches(n, index, size)) return true;
+                }
+                return false;
+            }
+        }
+        return isTruthy(res);
+    }
+
+    /** One index from a predicate result: floored, and counted from the end when negative. */
+    private static boolean indexMatches(JsonNode number, int index, int size) {
+        double d = number.doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d)) return false;
+        long i = (long) Math.floor(d);
+        if (i < 0) i += size;
+        return i == index;
     }
 
     /**
@@ -804,16 +874,24 @@ public final class JsonataRuntime {
         return missing(left) ? right : left;
     }
 
-    /** Tests whether {@code item} is contained in {@code seq}. */
+    /**
+     * Tests whether {@code item} is contained in {@code seq}.
+     *
+     * <p>The reference compares with JavaScript {@code ===}, so only scalars can match: an object
+     * or array on the left is compared by identity and a freshly built one never equals anything
+     * in the sequence. Deep equality made {@code [1,2] in [[1,2],[3]]} true where the reference
+     * says false (J-19).
+     */
     public static JsonNode in_(JsonNode item, JsonNode seq) {
         if (missing(item) || missing(seq)) return bool(false);
+        if (item.isContainerNode()) return bool(false);
         if (seq.isArray()) {
             for (JsonNode elem : seq) {
-                if (eq(item, elem).booleanValue()) return bool(true);
+                if (!elem.isContainerNode() && eq(item, elem).booleanValue()) return bool(true);
             }
             return bool(false);
         }
-        return eq(item, seq);
+        return seq.isContainerNode() ? bool(false) : eq(item, seq);
     }
 
     /**
@@ -859,10 +937,30 @@ public final class JsonataRuntime {
      * which flattens array values. Used by generated code to pack multi-arg calls to
      * user-defined lambdas so that array arguments are preserved as single elements.
      */
-    public static ArrayNode packArgs(JsonNode... elements) {
-        ArrayNode result = NF.arrayNode(elements.length);
-        for (JsonNode e : elements) result.add(e != null ? e : MISSING);
-        return result;
+    public static PackedArgs packArgs(JsonNode... elements) {
+        return PackedArgs.of(NF, elements);
+    }
+
+    /**
+     * Packs an argument tuple the runtime builds itself for a higher-order callback —
+     * {@code [value, index, array]} for {@code $map}, {@code [acc, elem, index, array]} for
+     * {@code $reduce}, {@code [a, b]} for a comparator. These are spread positionally over the
+     * callback's parameters, so they carry the same marker a call site's {@link #packArgs} does:
+     * positional spreading is what the marker means, and a plain array argument must never be
+     * mistaken for one (see {@link PackedArgs}).
+     */
+    public static PackedArgs packTuple(JsonNode... elements) {
+        return PackedArgs.of(NF, elements);
+    }
+
+    /**
+     * True when {@code node} is a call tuple that should be spread over a lambda's parameters.
+     * Generated code calls this rather than testing {@code isArray()}: an ordinary array passed
+     * as the single argument is an array, not a tuple, and spreading it bound
+     * {@code $f(["a","b"])} as two arguments (J-10).
+     */
+    public static boolean isPacked(JsonNode node) {
+        return node instanceof PackedArgs;
     }
 
     /** Creates a JSON array from the given elements, skipping missing values. */
@@ -898,7 +996,7 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < size; i++) {
             JsonNode item = seq.isArray() ? seq.get(i) : seq;
-            JsonNode elems = elemsFn.apply(NF.arrayNode().add(item).add(NF.numberNode(i)));
+            JsonNode elems = elemsFn.apply(packTuple(item, NF.numberNode(i)));
             if (elems == null || elems == MISSING) continue;
             if (elems.isArray()) {
                 for (JsonNode e : elems) {
@@ -1092,16 +1190,9 @@ public final class JsonataRuntime {
         if (missing(arg)) return MISSING;
         if (arg.isNumber() && (Double.isInfinite(arg.doubleValue()) || Double.isNaN(arg.doubleValue())))
             throw new RuntimeEvaluationException("D3001", "Attempting to invoke a non-numeric value as a numeric function");
-        // Check if containers contain Infinity values (throws D1001)
-        if (arg.isObject() || arg.isArray()) checkNoInfinity(arg);
+        // A non-finite number *inside* a container is D1001, and serializeJson raises it during
+        // the single walk it already makes — no separate scan of the tree.
         return NF.textNode(toText(arg));
-    }
-
-    private static void checkNoInfinity(JsonNode node) throws RuntimeEvaluationException {
-        if (node.isNumber() && (Double.isInfinite(node.doubleValue()) || Double.isNaN(node.doubleValue())))
-            throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
-        if (node.isArray()) { for (JsonNode e : node) checkNoInfinity(e); }
-        if (node.isObject()) { for (JsonNode v : node) checkNoInfinity(v); }
     }
 
     public static JsonNode fn_string(JsonNode arg, JsonNode prettify) throws RuntimeEvaluationException {
@@ -1326,6 +1417,13 @@ public final class JsonataRuntime {
 
     public static JsonNode fn_eval(JsonNode expr, JsonNode context) throws RuntimeEvaluationException {
         return StringBuiltins.fn_eval(expr, context);
+    }
+
+    /** {@code $eval} with the block locals captured at the call site (see the translator). */
+    public static JsonNode fn_eval(JsonNode expr, JsonNode context,
+                                   org.json_kula.jsonata_jvm.JsonataBindings locals)
+            throws RuntimeEvaluationException {
+        return StringBuiltins.fn_eval(expr, context, locals);
     }
 
     public static JsonNode fn_base64encode(JsonNode str) throws RuntimeEvaluationException {
@@ -1871,6 +1969,12 @@ public final class JsonataRuntime {
         return SequenceBuiltins.fn_sort(arg, keyFn);
     }
 
+    /** Order-by sort on one key with an explicit direction (see SequenceBuiltins.fn_sort). */
+    public static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn, boolean descending)
+            throws RuntimeEvaluationException {
+        return SequenceBuiltins.fn_sort(arg, keyFn, descending);
+    }
+
     public static JsonNode fn_sort_comparator(JsonNode arg, JsonataLambda comparatorFn)
             throws RuntimeEvaluationException {
         return SequenceBuiltins.fn_sort_comparator(arg, comparatorFn);
@@ -2047,11 +2151,11 @@ public final class JsonataRuntime {
         ArrayNode result = NF.arrayNode();
         if (seq.isArray()) {
             for (int i = 0; i < seq.size(); i++) {
-                JsonNode val = fn.apply(NF.arrayNode().add(seq.get(i)).add(NF.numberNode(i)));
+                JsonNode val = fn.apply(packTuple(seq.get(i), NF.numberNode(i)));
                 if (val != MISSING) appendToSequence(result, val);
             }
         } else {
-            JsonNode val = fn.apply(NF.arrayNode().add(seq).add(NF.numberNode(0)));
+            JsonNode val = fn.apply(packTuple(seq, NF.numberNode(0)));
             if (val != MISSING) appendToSequence(result, val);
         }
         return unwrap(result);
@@ -2068,6 +2172,10 @@ public final class JsonataRuntime {
         if (seq == null || seq == MISSING) return MISSING;
         if (!seq.isArray()) return seq.isObject() ? seq : MISSING;
         ObjectNode result = NF.objectNode();
+        // Keys whose accumulated array was built *here*. A value taken straight out of an
+        // item may be an array the caller's document owns, so appending to it in place
+        // would corrupt the input; only an array this method allocated may be extended.
+        java.util.Set<String> owned = new java.util.HashSet<>();
         for (JsonNode item : seq) {
             if (!item.isObject()) continue;
             java.util.Iterator<java.util.Map.Entry<String, JsonNode>> it = item.fields();
@@ -2079,14 +2187,15 @@ public final class JsonataRuntime {
                     result.set(k, v);
                 } else {
                     JsonNode existing = result.get(k);
-                    if (existing.isArray()) {
+                    if (existing.isArray() && owned.contains(k)) {
                         ArrayNode arr = (ArrayNode) existing;
                         if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
                     } else {
                         ArrayNode arr = NF.arrayNode();
-                        arr.add(existing);
+                        if (existing.isArray()) arr.addAll((ArrayNode) existing); else arr.add(existing);
                         if (v.isArray()) arr.addAll((ArrayNode) v); else arr.add(v);
                         result.set(k, arr);
+                        owned.add(k);
                     }
                 }
             }
@@ -2164,6 +2273,10 @@ public final class JsonataRuntime {
         return result.isEmpty() ? MISSING : result;
     }
 
+    /** The reference's wording for a delete clause that is not a string or array of strings. */
+    private static final String T2012_MESSAGE =
+            "The delete clause of the transform expression must evaluate to a string or array of strings";
+
     /**
      * Implements the JSONata transform operator {@code src ~> |location|update[,delete]|}.
      *
@@ -2177,12 +2290,14 @@ public final class JsonataRuntime {
      * @param source      the document to transform
      * @param locationFn  lambda that navigates to the nodes to update (receives the copy)
      * @param updateFn    lambda that produces the update object (receives each matched node)
-     * @param deleteFields a string or array-of-strings naming fields to delete, or MISSING
+     * @param deleteFn    lambda producing the field name(s) to delete, evaluated against each
+     *                    matched node exactly as {@code updateFn} is, or {@code null} when the
+     *                    transform has no delete clause
      */
     public static JsonNode fn_transform(JsonNode source,
                                         JsonataLambda locationFn,
                                         JsonataLambda updateFn,
-                                        JsonNode deleteFields)
+                                        JsonataLambda deleteFn)
             throws RuntimeEvaluationException {
         if (missing(source)) return MISSING;
         // Deep-copy so mutations don't affect the caller's document.
@@ -2204,17 +2319,24 @@ public final class JsonataRuntime {
                                 "T2011", "The update clause of the transform operator requires an object literal as the second operand");
                     update.fields().forEachRemaining(e -> targetObj.set(e.getKey(), e.getValue()));
                 }
-                // Delete fields.
-                if (!missing(deleteFields)) {
-                    if (!deleteFields.isTextual() && !deleteFields.isArray())
-                        throw new RuntimeEvaluationException(
-                                "T2012", "The delete clause of the transform operator is not valid, must be a string or array of strings");
-                    if (deleteFields.isTextual()) {
-                        targetObj.remove(deleteFields.textValue());
-                    } else {
-                        for (JsonNode f : deleteFields) {
-                            if (f.isTextual()) targetObj.remove(f.textValue());
-                        }
+                // Delete fields. The clause is evaluated against EACH matched node, like the
+                // update clause — `$ ~> |a|{}, del|` deletes the key that each node's own `del`
+                // field names. Evaluating it once in the outer context made it a lookup of a
+                // top-level `del` field, which is normally absent, so it deleted nothing (J-14).
+                if (deleteFn == null) continue;
+                JsonNode deleteFields = deleteFn.apply(target);
+                if (missing(deleteFields)) continue;
+                if (!deleteFields.isTextual() && !deleteFields.isArray())
+                    throw new RuntimeEvaluationException("T2012", T2012_MESSAGE);
+                if (deleteFields.isTextual()) {
+                    targetObj.remove(deleteFields.textValue());
+                } else {
+                    for (JsonNode f : deleteFields) {
+                        // A non-string element is an error, not something to skip: the reference
+                        // reports T2012 for `|a|{}, [1]|`.
+                        if (!f.isTextual())
+                            throw new RuntimeEvaluationException("T2012", T2012_MESSAGE);
+                        targetObj.remove(f.textValue());
                     }
                 }
             }
@@ -2222,12 +2344,17 @@ public final class JsonataRuntime {
         return copy;
     }
 
-    public static JsonNode fn_merge(JsonNode arr) {
+    public static JsonNode fn_merge(JsonNode arr) throws RuntimeEvaluationException {
         if (missing(arr)) return MISSING;
         ObjectNode result = NF.objectNode();
         Iterable<JsonNode> items = arr.isArray() ? arr : List.of(arr);
         for (JsonNode item : items) {
-            if (item.isObject()) item.fields().forEachRemaining(e -> result.set(e.getKey(), e.getValue()));
+            // $merge declares <a<o>:o>, so a non-object element is T0412, not something to skip:
+            // `$merge([1, {"a":1}])` was quietly {"a":1} where the reference rejects it (J-22).
+            if (!item.isObject())
+                throw new RuntimeEvaluationException(
+                        "T0412", "Argument 1 of function \"merge\" must be an array of \"objects\"");
+            item.fields().forEachRemaining(e -> result.set(e.getKey(), e.getValue()));
         }
         return result;
     }
@@ -2236,10 +2363,14 @@ public final class JsonataRuntime {
      * Returns the value associated with {@code key} in {@code obj}.
      * When {@code obj} is an array of objects, returns an array of all matching values.
      */
-    public static JsonNode fn_lookup(JsonNode obj, JsonNode key) {
+    public static JsonNode fn_lookup(JsonNode obj, JsonNode key) throws RuntimeEvaluationException {
         if (missing(obj) || missing(key)) return MISSING;
         String k = key.textValue();
-        if (k == null) return MISSING;
+        // $lookup declares <x-s:x>: a non-string key does not match the signature. Returning
+        // undefined hid the mistake instead of reporting it (J-22).
+        if (k == null)
+            throw new RuntimeEvaluationException(
+                    "T0410", "Argument 2 of function \"lookup\" does not match function signature");
         if (obj.isObject()) {
             JsonNode v = obj.get(k);
             return (v == null || v == MISSING) ? MISSING : v;
@@ -2508,7 +2639,7 @@ public final class JsonataRuntime {
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> e = it.next();
             // fn receives [value, key, object] — value first, matching JSONata spec
-            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            JsonNode triple = packTuple(e.getValue(), NF.textNode(e.getKey()), obj);
             JsonNode r = fn.apply(triple);
             if (!missing(r)) result.add(r);
         }
@@ -2878,7 +3009,82 @@ public final class JsonataRuntime {
         // Function and regex values render as the empty string (JSONata spec); LambdaNode and
         // RegexNode serialize themselves that way, so containers need no defensive copy.
         if (n instanceof LambdaNode || n instanceof RegexNode) return "";
-        return n.toString();
+        return serializeJson(n, false);
+    }
+
+    /**
+     * Serialises a container the way the reference's {@code $string} does.
+     *
+     * <p>Jackson's own {@code toString()} renders numbers with Java's formatting, which is not
+     * ECMAScript's: {@code 0.1 + 0.2} came out as {@code 0.30000000000000004} where the
+     * reference prints {@code 0.3} (its replacer rounds a non-integer to 15 significant
+     * digits), and {@code 1e21} came out as {@code 1.0E21} rather than {@code 1e+21}. Scalars
+     * were already correct because they go through {@link #numberToString}; containers did not.
+     *
+     * <p>Pretty output is {@code JSON.stringify(x, null, 2)}: two-space indent, {@code ": "}
+     * between key and value, and {@code {}} / {@code []} for the empty containers. It is
+     * produced directly rather than by rewriting a printer's output — the old
+     * {@code replace(" : ", ": ")} also rewrote every string <em>value</em> containing
+     * {@code " : "}.
+     *
+     * <p>The non-finite check happens during this single walk, so a container is not traversed
+     * twice just to look for an Infinity.
+     */
+    public static String serializeJson(JsonNode n, boolean pretty) throws RuntimeEvaluationException {
+        StringBuilder sb = new StringBuilder();
+        writeJson(n, sb, pretty, 0);
+        return sb.toString();
+    }
+
+    private static void writeJson(JsonNode n, StringBuilder sb, boolean pretty, int depth)
+            throws RuntimeEvaluationException {
+        if (n == null || n.isMissingNode()) { sb.append("null"); return; }
+        if (n instanceof LambdaNode || n instanceof RegexNode) { sb.append("\"\""); return; }
+        if (n.isNumber()) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d))
+                throw new RuntimeEvaluationException("D1001", "Numeric value out of range");
+            sb.append(numberToString(d));
+            return;
+        }
+        if (n.isArray()) {
+            if (n.isEmpty()) { sb.append("[]"); return; }
+            sb.append('[');
+            boolean first = true;
+            for (JsonNode e : n) {
+                if (!first) sb.append(',');
+                first = false;
+                newlineIndent(sb, pretty, depth + 1);
+                writeJson(e, sb, pretty, depth + 1);
+            }
+            newlineIndent(sb, pretty, depth);
+            sb.append(']');
+            return;
+        }
+        if (n.isObject()) {
+            if (n.isEmpty()) { sb.append("{}"); return; }
+            sb.append('{');
+            boolean first = true;
+            for (java.util.Map.Entry<String, JsonNode> e : n.properties()) {
+                if (!first) sb.append(',');
+                first = false;
+                newlineIndent(sb, pretty, depth + 1);
+                sb.append(NF.textNode(e.getKey()).toString());
+                sb.append(pretty ? ": " : ":");
+                writeJson(e.getValue(), sb, pretty, depth + 1);
+            }
+            newlineIndent(sb, pretty, depth);
+            sb.append('}');
+            return;
+        }
+        // Strings, booleans and null: Jackson's own rendering is already JSON.
+        sb.append(n.toString());
+    }
+
+    private static void newlineIndent(StringBuilder sb, boolean pretty, int depth) {
+        if (!pretty) return;
+        sb.append('\n');
+        for (int i = 0; i < depth * 2; i++) sb.append(' ');
     }
 
     /**

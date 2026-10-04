@@ -905,8 +905,8 @@ final class PathCodeGen {
                     ctx.state.addLocalVarWithAlias(cb.varName(), keyVar);
                     String keyExpr = sk.key().accept(t, ctx.withCtx(keyVar));
                     ctx.state.popScope();
-                    String sorted  = "fn_sort(" + sortedExpr + ", " + keyVar + " -> " + keyExpr + ")";
-                    sortedExpr = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+                    String sorted = "fn_sort(" + sortedExpr + ", " + keyVar + " -> " + keyExpr + ", " + sk.descending() + ")";
+                    sortedExpr = sorted;
                 }
                 if (from + 2 < steps.size() && steps.get(from + 2) instanceof FieldRef) {
                     // Cross-join: FieldRef after sort navigates from cross-join parent (root)
@@ -1049,8 +1049,8 @@ final class PathCodeGen {
                     SortKey sk = se.keys().get(i);
                     String tkVar = "__tk" + ctx.state.nextId();
                     String keyExpr = sk.key().accept(t, ctx.withCtx(tkVar + ".get(0)"));
-                    String sorted = "fn_sort(" + result + ", " + tkVar + " -> " + keyExpr + ")";
-                    result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+                    String sorted = "fn_sort(" + result + ", " + tkVar + " -> " + keyExpr + ", " + sk.descending() + ")";
+                    result = sorted;
                 }
                 // Compile remaining steps with tuplePos so ObjectConstructor unpacks tuples
                 return compilePathSteps(t, steps, from + 2, result, ctx.withTuplePos(idxVar));

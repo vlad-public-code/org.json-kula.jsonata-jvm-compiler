@@ -359,13 +359,13 @@ final class FunctionCallCodeGen {
                 // nothing to unpack
             } else if (lam.params().size() == 1) {
                 sb.append("    JsonNode ").append(javaNames.get(0)).append(" = ")
-                  .append(packed).append(".isArray() ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
+                  .append("isPacked(").append(packed).append(") ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
             } else {
                 sb.append("    JsonNode ").append(javaNames.get(0)).append(" = ")
-                  .append(packed).append(".isArray() ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
+                  .append("isPacked(").append(packed).append(") ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
                 for (int i = 1; i < lam.params().size(); i++) {
                     sb.append("    JsonNode ").append(javaNames.get(i)).append(" = ")
-                      .append(packed).append(".isArray() && ").append(packed).append(".size() > ").append(i)
+                      .append("isPacked(").append(packed).append(") && ").append(packed).append(".size() > ").append(i)
                       .append(" ? ").append(packed).append(".get(").append(i).append(") : MISSING;\n");
                 }
             }
@@ -433,10 +433,10 @@ final class FunctionCallCodeGen {
             StringBuilder sb = new StringBuilder();
             sb.append("(").append(packed).append(" -> {\n");
             sb.append("    JsonNode ").append(javaNames.get(0)).append(" = ")
-              .append(packed).append(".isArray() ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
+              .append("isPacked(").append(packed).append(") ? ").append(packed).append(".get(0) : ").append(packed).append(";\n");
             for (int i = 1; i < lam.params().size(); i++) {
                 sb.append("    JsonNode ").append(javaNames.get(i)).append(" = ")
-                  .append(packed).append(".isArray() && ").append(packed).append(".size() > ").append(i)
+                  .append("isPacked(").append(packed).append(") && ").append(packed).append(".size() > ").append(i)
                   .append(" && !").append(packed).append(".get(").append(i).append(").isMissingNode()")
                   .append(" ? ").append(packed).append(".get(").append(i).append(") : MISSING;\n");
             }

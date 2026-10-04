@@ -162,7 +162,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitDeferredError(DeferredError n, GenCtx ctx) {
-        return "fn_throw(\"" + n.code() + "\", \"" + n.message().replace("\"", "\\\"") + "\")";
+        // javaString, not a hand-rolled quote escape: a backslash or newline in the message
+        // (reachable through a backtick identifier) produced uncompilable Java (J-21).
+        return "fn_throw(" + ClassAssembler.javaString(n.code()) + ", "
+                + ClassAssembler.javaString(n.message()) + ")";
     }
 
     @Override
@@ -189,15 +192,45 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             String alias = ctx.state.getAlias(n.name());
             return alias != null ? alias : "$" + n.name();
         }
-        // Built-in function used as a first-class value (e.g. in a ~> chain):
-        // wrap it as an inline lambda so it can be stored / applied later.
-        String wrapper = BUILTIN_LAMBDA_WRAPPERS.get(n.name());
-        if (wrapper != null) return "lambdaNode((__bArg -> " + wrapper + "(__bArg)), 1)";
-        String binaryWrapper = BUILTIN_BINARY_LAMBDA_WRAPPERS.get(n.name());
-        if (binaryWrapper != null) return "lambdaNode((__bArg -> " + binaryWrapper
-                + "(__bArg.isArray() ? __bArg.get(0) : __bArg,"
-                + " __bArg.isArray() && __bArg.size() > 1 ? __bArg.get(1) : MISSING)), 2)";
+        // Built-in function used as a first-class value (e.g. in a ~> chain, or passed to
+        // $map): wrap it as an inline lambda so it can be stored and applied later.
+        String signature = BuiltinSignatures.signatureOf(n.name());
+        if (signature != null) return genBuiltinValue(n.name(), signature, ctx);
         return "resolveBinding(\"" + n.name() + "\")";
+    }
+
+    /**
+     * Builds the function <em>value</em> of a built-in, derived from its declared signature.
+     *
+     * <p>Two hand-maintained wrapper maps used to decide this, so only the couple of dozen
+     * built-ins someone had remembered to list were usable as values and the rest — {@code $abs},
+     * {@code $floor}, {@code $round}, {@code $join}, {@code $split}, {@code $replace},
+     * {@code $pad} and more — failed with T1006 "not a function" (J-17). Every name in
+     * {@link BuiltinSignatures} is now a value.
+     *
+     * <p>The wrapper is a synthetic lambda {@code function($p0, …, $pN){ $name($p0, …, $pN) }},
+     * so it reuses the ordinary call path: argument unpacking, context substitution and the
+     * built-in dispatch all behave exactly as they do for a call written out by hand. The arity
+     * counts only the required parameters: a higher-order built-in passes as many arguments as
+     * the callback's arity, so an optional slot would be filled with the element's index —
+     * {@code $map([1,2,3], $string)} would pass 0, 1, 2 as {@code $string}'s prettify flag.
+     */
+    private String genBuiltinValue(String name, String signature, GenCtx ctx) {
+        int arity = org.json_kula.jsonata_jvm.runtime.FunctionSignature.requiredArityOf(signature);
+        if (arity < 0) arity = 1; // variadic: the single-argument form is the useful one
+        int id = ctx.state.nextId();
+        List<String> params = new ArrayList<>(arity);
+        List<AstNode> args = new ArrayList<>(arity);
+        for (int i = 0; i < arity; i++) {
+            String param = "__bv" + id + "_" + i;
+            params.add(param);
+            args.add(new VariableRef(param));
+        }
+        Lambda lam = new Lambda(params, new FunctionCall(name, args));
+        String body = arity == 0
+                ? FunctionCallCodeGen.inlineLambda(this, lam, ctx)
+                : FunctionCallCodeGen.buildInlineLambda(this, lam, ctx);
+        return "lambdaNode(" + body + ", " + arity + ")";
     }
 
     @Override
@@ -244,12 +277,18 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitPathExpr(PathExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         return PathCodeGen.visitPathExpr(this, n, ctx);
     }
 
 
     @Override
     public String visitForceArray(ForceArray n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // $lookup is the one built-in whose answer to `[]` depends on its argument: it builds a
         // sequence for an array input and none for an object. Wrapping unconditionally would make
         // `$lookup(a,"b")[]` [1] instead of 1.
@@ -263,6 +302,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitPredicateExpr(PredicateExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         String scanned = ctx.state.fusedScanResults.get(n);
         if (scanned != null) return scanned;
         return PathCodeGen.visitPredicateExpr(this, n, ctx);
@@ -271,6 +313,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitArraySubscript(ArraySubscript n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // Direct (non-path-step) subscript — applies to the whole array/sequence.
         // Used for arr[n], $[n], (expr)[n], etc.
         // When the source chain contains a ForceArray (e.g. $#$pos[][$pos<3]^($)[-1]),
@@ -427,6 +472,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitElvisExpr(ElvisExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // left ?: right  →  elvis(left, right)
         // Using the runtime helper avoids evaluating 'left' twice.
         return "elvis(" + n.left().accept(this, ctx) + ", " + n.right().accept(this, ctx) + ")";
@@ -434,6 +482,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitCoalesceExpr(CoalesceExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // left ?? right  →  coalesce(left, right)
         // Using the runtime helper avoids evaluating 'left' twice.
         return "coalesce(" + n.left().accept(this, ctx) + ", " + n.right().accept(this, ctx) + ")";
@@ -451,6 +502,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitPartialApplication(PartialApplication n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         long phCount = n.args().stream().filter(a -> a instanceof PartialPlaceholder).count();
         int id = ctx.state.nextId();
 
@@ -754,8 +808,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             case "eval"            -> args.isEmpty()
                     ? "fn_arity_error(\"eval\", 1, 0)"
                     : args.size() == 1
-                    ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ")"
-                    : "fn_eval(" + args.get(0) + ", " + args.get(1) + ")";
+                    ? "fn_eval(" + args.get(0) + ", " + ctx.ctxVar + ", " + evalLocalsSnapshot(ctx) + ")"
+                    : "fn_eval(" + args.get(0) + ", " + args.get(1) + ", " + evalLocalsSnapshot(ctx) + ")";
             case "base64encode"    -> "fn_base64encode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "base64decode"    -> "fn_base64decode("    + ClassAssembler.ctxArg(args, contextValue) + ")";
             case "encodeUrlComponent" -> "fn_encodeUrlComponent(" + ClassAssembler.oneArg(args) + ")";
@@ -862,6 +916,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitVariableBinding(VariableBinding n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // Standalone binding: evaluate and return the value (binding is ephemeral).
         return n.value().accept(this, ctx);
     }
@@ -876,7 +933,10 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     // =========================================================================
 
     @Override
-    public String visitArrayConstructor(ArrayConstructor n, GenCtx ctx) {
+    public String visitArrayConstructor(ArrayConstructor n, GenCtx ctx0) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        final GenCtx ctx = ctx0.withTailPosition(false);
         // A `[...]` written as a path step builds a value, not a sequence: it must not flatten
         // into the sequence around it and must not collapse when it is alone in one.
         String build = ctx.inArrayConstructorStep ? "consArrayOf" : "arrayOf";
@@ -900,6 +960,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
     }
 
     private String wrapArrayElement(AstNode e, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         if (e instanceof RangeExpr re) {
             if (re.from() instanceof NumberLiteral nFrom && re.to() instanceof NumberLiteral nTo) {
                 // Constant range: use the fast RangeHolder path
@@ -916,6 +979,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitObjectConstructor(ObjectConstructor n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         if (n.pairs().isEmpty()) return "object()";
         // Literal keys are the common case and need none of the per-key checking the general
         // constructor does, so they get a form that takes the names as plain strings.
@@ -952,11 +1018,17 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitRangeExpr(RangeExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         return "range(" + n.from().accept(this, ctx) + ", " + n.to().accept(this, ctx) + ")";
     }
 
     @Override
     public String visitSortExpr(SortExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // When sort keys reference % (parent), we need parent-tracked pair/triple navigation.
         boolean hasParentRef = n.keys().stream().anyMatch(k -> ScopeAnalyzer.containsParentStep(k.key()));
         if (hasParentRef && n.source() instanceof PathExpr sourcePath) {
@@ -968,8 +1040,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             SortKey sk = n.keys().get(i);
             String keyVar  = "__sk" + ctx.state.nextId();
             String keyExpr = sk.key().accept(this, ctx.withCtx(keyVar));
-            String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ")";
-            result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+            String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ", " + sk.descending() + ")";
+            result = sorted;
         }
         return "unwrap(" + result + ")";
     }
@@ -996,6 +1068,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      * pairs (depth=1) or triples (depth=2), sorts those, then extracts the elements.
      */
     private String compileSortWithParent(SortExpr n, PathExpr sourcePath, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         int depth = maxParentDepth(n.keys());
         List<AstNode> steps = sourcePath.steps();
         if (depth < 1 || steps.size() < depth + 1) {
@@ -1006,8 +1081,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
                 SortKey sk = n.keys().get(i);
                 String keyVar  = "__sk" + ctx.state.nextId();
                 String keyExpr = sk.key().accept(this, ctx.withCtx(keyVar));
-                String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ")";
-                result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+                String sorted = "fn_sort(" + result + ", " + keyVar + " -> " + keyExpr + ", " + sk.descending() + ")";
+                result = sorted;
             }
             return "unwrap(" + result + ")";
         }
@@ -1061,8 +1136,8 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             for (String ref : parentRefExprs) pVars.add(ref.replace("TUPLE", tupleVar));
             String keyExpr = sk.key().accept(this,
                     ctx.withCtx(tupleVar + ".get(0)").withParents(pVars));
-            String sorted = "fn_sort(" + result + ", " + tupleVar + " -> " + keyExpr + ")";
-            result = sk.descending() ? "fn_reverse(" + sorted + ")" : sorted;
+            String sorted = "fn_sort(" + result + ", " + tupleVar + " -> " + keyExpr + ", " + sk.descending() + ")";
+            result = sorted;
         }
         // Extract elements from sorted tuples
         String extVar = "__tex" + ctx.state.nextId();
@@ -1071,6 +1146,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitGroupByExpr(GroupByExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // Generate a reduce that builds an object keyed by the key expression.
         String srcExpr = n.source().accept(this, ctx);
         if (n.pairs().isEmpty()) return srcExpr;
@@ -1152,6 +1230,13 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
             sb.append("    java.util.LinkedHashMap<String, com.fasterxml.jackson.databind.node.ArrayNode> ").append(grpVar)
               .append(" = new java.util.LinkedHashMap<>();\n");
             sb.append("    for (JsonNode ").append(elemVar).append(" : __items) {\n");
+            // The key expression sees the *element* under the bound name, just as the value
+            // expression below sees the group under it. Without this declaration
+            // `items@$i{$i.k: $i.v}` compiled to a reference to an undeclared `$i`.
+            if (ctx.primaryContextVar != null) {
+                sb.append("        JsonNode ").append(ctx.primaryContextVar)
+                  .append(" = ").append(elemVar).append(";\n");
+            }
             sb.append("        JsonNode __kNode").append(pi).append(" = ").append(kExpr).append(";\n");
             sb.append("        if (!__kNode").append(pi).append(".isMissingNode() && !__kNode").append(pi).append(".isTextual()) ");
             sb.append("throw new RuntimeEvaluationException(\"T1003\", \"The key of an object constructor must evaluate to a string\");\n");
@@ -1189,6 +1274,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitChainExpr(ChainExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // a ~> $f ~> $g  →  fn_pipe(fn_pipe(a, $f), $g)
         // fn_pipe handles both value-piping ($f(a)) and function composition
         // ($f ~> $g when $f is itself a lambda produces a composed lambda).
@@ -1196,9 +1284,43 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
         for (int i = 1; i < n.steps().size(); i++) {
             AstNode step = n.steps().get(i);
             String fnExpr = chainStepToLambda(step, ctx);
-            expr = "fn_pipe(" + expr + ", " + fnExpr + ")";
+            // A step WRITTEN as a call is an invocation, never a composition: `$f ~> $type()`
+            // asks for the type of $f, which is "function". fn_pipe composes whenever its left
+            // operand is itself a function value, so routing a call step through it returned a
+            // composed lambda instead of the answer (J-13). Composition stays for value steps —
+            // `$trim ~> $uppercase`, written without parentheses.
+            expr = isCallStep(step)
+                    ? "fn_apply(" + fnExpr + ", " + expr + ")"
+                    : "fn_pipe(" + expr + ", " + fnExpr + ")";
         }
         return expr;
+    }
+
+    /**
+     * A snapshot of the block locals visible at a {@code $eval} call site.
+     *
+     * <p>Per-evaluation bindings reach the evaluated text through the frame, but a block local
+     * ({@code ( $x := 5; $eval("$x + 1") )}) is a Java local in the generated method and is
+     * invisible to it. The reference evaluates the string in the current environment, so the
+     * names are captured here by value and passed along (J-11).
+     */
+    private String evalLocalsSnapshot(GenCtx ctx) {
+        List<String> names = ctx.state.visibleLocals();
+        if (names.isEmpty()) return "(org.json_kula.jsonata_jvm.JsonataBindings) null";
+        StringBuilder keys = new StringBuilder();
+        StringBuilder values = new StringBuilder();
+        for (int i = 0; i < names.size(); i++) {
+            if (i > 0) { keys.append(", "); values.append(", "); }
+            keys.append(ClassAssembler.javaString(names.get(i)));
+            values.append(visitVariableRef(new VariableRef(names.get(i)), ctx));
+        }
+        return "evalLocals(new String[]{" + keys + "}, new JsonNode[]{" + values + "})";
+    }
+
+    /** Whether a chain step was written as a call, and so must be invoked rather than composed. */
+    private static boolean isCallStep(AstNode step) {
+        return step instanceof FunctionCall
+                || (step instanceof ForceArray fa && fa.source() instanceof FunctionCall);
     }
 
     /**
@@ -1214,6 +1336,9 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
      * </ul>
      */
     private String chainStepToLambda(AstNode step, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         if (step instanceof FunctionCall fc) {
             // Prepend a PartialPlaceholder so the piped value becomes the first argument.
             java.util.List<AstNode> argsWithPipe = new java.util.ArrayList<>();
@@ -1237,27 +1362,43 @@ public final class Translator implements AstNode.Visitor<String, GenCtx> {
 
     @Override
     public String visitTransformExpr(TransformExpr n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         String srcExpr  = n.source().accept(this, ctx);
         String locVar   = "__tl" + ctx.state.nextId();
         String locExpr  = n.pattern().accept(this, ctx.withCtx(locVar));
         String updVar   = "__tu" + ctx.state.nextId();
         String updExpr  = n.update().accept(this, ctx.withCtx(updVar));
-        String delExpr  = n.delete() != null ? n.delete().accept(this, ctx) : "MISSING";
+        String delExpr  = transformDeleteCallback(n.delete(), ctx);
         return "fn_transform(" + srcExpr
                 + ", " + locVar + " -> " + locExpr
                 + ", " + updVar + " -> " + updExpr
                 + ", " + delExpr + ")";
     }
 
+    /**
+     * Compiles a transform's delete clause as a per-match callback, like the update clause, so it
+     * sees each matched node as its context (J-14). Absent clause: {@code null}.
+     */
+    private String transformDeleteCallback(AstNode delete, GenCtx ctx) {
+        if (delete == null) return "(JsonataLambda) null";
+        String delVar = "__td" + ctx.state.nextId();
+        return "(JsonataLambda) (" + delVar + " -> " + delete.accept(this, ctx.withCtx(delVar)) + ")";
+    }
+
     @Override
     public String visitTransformLambda(TransformLambda n, GenCtx ctx) {
+        // Not a tail position: a user function call here must return its value, not the
+        // TCO sentinel the trampoline unwinds (see GenCtx.isTailPosition).
+        ctx = ctx.withTailPosition(false);
         // Standalone |pattern|update[,delete]| — emit as a lambdaNode for use with ~>.
         String srcVar  = "__ts" + ctx.state.nextId();
         String locVar  = "__tl" + ctx.state.nextId();
         String locExpr = n.pattern().accept(this, ctx.withCtx(locVar));
         String updVar  = "__tu" + ctx.state.nextId();
         String updExpr = n.update().accept(this, ctx.withCtx(updVar));
-        String delExpr = n.delete() != null ? n.delete().accept(this, ctx) : "MISSING";
+        String delExpr = transformDeleteCallback(n.delete(), ctx);
         return "lambdaNode(" + srcVar + " -> fn_transform(" + srcVar
                 + ", " + locVar + " -> " + locExpr
                 + ", " + updVar + " -> " + updExpr

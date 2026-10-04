@@ -38,27 +38,39 @@ public final class IsoConverter {
     private static final java.util.regex.Pattern CALENDAR_DATE =
             java.util.regex.Pattern.compile("(\\d{4})-(\\d{2})-(\\d{2})");
 
-    public static long isoToMillis(String timestamp) throws RuntimeEvaluationException {
-        // Fast path: standard ISO 8601 instant
-        try {
-            return Instant.parse(timestamp).toEpochMilli();
-        } catch (DateTimeParseException ignored) {}
+    private static final java.util.regex.Pattern YEAR_ONLY =
+            java.util.regex.Pattern.compile("\\d{4}");
 
-        // Normalise bare ±HHMM offset to ±HH:MM and retry
-        String normalised = TimezoneUtils.normalizeOffsetInTimestamp(timestamp);
-        if (!normalised.equals(timestamp)) {
+    private static final java.util.regex.Pattern YEAR_MONTH =
+            java.util.regex.Pattern.compile("\\d{4}-\\d{2}");
+
+    public static long isoToMillis(String timestamp) throws RuntimeEvaluationException {
+        // An ISO 8601 instant always carries a 'T'. Checking for one first keeps a partial
+        // date ("2023", "2023-05", "2023-05-17") out of two Instant.parse attempts that exist
+        // only to throw - exceptions were doing the branching, and filling in a stack trace
+        // each time dominated the call (P-6).
+        if (timestamp.indexOf('T') >= 0) {
+            // Fast path: standard ISO 8601 instant
             try {
-                return Instant.parse(normalised).toEpochMilli();
+                return Instant.parse(timestamp).toEpochMilli();
             } catch (DateTimeParseException ignored) {}
+
+            // Normalise bare ±HHMM offset to ±HH:MM and retry
+            String normalised = TimezoneUtils.normalizeOffsetInTimestamp(timestamp);
+            if (!normalised.equals(timestamp)) {
+                try {
+                    return Instant.parse(normalised).toEpochMilli();
+                } catch (DateTimeParseException ignored) {}
+            }
         }
 
         // Year-only or year-month partial dates
         try {
-            if (timestamp.matches("\\d{4}")) {
+            if (YEAR_ONLY.matcher(timestamp).matches()) {
                 return LocalDate.of(Integer.parseInt(timestamp), 1, 1)
                         .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
             }
-            if (timestamp.matches("\\d{4}-\\d{2}")) {
+            if (YEAR_MONTH.matcher(timestamp).matches()) {
                 String[] parts = timestamp.split("-");
                 return LocalDate.of(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), 1)
                         .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();

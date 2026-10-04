@@ -91,7 +91,10 @@ public final class NumericBuiltins {
                     case 'o', 'O' -> 8;
                     default -> 2;
                 };
-                double d = Long.parseLong(magnitude.substring(2), radix);
+                // BigInteger, not Long: a literal wider than 64 bits is still a finite double
+                // ("0xFFFFFFFFFFFFFFFFFF" is 4.722366482869645e21), where Long.parseLong threw
+                // a raw NumberFormatException with no JSONata error code (J-18).
+                double d = new java.math.BigInteger(magnitude.substring(2), radix).doubleValue();
                 return JsonataRuntime.numNode(negative ? -d : d);
             }
             throw new RuntimeEvaluationException("D3030",

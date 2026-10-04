@@ -512,13 +512,23 @@ public final class StringBuiltins {
     // =========================================================================
 
     public static JsonNode fn_eval(JsonNode expr, JsonNode context) throws RuntimeEvaluationException {
+        return fn_eval(expr, context, null);
+    }
+
+    /**
+     * {@code $eval}, with the block locals captured at the call site so the evaluated text can
+     * see them — the reference evaluates the string in the current environment.
+     */
+    public static JsonNode fn_eval(JsonNode expr, JsonNode context,
+                                   org.json_kula.jsonata_jvm.JsonataBindings locals)
+            throws RuntimeEvaluationException {
         if (JsonataRuntime.missing(expr)) return JsonataRuntime.MISSING;
         JsonataRuntime.EvalDelegate delegate = JsonataRuntime.getEvalDelegate();
         if (delegate == null)
             throw new RuntimeEvaluationException(null,
                     "$eval: no eval delegate registered (create a JsonataExpressionFactory first)");
         JsonNode ctx = JsonataRuntime.missing(context) ? JsonataRuntime.MISSING : context;
-        return delegate.eval(JsonataRuntime.toText(expr), ctx);
+        return delegate.eval(JsonataRuntime.toText(expr), ctx, locals);
     }
 
     // =========================================================================
@@ -529,10 +539,13 @@ public final class StringBuiltins {
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (arg.isTextual()) return arg;
         try {
-            JsonNode sanitized = JsonataRuntime.sanitizeForString(arg);
-            String raw = PRETTY_WRITER.writeValueAsString(sanitized);
-            raw = raw.replace(" : ", ": ").replace("[ ]", "[]");
-            return NF.textNode(raw);
+            if (arg.isNumber() && !Double.isFinite(arg.doubleValue()))
+                throw new RuntimeEvaluationException("D3001",
+                        "Attempting to invoke a non-numeric value as a numeric function");
+            // Produced directly rather than by post-processing a printer's output: the old
+            // `raw.replace(" : ", ": ")` also rewrote string *values* containing " : ",
+            // turning $string({"a": "x : y"}, true) into {"a": "x: y"}.
+            return NF.textNode(JsonataRuntime.serializeJson(arg, true));
         } catch (RuntimeEvaluationException e) {
             throw new RuntimeEvaluationException(e.getErrorCode(), "$string: " + e.getMessage());
         } catch (Exception e) {

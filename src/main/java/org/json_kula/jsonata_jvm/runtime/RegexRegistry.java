@@ -18,6 +18,9 @@ final class RegexRegistry {
 
     private RegexRegistry() {}
 
+    /** Longest pattern worth retaining in either regex cache; see {@link #regexNode}. */
+    private static final int MAX_CACHED_PATTERN_CHARS = 4096;
+
     /** Bounded static LRU cache: fallback when no evaluation context is active (max 100 entries). */
     private static final Map<String, org.joni.Regex> REGEX_REGISTRY =
             Collections.synchronizedMap(new LinkedHashMap<>(128, 0.75f, true) {
@@ -39,6 +42,12 @@ final class RegexRegistry {
      */
     static JsonNode regexNode(String pattern, String flags) throws RuntimeEvaluationException {
         String key = pattern + "\0" + flags;
+        // Bounded by key size as well as by count: a pattern can come from the document, and
+        // the caches hold entries by count alone (M-3). An outsized pattern is compiled and
+        // used without being retained.
+        if (pattern.length() > MAX_CACHED_PATTERN_CHARS) {
+            return new RegexNode(compile(pattern, flags), pattern, flags);
+        }
         Map<String, org.joni.Regex> instanceMap = EvaluationContext.getInstanceRegexes();
         org.joni.Regex compiled;
         if (instanceMap != null) {
@@ -173,6 +182,20 @@ b", /$/)} found two matches where
 
     /** Builds a regex that matches the literal string {@code s} (no special regex chars). */
     static org.joni.Regex buildLiteralRegex(String s) {
+        // Cached like a regex literal. `$replace(x, "old", "new")` inside a $map over 100k rows
+        // compiled 100k identical regexes (P-3). The key is namespaced with a leading  so a
+        // literal string can never collide with a real "pattern flags" key.
+        String key = "literal " + s;
+        if (s.length() > MAX_CACHED_PATTERN_CHARS) return compileLiteral(s);
+        Map<String, org.joni.Regex> instanceMap = EvaluationContext.getInstanceRegexes();
+        if (instanceMap != null) return instanceMap.computeIfAbsent(key, k -> compileLiteral(s));
+        synchronized (REGEX_REGISTRY) {
+            return REGEX_REGISTRY.computeIfAbsent(key, k -> compileLiteral(s));
+        }
+    }
+
+    /** Builds the escaped-literal regex that {@link #buildLiteralRegex} caches. */
+    private static org.joni.Regex compileLiteral(String s) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

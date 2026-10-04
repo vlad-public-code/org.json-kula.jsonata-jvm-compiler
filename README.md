@@ -29,7 +29,7 @@ The same pipeline exists for JavaScript and Python — see [Sibling implementati
 <dependency>
     <groupId>io.github.vlad-public-code</groupId>
     <artifactId>jsonata-jvm-compiler</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
 </dependency>
 ```
 
@@ -53,7 +53,7 @@ List<JsonataExpression> exprs = factory.compileAll(List.of(
         "status = \"active\""));
 ```
 
-`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — **around 10× for 20 expressions** in the project's own benchmark (`JsonataBatchCompilationPerfTest`). The saving is one fixed `javac` cost per batch instead of one per expression, so how large it is depends on how many expressions the batch holds. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
+`compileAll` returns one `JsonataExpression` per input, in order, and each behaves exactly as if produced by `compile`. The difference is cost: the pipeline runs the expensive `javac` step **once for the whole batch** rather than once per expression. That step is dominated by a fixed per-invocation overhead (compiler bootstrap, platform symbol loading, classpath indexing) that a single small generated class barely adds to, so batching many expressions is dramatically faster than compiling them one at a time — **around 11× for 20 expressions** in the project's own benchmark (`JsonataBatchCompilationPerfTest`). The saving is one fixed `javac` cost per batch instead of one per expression, so how large it is depends on how many expressions the batch holds. Parsing and translation still happen per expression, so a syntactically invalid entry is reported with its index; any failure aborts the whole batch with a `JsonataCompilationException`.
 
 ### 3. Evaluate against JSON
 
@@ -467,20 +467,22 @@ jsonata-jvm-compiler compiles expressions to native JVM bytecode, so repeated ev
 ### Benchmark: [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) vs [JSONata4Java](https://github.com/IBM/JSONata4Java)
 The benchmark compiles one expression once, then runs 100,000 evaluations against the same JSON document (with a 1,000-evaluation JVM warmup before timing). The expression is a realistic analytical query covering variable bindings, nested field navigation, array filtering, aggregation functions (`$sum`, `$count`, `$average`, `$max`, `$min`, `$distinct`), string operations, arithmetic, and a conditional.
 
-Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM. Treat the round numbers as the useful precision — they are the range across four runs on 2026-09-05: 131,313 / 131,332 / 135,529 / 136,597 eval/s, at 55.0× / 54.9× / 58.9× / 57.9×.
+Measured on OpenJDK 21 (Temurin 21.0.10), Windows 11. The figures come from the side-by-side test, which warms up and times both libraries in one JVM. Re-measured 2026-09-19 after the code-review fixes: eight runs gave 76,796 / 80,122 / 82,214 / 87,634 / 91,789 / 93,316 / 95,759 eval/s and 50.3× / 52.2× / 53.3× / 53.6× / 55.4× / 60.1× / 60.5× / 63.8×, a mean of 56×. Treat the round numbers as the useful precision.
 
-The speedup does not track our own throughput exactly, because the ratio moves with JSONata4Java's as well: its 2,302–2,392 eval/s across the same four runs is the steadier of the two, but it is not constant, so the fastest run here is not quite the highest ratio.
+The speedup does not track our own throughput exactly, because the ratio moves with JSONata4Java's as well: its 1,506–1,583 eval/s across the same runs is the steadier of the two, but it is not constant, so the fastest run here is not quite the highest ratio.
 
 | Metric | [jsonata-jvm-compiler](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) | [JSONata4Java](https://github.com/IBM/JSONata4Java) |
 |---|---|---|
-| Compilation | ~790–1,120 ms | ~150–320 ms |
-| 100,000 evaluations | ~730–760 ms | ~41,800–43,400 ms |
-| Throughput | **~131,000–137,000 eval/s** | ~2,300–2,390 eval/s |
-| **Speedup** | **~55×–59× faster** | baseline |
+| Compilation | ~840–1,120 ms | ~150–320 ms |
+| 100,000 evaluations | ~1,040–1,300 ms | ~63,200–66,400 ms |
+| Throughput | **~82,000–93,000 eval/s** | ~1,500–1,580 eval/s |
+| **Speedup** | **~53×–61× faster** | baseline |
 
-These are higher than the ~126,000–129,000 eval/s the same test reported on 2026-09-04, and the gain is real rather than machine drift: widening the sequence-scan fusion pass — it now absorbs `!=`, `and`/`or` and the four ordering comparisons inside a predicate, which this benchmark uses in several places — measured **+5% to +17%, in the same direction in all six runs** of a paired A/B with both builds compiled in one session. Absolute throughput on this machine drifts by more than that between sessions, which is why the attribution comes from the paired comparison rather than from these numbers.
+These absolute figures are lower than the 131,000–137,000 eval/s recorded on 2026-09-05, and that is this machine rather than the code: run in the same session, the unchanged pre-fix build measured 82,817 / 88,476 / 89,524 eval/s, and JSONata4Java moved with it (1,506–1,583 eval/s against 2,302–2,392). The ratio, which cancels the drift, is unchanged.
 
-> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch instead of one per expression, worth [around 10× for 20 expressions](#compiling-many-expressions-at-once).
+The code-review fixes are throughput-neutral, by the paired A/B this project uses for attribution: three pairs alternating the pre-fix and fixed builds in one session gave means of 86,900 and 87,700 eval/s, with the direction flipping between pairs (base ahead in the first, fixed ahead in the second, level in the third). That is noise, not a gain — which is the claim being made, since the fixes were made for correctness. The earlier sequence-scan fusion gain (**+5% to +17%, same direction in all six runs**) was measured the same way and still stands.
+
+> Compilation is a one-time cost paid at startup. For any workload that reuses an expression more than a handful of times the throughput advantage dominates. Compiling several expressions? Use [`compileAll`](#2-compile-an-expression) — one `javac` invocation for the batch instead of one per expression, worth [around 11× for 20 expressions](#compiling-many-expressions-at-once).
 
 Where the speed comes from, beyond compiling to bytecode: literal values are hoisted to static fields rather than rebuilt inside every loop; object constructors with literal keys are filled into two parallel arrays with no hashing and no duplicate check, since the compiler already knows the keys are distinct; common aggregate shapes (`$count(x[field = "value"])`, `$sum(x.field)`) are fused into a single loop with no intermediate sequence; the several operations a block performs over one sequence are then fused again into a *single* pass that reads each field once per element rather than once per operation; and the runtime's hot type checks are single dispatches rather than chains of megamorphic calls.
 
@@ -548,8 +550,8 @@ The same parse → optimise → translate → compile pipeline exists for three 
 | Runtime | Project | Host code it generates | Speedup vs. that runtime's reference interpreter |
 |---|---|---|---|
 | JVM | **jsonata-jvm-compiler** (this project, Java 21) — [docs](https://vlad-public-code.github.io/org.json-kula.jsonata-jvm-compiler/) · [Maven Central](https://mvnrepository.com/artifact/io.github.vlad-public-code/jsonata-jvm-compiler) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata-jvm-compiler) | Java source, compiled in-memory by `javac` | ~56× vs [JSONata4Java](https://github.com/IBM/JSONata4Java) |
-| JavaScript | **jsonata2js** — [docs](https://vlad-public-code.github.io/org.json-kula.jsonata2js/) · [npm](https://www.npmjs.com/package/jsonata2js) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2js) | a JS function, loaded with `new Function` | ~53×–60× vs [`jsonata`](https://www.npmjs.com/package/jsonata) |
-| Python | **jsonata2py** — [docs](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) · [PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py) | Python source, compiled by the host `compile()` | ~54× vs [`jsonata-python`](https://pypi.org/project/jsonata-python/) |
+| JavaScript | **jsonata2js** — [docs](https://vlad-public-code.github.io/org.json-kula.jsonata2js/) · [npm](https://www.npmjs.com/package/jsonata2js) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2js) | a JS function, loaded with `new Function` | ~60× vs [`jsonata`](https://www.npmjs.com/package/jsonata) |
+| Python | **jsonata2py** — [docs](https://vlad-public-code.github.io/org.json-kula.jsonata2py/) · [PyPI](https://pypi.org/project/jsonata2py/) · [source](https://github.com/vlad-public-code/org.json-kula.jsonata2py) | Python source, compiled by the host `compile()` | ~61× vs [`jsonata-python`](https://pypi.org/project/jsonata-python/) |
 
 Each figure is the one that project measures against its own runtime's reference interpreter, on its own benchmark and its own hardware; they are not comparable across rows. All three pass the official JSONata test suite.
 

@@ -166,6 +166,32 @@ public final class FunctionSignature {
      */
     static List<ParamSpec> parseParams(String signature) {
         if (signature == null || signature.length() < 2) return null;
+        List<ParamSpec> cached = PARSED.get(signature);
+        if (cached != null) return cached == UNPARSEABLE ? null : cached;
+        List<ParamSpec> parsed = parseParamsUncached(signature);
+        // A signature is a small fixed string in practice, but it can reach here from expression
+        // text (a lambda may declare one), so the cache is capped rather than unbounded. Dropping
+        // it wholesale is fine: the entries cost one parse each to rebuild.
+        if (PARSED.size() >= PARSED_LIMIT) PARSED.clear();
+        PARSED.put(signature, parsed == null ? UNPARSEABLE : parsed);
+        return parsed;
+    }
+
+    /** Parsed signatures, so a bound-function call or value reference does not re-parse (P-4). */
+    private static final java.util.concurrent.ConcurrentHashMap<String, List<ParamSpec>> PARSED =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final int PARSED_LIMIT = 512;
+
+    /**
+     * Marker for "this signature does not parse", so the failure is cached too. A fresh instance,
+     * never {@code List.of()}: a zero-parameter signature ({@code <:n>}) parses to an empty list,
+     * and {@code List.of()} is a singleton that would compare identical to it.
+     */
+    private static final List<ParamSpec> UNPARSEABLE =
+            java.util.Collections.unmodifiableList(new ArrayList<>());
+
+    private static List<ParamSpec> parseParamsUncached(String signature) {
         if (signature.charAt(0) != '<' || signature.charAt(signature.length() - 1) != '>')
             return null;
 
@@ -201,7 +227,27 @@ public final class FunctionSignature {
      * decides how many arguments reach it (see {@link BoundFunctionValue}) and how much a built-in
      * higher-order function passes a callback.
      */
-    static int arityOf(String signature) {
+    /**
+     * The number of <em>required</em> parameters of {@code signature} — the arity a built-in has
+     * when it is used as a function value.
+     *
+     * <p>Optional parameters are excluded on purpose. A higher-order built-in passes as many
+     * arguments as the callback's arity, so counting {@code $string}'s optional {@code prettify}
+     * flag would make {@code $map([1,2,3], $string)} pass the element's index into it and fail
+     * with "Argument 2 of function $string must be a boolean".
+     */
+    public static int requiredArityOf(String signature) {
+        List<ParamSpec> params = parseParams(signature);
+        if (params == null) return LambdaNode.UNKNOWN_ARITY;
+        int required = 0;
+        for (ParamSpec p : params) {
+            if (p.variadic()) return LambdaNode.UNKNOWN_ARITY;
+            if (!p.optional()) required++;
+        }
+        return required;
+    }
+
+    public static int arityOf(String signature) {
         List<ParamSpec> params = parseParams(signature);
         if (params == null) return LambdaNode.UNKNOWN_ARITY;
         for (ParamSpec p : params) {

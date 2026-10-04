@@ -29,6 +29,23 @@ final class SequenceBuiltins {
     }
 
     static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn) throws RuntimeEvaluationException {
+        return fn_sort(arg, keyFn, false);
+    }
+
+    /**
+     * Order-by sort on one key, ascending or descending.
+     *
+     * <p>A descending order-by is a <em>stable sort on the inverted comparison</em>, not the
+     * reverse of an ascending sort. Reversing flips the relative order of ties and the
+     * direction of every lower-priority key, which the reference — whose comparator negates
+     * {@code comp} per term and then runs a stable merge sort — does not do:
+     * {@code items^(>a).n} over two items with the same {@code a} keeps their input order.
+     *
+     * <p>An absent key still sorts last in both directions: the reference's comparator
+     * {@code continue}s past the negation for an undefined operand.
+     */
+    static JsonNode fn_sort(JsonNode arg, JsonataLambda keyFn, boolean descending)
+            throws RuntimeEvaluationException {
         keyFn = JsonataRuntime.deadlineGuard(keyFn);
         if (JsonataRuntime.missing(arg)) return JsonataRuntime.MISSING;
         if (!arg.isArray()) {
@@ -84,7 +101,7 @@ final class SequenceBuiltins {
         // orderable types. Everywhere else — which is every real sort — the engine's own sort
         // is used, so the faithful comparison order costs nothing.
         if (hasBadKey || (hasNumber && hasString)) {
-            return refOrderSort(list, keys);
+            return refOrderSort(list, keys, descending);
         }
 
         final boolean allNumbers = hasNumber;
@@ -93,9 +110,10 @@ final class SequenceBuiltins {
             JsonNode kb = keys[ib];
             if (ka == JsonataRuntime.MISSING || ka.isNull()) return kb == JsonataRuntime.MISSING || kb.isNull() ? 0 : 1;
             if (kb == JsonataRuntime.MISSING || kb.isNull()) return -1;
-            if (allNumbers)
-                return Double.compare(ka.doubleValue(), kb.doubleValue());
-            return ka.textValue().compareTo(kb.textValue());
+            int c = allNumbers
+                    ? Double.compare(ka.doubleValue(), kb.doubleValue())
+                    : ka.textValue().compareTo(kb.textValue());
+            return descending ? -c : c;
         };
         List<Integer> indices = new ArrayList<>();
         for (int i = 0; i < list.size(); i++) indices.add(i);
@@ -123,26 +141,26 @@ final class SequenceBuiltins {
      * <p>Only reached when the pre-scan found a throw possible, so the engine's own sort still
      * serves every sort that can succeed.
      */
-    private static JsonNode refOrderSort(List<JsonNode> list, JsonNode[] keys)
+    private static JsonNode refOrderSort(List<JsonNode> list, JsonNode[] keys, boolean descending)
             throws RuntimeEvaluationException {
         List<Integer> indices = new ArrayList<>(list.size());
         for (int i = 0; i < list.size(); i++) indices.add(i);
-        List<Integer> sorted = mergeSort(indices, keys);
+        List<Integer> sorted = mergeSort(indices, keys, descending);
         ArrayNode result = NF.arrayNode(list.size());
         for (int idx : sorted) result.add(list.get(idx));
         return result;
     }
 
-    private static List<Integer> mergeSort(List<Integer> idx, JsonNode[] keys)
+    private static List<Integer> mergeSort(List<Integer> idx, JsonNode[] keys, boolean descending)
             throws RuntimeEvaluationException {
         if (idx.size() <= 1) return idx;
         int middle = idx.size() / 2;
-        List<Integer> left  = mergeSort(new ArrayList<>(idx.subList(0, middle)), keys);
-        List<Integer> right = mergeSort(new ArrayList<>(idx.subList(middle, idx.size())), keys);
+        List<Integer> left  = mergeSort(new ArrayList<>(idx.subList(0, middle)), keys, descending);
+        List<Integer> right = mergeSort(new ArrayList<>(idx.subList(middle, idx.size())), keys, descending);
         List<Integer> merged = new ArrayList<>(idx.size());
         int li = 0, ri = 0;
         while (li < left.size() && ri < right.size()) {
-            if (comesAfter(keys[left.get(li)], keys[right.get(ri)])) merged.add(right.get(ri++));
+            if (comesAfter(keys[left.get(li)], keys[right.get(ri)], descending)) merged.add(right.get(ri++));
             else merged.add(left.get(li++));
         }
         while (li < left.size())  merged.add(left.get(li++));
@@ -151,7 +169,8 @@ final class SequenceBuiltins {
     }
 
     /** The reference's order-by comparator: true when {@code a} sorts after {@code b}. */
-    private static boolean comesAfter(JsonNode a, JsonNode b) throws RuntimeEvaluationException {
+    private static boolean comesAfter(JsonNode a, JsonNode b, boolean descending)
+            throws RuntimeEvaluationException {
         boolean aMissing = a == JsonataRuntime.MISSING;
         boolean bMissing = b == JsonataRuntime.MISSING;
         if (aMissing) return !bMissing;   // an absent key sorts last
@@ -166,8 +185,11 @@ final class SequenceBuiltins {
             throw new RuntimeEvaluationException("T2007",
                     "The items in the order-by clause must evaluate to a single type, either all string or all number");
         }
-        return a.isNumber() ? a.doubleValue() > b.doubleValue()
-                            : a.textValue().compareTo(b.textValue()) > 0;
+        // The reference negates `comp` only when it is non-zero, so equal keys never swap in
+        // either direction — which is what keeps a descending sort stable.
+        int c = a.isNumber() ? Double.compare(a.doubleValue(), b.doubleValue())
+                             : Integer.signum(a.textValue().compareTo(b.textValue()));
+        return descending ? c < 0 : c > 0;
     }
 
     /**
@@ -181,20 +203,43 @@ final class SequenceBuiltins {
         final JsonataLambda compare = JsonataRuntime.deadlineGuard(comparatorFn);
         List<JsonNode> list = new ArrayList<>();
         for (JsonNode e : arg) list.add(e);
-        // The comparator answers one question — "should $a come after $b?" — so the mirrored
-        // question has to be asked as well to tell "equal" from "before": answering -1 for both
-        // makes the comparator inconsistent, and equal elements then get reordered rather than
-        // keeping their input order (the official suite's $sort-by-price case proves it).
-        // The mirror is only needed when the first answer is falsy, so an already-ordered pair
-        // still costs one call.
-        Comparator<JsonNode> cmp = (a, b) -> {
-            if (JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(a).add(b)))) return 1;
-            return JsonataRuntime.isTruthy(compare.apply(NF.arrayNode().add(b).add(a))) ? -1 : 0;
-        };
-        list.sort(cmp);
-        ArrayNode result = NF.arrayNode();
-        list.forEach(result::add);
+        // The reference's own merge sort, driven by the single question the comparator answers:
+        // "should $a come after $b?". List.sort needed a three-way answer, so the mirrored
+        // question had to be asked too — which cost a second call per unordered pair and, worse,
+        // handed TimSort a comparator a user is free to make inconsistent ($random() > 0.5, or
+        // any non-transitive rule). TimSort detects that and throws "Comparison method violates
+        // its general contract", surfacing as a code-less evaluation failure (J-20). A merge
+        // sort asks each pair once, never validates transitivity, keeps equal elements in input
+        // order, and compares in the same order the reference does.
+        List<JsonNode> sorted = mergeSortNodes(list,
+                (a, b) -> JsonataRuntime.isTruthy(compare.apply(JsonataRuntime.packTuple(a, b))));
+        ArrayNode result = NF.arrayNode(sorted.size());
+        sorted.forEach(result::add);
         return result;
+    }
+
+    /** "Does {@code a} sort after {@code b}?" — the one question a JSONata comparator answers. */
+    @FunctionalInterface
+    private interface SortsAfter {
+        boolean test(JsonNode a, JsonNode b) throws RuntimeEvaluationException;
+    }
+
+    /** A stable merge sort over nodes, ordered by {@code after}; mirrors {@link #mergeSort}. */
+    private static List<JsonNode> mergeSortNodes(List<JsonNode> items, SortsAfter after)
+            throws RuntimeEvaluationException {
+        if (items.size() <= 1) return items;
+        int middle = items.size() / 2;
+        List<JsonNode> left  = mergeSortNodes(new ArrayList<>(items.subList(0, middle)), after);
+        List<JsonNode> right = mergeSortNodes(new ArrayList<>(items.subList(middle, items.size())), after);
+        List<JsonNode> merged = new ArrayList<>(items.size());
+        int li = 0, ri = 0;
+        while (li < left.size() && ri < right.size()) {
+            if (after.test(left.get(li), right.get(ri))) merged.add(right.get(ri++));
+            else merged.add(left.get(li++));
+        }
+        while (li < left.size())  merged.add(left.get(li++));
+        while (ri < right.size()) merged.add(right.get(ri++));
+        return merged;
     }
 
     /**
@@ -313,7 +358,7 @@ final class SequenceBuiltins {
         ArrayNode arrNode = NF.arrayNode();
         items.forEach(arrNode::add);
         for (int i = start; i < items.size(); i++) {
-            acc = fn.apply(NF.arrayNode().add(acc).add(items.get(i)).add(NF.numberNode(i)).add(arrNode));
+            acc = fn.apply(JsonataRuntime.packTuple(acc, items.get(i), NF.numberNode(i), arrNode));
         }
         return acc;
     }
@@ -330,7 +375,7 @@ final class SequenceBuiltins {
         if (arr.isArray()) arr.forEach(items::add); else items.add(arr);
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < items.size(); i++) {
-            JsonNode val = fn.apply(NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr));
+            JsonNode val = fn.apply(JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arr));
             if (!JsonataRuntime.missing(val)) result.add(val);
         }
         return result;
@@ -349,7 +394,7 @@ final class SequenceBuiltins {
         ArrayNode result = NF.arrayNode();
         for (int i = 0; i < items.size(); i++) {
             if (JsonataRuntime.isTruthy(predicate.apply(
-                    NF.arrayNode().add(items.get(i)).add(NF.numberNode(i)).add(arr))))
+                    JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arr))))
                 result.add(items.get(i));
         }
         return JsonataRuntime.unwrap(result);
@@ -401,8 +446,7 @@ final class SequenceBuiltins {
         items.forEach(arrNode::add);
         JsonNode found = null;
         for (int i = 0; i < items.size(); i++) {
-            com.fasterxml.jackson.databind.node.ArrayNode tuple = NF.arrayNode()
-                    .add(items.get(i)).add(NF.numberNode(i)).add(arrNode);
+            JsonNode tuple = JsonataRuntime.packTuple(items.get(i), NF.numberNode(i), arrNode);
             if (JsonataRuntime.isTruthy(predicate.apply(tuple))) {
                 if (found != null)
                     throw new RuntimeEvaluationException("D3138", "$single: more than one match found");
@@ -426,7 +470,7 @@ final class SequenceBuiltins {
         ObjectNode result = NF.objectNode();
         for (Iterator<Map.Entry<String, JsonNode>> it = obj.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> e = it.next();
-            JsonNode triple = NF.arrayNode().add(e.getValue()).add(NF.textNode(e.getKey())).add(obj);
+            JsonNode triple = JsonataRuntime.packTuple(e.getValue(), NF.textNode(e.getKey()), obj);
             if (JsonataRuntime.isTruthy(fn.apply(triple))) result.set(e.getKey(), e.getValue());
         }
         return result.isEmpty() ? JsonataRuntime.MISSING : result;
