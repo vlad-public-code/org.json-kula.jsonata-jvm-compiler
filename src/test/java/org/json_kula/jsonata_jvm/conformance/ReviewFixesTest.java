@@ -743,8 +743,11 @@ class ReviewFixesTest {
 
         @Test
         void theTimeoutIsNotEscapedThroughEval() throws Exception {
-            JsonataExpression e = FACTORY.compile("$eval(\"$sum([1..3000000])\")");
-            e.setTimeout(50);
+            // A lambda body is where the deadline is checked, so the inner work must go through one;
+            // a bare $sum over a range has no check and can finish inside the timeout on a fast machine.
+            JsonataExpression e = FACTORY.compile(
+                    "$eval(\"$sum($map([1..3000000], function($v){ $v * $v }))\")");
+            e.setTimeout(20);
             long started = System.currentTimeMillis();
             JsonataEvaluationException x = assertThrows(JsonataEvaluationException.class,
                     () -> e.evaluate(NullNode.instance));
