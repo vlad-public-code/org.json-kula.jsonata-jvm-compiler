@@ -33,7 +33,8 @@ public class TimeoutTest {
 
     @Test
     void largeRangeIsInterrupted() throws Exception {
-        JsonataExpression expr = FACTORY.compile("$count([1..9999999])");
+        JsonataExpression expr = FACTORY.compile(
+                "$count($map([1..9999999], function($v){ $v * $v }))");
         expr.setTimeout(10);
         JsonataEvaluationException ex = assertThrows(JsonataEvaluationException.class,
                 () -> expr.evaluate(MissingNode.getInstance()));
